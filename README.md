@@ -6,7 +6,7 @@ Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm tro
 
 | Dự án | Mô tả | Hướng dẫn |
 | --- | --- | --- |
-| Chưa có | Thêm một dòng cho mỗi dự án mới | — |
+| [Focus Monitor](focus-monitor/) | Demo nhận diện mất focus, trang bị ẩn, rời trang và dấu hiệu cần xem xét | [README](focus-monitor/README.md) |
 
 Khi thêm dự án, cập nhật bảng này và đặt liên kết đến `README.md` của dự án.
 
