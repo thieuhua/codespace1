@@ -1,1 +1,18 @@
-# codespace1
+# Shared Codespace
+
+Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm trong một thư mục con riêng ở thư mục gốc; không đặt mã nguồn dự án trực tiếp tại đây.
+
+## Dự án
+
+| Dự án | Mô tả | Hướng dẫn |
+| --- | --- | --- |
+| Chưa có | Thêm một dòng cho mỗi dự án mới | — |
+
+Khi thêm dự án, cập nhật bảng này và đặt liên kết đến `README.md` của dự án.
+
+## Điều hướng
+
+- Bắt đầu tại README này để chọn dự án.
+- Đọc `README.md` trong thư mục dự án trước khi làm việc; README đó cần nêu mục đích, cách cài đặt/chạy/kiểm thử và liên kết đến các phần chính.
+- Các thư mục con có nội dung hoặc cấu trúc đáng kể nên có README riêng mô tả nội dung và liên kết đến thư mục con liên quan. Không cần README cho từng thư mục mã nguồn nhỏ.
+- Đọc thêm `AGENTS.md` để biết các quy tắc áp dụng cho toàn workspace.
