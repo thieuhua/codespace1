@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FocusLab — Demo theo dõi phiên</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f2f6f3;color:#193b32;font:16px system-ui,sans-serif}main{max-width:1080px;margin:40px auto;padding:24px}h1{font-size:clamp(28px,4vw,42px);margin:10px 0}p{line-height:1.6}.muted{color:#61786d}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0}button,a{font:inherit;padding:11px 16px;border:1px solid #cadbd0;border-radius:9px;background:white;color:#193b32;cursor:pointer;text-decoration:none}button.primary{background:#147653;color:white}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible,textarea:focus-visible{outline:3px solid #5bb79b;outline-offset:3px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}.card{padding:24px;background:white;border:1px solid #dbe5de;border-radius:14px}.stats strong{display:block;font-size:30px;margin-top:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}h2{font-size:20px;margin-top:0}label{display:block;margin:16px 0}textarea{font:inherit;width:100%;min-height:180px;border:1px solid #cadbd0;border-radius:8px;padding:14px}.note{margin-top:20px;padding:16px;background:#fff5db;border-radius:10px;color:#745b21;font-size:14px}#log{max-height:370px;overflow:auto;padding-left:20px}#log li{padding:10px 0;border-bottom:1px solid #edf3ef;font-size:14px}.warning{color:#a06016}#message{min-height:24px}@media(max-width:700px){.grid,.stats{grid-template-columns:1fr}main{margin:10px auto}}
+</style>
+</head>
+<body><main id="app">
+<small class="muted">FOCUSLAB / BROWSER EVENT DEMO</small><h1>Theo dõi phiên làm bài</h1><p class="muted">Thử chuyển tab, chuyển cửa sổ hoặc sao chép/dán để xem nhật ký.</p>
+<div class="actions"><button id="start" class="primary">Bắt đầu</button><button id="stop" disabled>Kết thúc</button><button id="full">Toàn màn hình</button><button id="export">Xuất JSON</button><button id="clear">Xóa nhật ký</button></div><p id="message" role="status" aria-live="polite"></p>
+<div class="stats"><div class="card">Trạng thái<strong id="status">Chưa bắt đầu</strong></div><div class="card">Lần mất focus<strong id="count">0</strong></div><div class="card">Thời gian mất focus<strong id="duration">0 giây</strong></div></div>
+<div class="grid"><section class="card"><h2>Khu vực làm bài thử</h2><p>Vì sao mất focus không đồng nghĩa với gian lận?</p><label for="answer">Câu trả lời</label><textarea id="answer" disabled placeholder="Nhập câu trả lời…"></textarea><label><input id="guard" type="checkbox"> Yêu cầu xác nhận khi rời trang</label><div class="actions"><a href="?other=1">Thử chuyển trang →</a></div><p class="muted">Chỉ ghi loại thao tác, không đọc nội dung clipboard hoặc lưu câu trả lời.</p></section><section class="card"><h2>Nhật ký sự kiện</h2><ol id="log" reversed aria-label="Nhật ký sự kiện"></ol></section></div>
+<div class="note">Nhật ký chỉ lưu trong tab trình duyệt này, không gửi đến máy chủ. Mất focus hoặc sao chép/dán là dấu hiệu cần xem xét, không đủ để kết luận gian lận. Demo không biết trang đích; không phát hiện đáng tin cậy AI, DevTools, chụp màn hình hoặc thiết bị thứ hai. Nhật ký phía máy khách có thể bị sửa/xóa. Sự kiện rời trang có thể không chạy khi trình duyệt bị đóng đột ngột.</div></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), KEY='focuslab-v1';
+const fresh=()=>({active:false,events:[],count:0,awaySince:null,awayMs:0});
+let state=fresh();
+try{const saved=JSON.parse(sessionStorage.getItem(KEY));if(saved&&Array.isArray(saved.events))state=saved;}catch{}
+function save(){try{sessionStorage.setItem(KEY,JSON.stringify(state));}catch{if($('message'))$('message').textContent='Không thể lưu phiên; hãy xuất JSON trước khi rời trang.';}}
+function awayMs(){return state.awayMs+(state.awaySince===null?0:Math.max(0,Date.now()-state.awaySince));}
+function render(){if(!$('status'))return;$('status').textContent=state.active?(document.hidden||!document.hasFocus()?'Mất focus':'Đang theo dõi'):'Chưa theo dõi';$('count').textContent=state.count;$('duration').textContent=Math.floor(awayMs()/1000)+' giây';$('start').disabled=state.active;$('stop').disabled=!state.active;$('clear').disabled=state.active;$('answer').disabled=!state.active;$('log').replaceChildren();for(const event of [...state.events].reverse()){const li=document.createElement('li');li.textContent=new Date(event.time).toLocaleTimeString('vi-VN')+' — '+event.label;if(event.review)li.className='warning';$('log').append(li);}}
+function record(label,review=false){if(!state.active)return;state.events.push({time:new Date().toISOString(),label,review});save();render();}
+function updateFocus(){if(!state.active)return;const away=document.hidden||!document.hasFocus();if(away&&state.awaySince===null){state.awaySince=Date.now();state.count++;}else if(!away&&state.awaySince!==null){state.awayMs=awayMs();state.awaySince=null;}save();render();}
+$('start').onclick=()=>{state=fresh();state.active=true;record('Bắt đầu phiên');updateFocus();$('message').textContent='Đang theo dõi. Thử chuyển tab rồi quay lại.';};
+$('stop').onclick=()=>{state.awayMs=awayMs();state.awaySince=null;record('Kết thúc phiên');state.active=false;save();render();$('message').textContent='Đã kết thúc phiên.';};
+$('clear').onclick=()=>{state=fresh();save();render();$('message').textContent='Đã xóa nhật ký.';};
+window.addEventListener('blur',()=>{updateFocus();record('Cửa sổ mất focus');});
+window.addEventListener('focus',()=>{updateFocus();record('Cửa sổ có focus trở lại');});
+document.addEventListener('visibilitychange',()=>{updateFocus();record(document.hidden?'Trang bị ẩn: có thể đổi tab hoặc thu nhỏ cửa sổ':'Trang hiển thị trở lại');});
+for(const [type,label] of [['copy','Sao chép'],['cut','Cắt'],['paste','Dán']])$('answer').addEventListener(type,()=>record(label+' trong khu vực làm bài',true));
+$('full').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}catch{$('message').textContent='Trình duyệt hoặc khung xem trước không hỗ trợ toàn màn hình.';}};
+document.addEventListener('fullscreenchange',()=>{const full=Boolean(document.fullscreenElement);record(full?'Bật toàn màn hình':'Thoát toàn màn hình',!full);});
+window.addEventListener('beforeunload',event=>{if(!state.active||!$('guard')?.checked)return;record('Yêu cầu rời trang — chưa xác nhận đã rời');event.preventDefault();event.returnValue='';});
+window.addEventListener('pagehide',()=>record('Rời trang / chuyển trang — không biết trang đích',true));
+window.addEventListener('pageshow',event=>{if(event.persisted&&state.active){record('Quay lại trang');updateFocus();}});
+$('export').onclick=()=>{const report={...state,awayMs:awayMs(),exportedAt:new Date().toISOString()};const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='focuslab.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+if(state.active){state.awayMs=awayMs();state.awaySince=null;record('Phiên bị gián đoạn; kết thúc khi tải lại trang');state.active=false;save();}
+if(new URLSearchParams(location.search).has('other')){$('app').innerHTML='<section class="card"><h1>Đã chuyển trang</h1><p>Quay lại để xem nhật ký phiên trước.</p><a href="?">← Quay lại demo</a></section>';}else{render();setInterval(()=>{$('duration').textContent=Math.floor(awayMs()/1000)+' giây';},1000);}
+</script></body></html>
