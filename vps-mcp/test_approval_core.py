@@ -94,7 +94,7 @@ class ApprovalCoreTests(unittest.TestCase):
 
     def test_malformed_intent_rejected(self):
         with self.assertRaises(ValueError):
-            replace(self.intent, command="bad\\x00command")
+            replace(self.intent, command="bad" + chr(0) + "command")
         with self.assertRaises(ValueError):
             replace(self.intent, timeout_seconds=91)
         with self.assertRaises(ValueError):
