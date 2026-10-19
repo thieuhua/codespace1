@@ -30,3 +30,7 @@ jobs:
         run: python -m compileall -q server.py
       - name: MCP protocol smoke test
         run: python smoke_test.py
+      - name: Approval core unit tests (non-production)
+        run: python -m unittest -v test_approval_core.py
+      - name: Linux subaccount executor tests (non-production)
+        run: python -m unittest -v test_linux_accounts.py
