@@ -1,10 +1,27 @@
-# VPS MCP Server
+# VPS MCP Gateway
 
-Runs **on Debian 12 VPS**, not in Codespaces. Codespace is only a source-code editor. This initial implementation exposes bounded file operations, git status and a test runner under one workspace; it deliberately does **not** expose arbitrary shell execution or root access.
+The MCP server runs on the **Debian 12 VPS**, not GitHub Codespaces. Codespace is used only to edit and test code. The server is connected to ChatGPT through the OpenAI Secure MCP Tunnel, which runs separately as `vps-mcp-tunnel.service`.
 
-## Setup on VPS
+## Tools
 
-Prerequisites: Python 3.11+, a non-root account, a checkout of this repository, and a workspace directory owned by the service user.
+- `list_files`, `read_file`, `write_file`: UTF-8 files in `MCP_WORKSPACE`.
+- `git_status`: Git status in a workspace repository.
+- `run_tests`: limited preset test commands.
+- `run_shell(command, path=".", timeout_seconds=30)`: non-interactive Bash command executed on the VPS **as the unprivileged `thieuhua` service user**, not root.
+
+The shell tool allows arbitrary Bash syntax and commands. Its **initial working directory** must be under `MCP_WORKSPACE`; a shell command can still change directories and access files that the systemd service is permitted to access. Do not mistake cwd validation for filesystem confinement.
+
+Shell limits: command size at most 8 KiB, timeout 1–90 seconds, combined output retains the last 64 KiB, process group killed on timeout or after 1 MiB generated output, stdin disabled, no interactive TTY. The execution environment is minimized; shell commands are not recorded verbatim in system logs (a short SHA-256 fingerprint is recorded instead).
+
+## Security
+
+The systemd unit uses `User=thieuhua`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=read-only` and restricts writable paths to `/home/thieuhua/code`. It masks the directories containing the tunnel runtime API key (`~/.config/vps-mcp`) and SSH private keys (`~/.ssh`). **This is not a general-purpose security sandbox**; shell execution is powerful. Use ChatGPT's permission prompts to review sensitive actions. Do not expose the local MCP endpoint directly to the Internet.
+
+Other services (Combat Simulator, Nginx, WireGuard, OpenAI Tunnel) should remain unchanged. `run_shell` cannot elevate to root automatically.
+
+## First-time setup
+
+Prerequisites: Python 3.11+, a non-root user, and a checkout of this repository.
 
 ```bash
 cd ~/code/codespace1/vps-mcp
@@ -13,26 +30,35 @@ python3 -m venv .venv
 MCP_WORKSPACE=/home/thieuhua/code .venv/bin/python server.py
 ```
 
-The server binds to `127.0.0.1:8765` and uses the Streamable HTTP endpoint `/mcp`. It is **not externally accessible** until a reverse proxy is configured.
+The Streamable HTTP endpoint is `http://127.0.0.1:8765/mcp`. The OpenAI tunnel client forwards traffic from ChatGPT to this endpoint. No inbound public port is needed.
 
-## Secure exposure
+## Updating an existing VPS installation
 
-Use an existing HTTPS domain with a dedicated route, e.g. `https://mcp.example.com/mcp`. Terminate TLS at Nginx and enforce authentication **before** forwarding to `http://127.0.0.1:8765`. Use an identity-aware proxy or OAuth-compatible MCP gateway; do not publish this service with no authentication. Restrict incoming traffic, apply rate limits, and do not log credentials.
-
-A plain bearer token checked only by an arbitrary reverse-proxy header is not sufficient unless the proxy actually validates that token. Register the HTTPS URL in ChatGPT as a custom MCP app only after authentication is configured and the product supports the chosen auth scheme. ChatGPT cannot connect simply because this repository exists.
-
-## Deployment
-
-Copy `deploy/vps-mcp.service` to `/etc/systemd/system/vps-mcp.service`, update paths and account as necessary, then:
+From an SSH session as `thieuhua`:
 
 ```bash
+cd ~/code/codespace1
+git fetch origin feat/vps-mcp-gateway
+git switch --detach origin/feat/vps-mcp-gateway
+cd vps-mcp
+.venv/bin/pip install -r requirements.txt
+sudo install -m 644 deploy/vps-mcp.service /etc/systemd/system/vps-mcp.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now vps-mcp
-sudo systemctl status vps-mcp
+sudo systemctl restart vps-mcp
+sudo systemctl is-active vps-mcp
 ```
 
-Never put secrets in Git, and never run the service as root. Keep the workspace limited to intended projects. The workspace is writable; back up valuable files and review changes before enabling writes for external clients.
+**Note:** an existing ignored/untracked `.venv` is retained. If the checkout has local tracked changes, back them up and reconcile them first instead of overwriting. Updating the MCP server does not require restarting `vps-mcp-tunnel`. The ChatGPT plugin may need a refresh to discover the new tool.
 
-## Notes
+## Testing
 
-The initial MCP tools are `list_files`, `read_file`, `write_file`, `git_status`, `run_tests`. The server is **not yet deployed** and no public URL or ChatGPT app connection has been established.
+```bash
+cd vps-mcp
+.venv/bin/python smoke_test.py
+```
+
+GitHub Actions runs the same protocol smoke test when this project changes. The test checks startup, MCP tool listing, read/write, path traversal rejection, shell exit codes, timeout enforcement, and output truncation.
+
+## Scope
+
+Code is developed in `thieuhua/codespace1`, branch `feat/vps-mcp-gateway`. Deploy only after GitHub Actions passes. Shell calls execute as the service user with systemd restrictions; additional host-level access would require separate, explicit authorization.
