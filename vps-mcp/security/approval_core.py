@@ -7,6 +7,7 @@ The agent-facing gateway must never be able to open this database.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import asdict, dataclass
 import hashlib
 import hmac
@@ -61,7 +62,7 @@ class ApprovalStore:
     def __init__(self, db_path: str | Path, *, clock: Callable[[], float] = time.time):
         self.db_path = str(db_path)
         self.clock = clock
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS approvals (
                     id TEXT PRIMARY KEY,
@@ -84,7 +85,7 @@ class ApprovalStore:
         return conn
 
     def _transaction(self, fn):
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             result = fn(conn)
             conn.commit()
@@ -106,7 +107,7 @@ class ApprovalStore:
 
     def get_request(self, request_id: str) -> dict | None:
         """Nonsecret review data. Do not expose approval secrets via this method."""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT intent_json, state, requested_at, request_expires_at FROM approvals WHERE id=?",
                 (request_id,),
