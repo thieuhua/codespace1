@@ -55,7 +55,7 @@ async def check():
                     assert result.isError, "Shell timeout cap must be enforced"
                     result = await session.call_tool("run_shell", {"command": "sleep 5", "timeout_seconds": 1})
                     assert not result.isError and "timed_out=true" in str(result), result
-                    result = await session.call_tool("run_shell", {"command": "python3 -c 'print(\\\"x\\\" * 70000)' "})
+                    result = await session.call_tool("run_shell", {"command": "printf '%70000s' x"})
                     assert not result.isError and "truncated=true" in str(result), result
                     print("PASS: initialize, list tools, read, write, traversal rejection, shell exit, timeout and output cap")
         finally:
