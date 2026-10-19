@@ -1,5 +1,9 @@
 # VPS MCP Gateway
 
+## Permission-system design (not yet deployed)
+
+The proposed hybrid approval and immutable MCP self-protection architecture is described in [ADR-001](docs/ADR-001-hybrid-approval.md). This branch contains a **standalone, unconnected** one-use approval token core and unit tests. It does not change the live `run_shell`, enforce policy on the VPS, or grant privileged access.
+
 The MCP server runs on the **Debian 12 VPS**, not GitHub Codespaces. Codespace is used only to edit and test code. The server is connected to ChatGPT through the OpenAI Secure MCP Tunnel, which runs separately as `vps-mcp-tunnel.service`.
 
 ## Tools
