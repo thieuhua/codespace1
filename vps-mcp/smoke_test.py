@@ -36,7 +36,7 @@ async def check():
                     await session.initialize()
                     tools = await session.list_tools()
                     names = {tool.name for tool in tools.tools}
-                    assert {"list_files", "read_file", "write_file", "git_status", "run_tests"} <= names, names
+                    assert {"list_files", "read_file", "write_file", "git_status", "run_tests", "run_shell"} <= names, names
                     result = await session.call_tool("read_file", {"path": "hello.txt"})
                     assert "hello" in str(result), result
                     result = await session.call_tool("write_file", {"path": "out.txt", "content": "ok"})
@@ -44,7 +44,20 @@ async def check():
                     assert pathlib.Path(root, "out.txt").read_text() == "ok"
                     result = await session.call_tool("read_file", {"path": "../outside"})
                     assert result.isError, "Path traversal must be rejected"
-                    print("PASS: initialize, list tools, read, write, path traversal rejection")
+                    result = await session.call_tool("run_shell", {"command": "printf 'shell-ok\\n'; pwd"})
+                    assert not result.isError and "shell-ok" in str(result), result
+                    assert root in str(result) and "exit=0" in str(result), result
+                    result = await session.call_tool("run_shell", {"command": "exit 7"})
+                    assert not result.isError and "exit=7" in str(result), result
+                    result = await session.call_tool("run_shell", {"command": "printf nope", "path": "../outside"})
+                    assert result.isError, "Shell cwd traversal must be rejected"
+                    result = await session.call_tool("run_shell", {"command": "echo nope", "timeout_seconds": 91})
+                    assert result.isError, "Shell timeout cap must be enforced"
+                    result = await session.call_tool("run_shell", {"command": "sleep 5", "timeout_seconds": 1})
+                    assert not result.isError and "timed_out=true" in str(result), result
+                    result = await session.call_tool("run_shell", {"command": "python3 -c 'print(\\\"x\\\" * 70000)' "})
+                    assert not result.isError and "truncated=true" in str(result), result
+                    print("PASS: initialize, list tools, read, write, traversal rejection, shell exit, timeout and output cap")
         finally:
             proc.terminate()
             try:
