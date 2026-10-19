@@ -1,5 +1,10 @@
 """Restricted VPS MCP server. Runs on the VPS; no SSH hop is needed."""
+import hashlib
+import logging
 import os
+import select
+import signal
+import time
 import pathlib
 import subprocess
 from mcp.server.fastmcp import FastMCP
@@ -61,6 +66,93 @@ def run_tests(path: str = ".", test_command: str = "pytest") -> str:
     r = subprocess.run(allowed[test_command], cwd=p, capture_output=True,
                        text=True, timeout=120, check=False)
     return f"exit={r.returncode}\n" + (r.stdout + r.stderr)[-16000:]
+
+
+MAX_SHELL_COMMAND_BYTES = 8192
+MAX_SHELL_OUTPUT_BYTES = 65536
+MAX_SHELL_TOTAL_OUTPUT_BYTES = 1048576
+MAX_SHELL_TIMEOUT_SECONDS = 90
+logger = logging.getLogger("vps_mcp.shell")
+
+
+@mcp.tool()
+def run_shell(command: str, path: str = ".", timeout_seconds: int = 30) -> str:
+    """Run a non-interactive Bash command on the VPS as the unprivileged service user.
+
+    The working directory must be inside MCP_WORKSPACE. Commands themselves
+    are NOT confined to that directory: systemd permissions are the security
+    boundary. No sudo/root, interactive input, or persistent sessions.
+    Timeout: 1..90 seconds; output: last 64 KiB, hard cap 1 MiB.
+    """
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("Command must not be empty")
+    if "\x00" in command or len(command.encode("utf-8")) > MAX_SHELL_COMMAND_BYTES:
+        raise ValueError("Invalid or oversized command")
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= MAX_SHELL_TIMEOUT_SECONDS:
+        raise ValueError("timeout_seconds must be an integer between 1 and 90")
+
+    directory = inside(path)
+    if not directory.is_dir():
+        raise ValueError("Working directory does not exist")
+    env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(ROOT),
+        "LANG": "C.UTF-8",
+        "PYTHONUNBUFFERED": "1",
+    }
+    fingerprint = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
+    logger.info("shell start cwd=%s command_sha256_prefix=%s", directory, fingerprint)
+    process = subprocess.Popen(
+        ["/bin/bash", "--noprofile", "--norc", "-c", command],
+        cwd=directory,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    tail = b""
+    total = 0
+    timed_out = False
+    output_limit_hit = False
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        assert process.stdout is not None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([process.stdout], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+            chunk = os.read(process.stdout.fileno(), 8192)
+            if not chunk:
+                break
+            total += len(chunk)
+            tail = (tail + chunk)[-MAX_SHELL_OUTPUT_BYTES:]
+            if total > MAX_SHELL_TOTAL_OUTPUT_BYTES:
+                output_limit_hit = True
+                break
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+
+    exit_code = process.returncode
+    truncated = total > len(tail)
+    logger.info(
+        "shell end cwd=%s command_sha256_prefix=%s exit=%s timed_out=%s output_limited=%s",
+        directory, fingerprint, exit_code, timed_out, output_limit_hit,
+    )
+    header = f"exit={exit_code} timed_out={str(timed_out).lower()} output_limited={str(output_limit_hit).lower()} truncated={str(truncated).lower()}\n"
+    return header + tail.decode("utf-8", errors="replace")
+
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
