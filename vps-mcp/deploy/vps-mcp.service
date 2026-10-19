@@ -1,5 +1,5 @@
 [Unit]
-Description=Restricted VPS MCP server
+Description=VPS MCP server with bounded unprivileged shell
 After=network.target
 
 [Service]
@@ -15,6 +15,12 @@ PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/home/thieuhua/code
 ProtectHome=read-only
+# Keep the tunnel API key and SSH private keys out of shell reach.
+InaccessiblePaths=/home/thieuhua/.config/vps-mcp /home/thieuhua/.ssh
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+PrivateDevices=true
 UMask=0077
 
 [Install]
