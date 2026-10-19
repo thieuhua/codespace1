@@ -41,7 +41,7 @@ class ExecResult:
     def as_tool_text(self) -> str:
         return (f"exit={self.exit_code} timed_out={str(self.timed_out).lower()} "
                 f"output_limited={str(self.output_limited).lower()} "
-                f"truncated={str(self.truncated).lower()}\\n{self.stdout}")
+                f"truncated={str(self.truncated).lower()}{chr(10)}{self.stdout}")
 
 
 def _check_timeout(timeout_seconds: int) -> None:
