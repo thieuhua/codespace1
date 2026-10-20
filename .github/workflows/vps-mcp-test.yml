@@ -1,0 +1,36 @@
+name: VPS MCP smoke test
+on:
+  push:
+    branches: [feat/vps-mcp-gateway]
+    paths:
+      - 'vps-mcp/**'
+      - '.github/workflows/vps-mcp-test.yml'
+  pull_request:
+    paths:
+      - 'vps-mcp/**'
+      - '.github/workflows/vps-mcp-test.yml'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vps-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Syntax check
+        run: python -m compileall -q server.py
+      - name: MCP protocol smoke test
+        run: python smoke_test.py
+      - name: Approval core unit tests (non-production)
+        run: python -m unittest -v test_approval_core.py
+      - name: Linux subaccount executor tests (non-production)
+        run: python -m unittest -v test_linux_accounts.py

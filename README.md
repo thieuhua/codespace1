@@ -6,6 +6,7 @@ Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm tro
 
 | Dự án | Mô tả | Hướng dẫn |
 | --- | --- | --- |
+| [VPS MCP Gateway](vps-mcp/) | MCP Server chạy trên VPS Debian 12; Codespace chỉ sửa mã nguồn | [README](vps-mcp/README.md) |
 | [Focus Monitor](focus-monitor/) | Demo nhận diện mất focus, trang bị ẩn, rời trang và dấu hiệu cần xem xét | [README](focus-monitor/README.md) |
 
 Khi thêm dự án, cập nhật bảng này và đặt liên kết đến `README.md` của dự án.

@@ -1,0 +1,27 @@
+[Unit]
+Description=VPS MCP server with bounded unprivileged shell
+After=network.target
+
+[Service]
+Type=simple
+User=thieuhua
+WorkingDirectory=/home/thieuhua/code/codespace1/vps-mcp
+Environment=MCP_WORKSPACE=/home/thieuhua/code
+ExecStart=/home/thieuhua/code/codespace1/vps-mcp/.venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/thieuhua/code
+ProtectHome=read-only
+# Keep the tunnel API key and SSH private keys out of shell reach.
+InaccessiblePaths=/home/thieuhua/.config/vps-mcp /home/thieuhua/.ssh
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+PrivateDevices=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
