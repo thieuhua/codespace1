@@ -1,68 +1,38 @@
-# VPS MCP Gateway
+# VPS MCP — production gateway
 
-## Permission-system design (not yet deployed)
+This repository contains the current **16-tool**, three-process VPS MCP implementation. Source files `gateway.py`, `worker.py` and `broker.py` were copied byte-for-byte from the root-owned live release when initially committed. The old single-process `server.py` and disconnected security prototypes have been retired.
 
-The hybrid approval and immutable MCP self-protection architecture is described in [ADR-001](docs/ADR-001-hybrid-approval.md), and the simpler Linux-account execution design in [ADR-002](docs/ADR-002-linux-subaccounts.md). This branch contains a **standalone, unconnected** one-use approval token core and unit tests. It does not change the live `run_shell`, enforce policy on the VPS, or grant privileged access. The account runner module is a **prototype for a separate trusted supervisor** and is not callable from production MCP tools.
+## Architecture
 
-The MCP server runs on the **Debian 12 VPS**, not GitHub Codespaces. Codespace is used only to edit and test code. The server is connected to ChatGPT through the OpenAI Secure MCP Tunnel, which runs separately as `vps-mcp-tunnel.service`.
+- `gateway.py` — MCP Streamable HTTP endpoint on `127.0.0.1:8765`, runs as `mcp-gateway` and forwards development requests over a Unix socket.
+- `worker.py` — allowlisted repository file operations, Git, shell, tests and bounded jobs, runs as `mcp-dev`.
+- `broker.py` — root-owned approval broker for exact owner-allowlisted non-MCP service operations. Owner approval occurs outside MCP.
+- `vps-mcp-tunnel.service` is separately managed. Neither tunnel credentials nor owner secrets belong in Git.
 
-## Tools
+The application exposes repository discovery, file CRUD, Git status, shell/test execution, background jobs and protected-operation requests. Development MCP access **cannot deploy or restart its own production gateway**. Running code is installed under `/opt/vps-mcp/releases`, owned by root and separate from writable source.
 
-- `list_files`, `read_file`, `write_file`: UTF-8 files in `MCP_WORKSPACE`.
-- `git_status`: Git status in a workspace repository.
-- `run_tests`: limited preset test commands.
-- `run_shell(command, path=".", timeout_seconds=30)`: non-interactive Bash command executed on the VPS **as the unprivileged `thieuhua` service user**, not root.
+## Layout
 
-The shell tool allows arbitrary Bash syntax and commands. Its **initial working directory** must be under `MCP_WORKSPACE`; a shell command can still change directories and access files that the systemd service is permitted to access. Do not mistake cwd validation for filesystem confinement.
+- `deploy/production/` — systemd units and owner-SSH staging installer.
+- `production_smoke_test.py` — basic source, unit and deployed-release consistency checks.
+- `PRODUCTION.md` — environment-specific deployment notes, secret boundary and source provenance.
 
-Shell limits: command size at most 8 KiB, timeout 1–90 seconds, combined output retains the last 64 KiB, process group killed on timeout or after 1 MiB generated output, stdin disabled, no interactive TTY. The execution environment is minimized; shell commands are not recorded verbatim in system logs (a short SHA-256 fingerprint is recorded instead).
-
-## Security
-
-The systemd unit uses `User=thieuhua`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=read-only` and restricts writable paths to `/home/thieuhua/code`. It masks the directories containing the tunnel runtime API key (`~/.config/vps-mcp`) and SSH private keys (`~/.ssh`). **This is not a general-purpose security sandbox**; shell execution is powerful. Use ChatGPT's permission prompts to review sensitive actions. Do not expose the local MCP endpoint directly to the Internet.
-
-Other services (Combat Simulator, Nginx, WireGuard, OpenAI Tunnel) should remain unchanged. `run_shell` cannot elevate to root automatically.
-
-## First-time setup
-
-Prerequisites: Python 3.11+, a non-root user, and a checkout of this repository.
+## Test
 
 ```bash
-cd ~/code/codespace1/vps-mcp
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-MCP_WORKSPACE=/home/thieuhua/code .venv/bin/python server.py
+python3 -m unittest -v vps-mcp/production_smoke_test.py
+python3 -m compileall -q vps-mcp/gateway.py vps-mcp/worker.py vps-mcp/broker.py
+bash -n vps-mcp/deploy/production/install.sh
 ```
 
-The Streamable HTTP endpoint is `http://127.0.0.1:8765/mcp`. The OpenAI tunnel client forwards traffic from ChatGPT to this endpoint. No inbound public port is needed.
+On CI or a new checkout with no matching live release, the consistency check validates checked-in sources. On the VPS, it also compares each source with the currently installed live release.
 
-## Updating an existing VPS installation
+## Deploy
 
-From an SSH session as `thieuhua`:
+Production installs require **independent owner SSH**, not this MCP's development tools:
 
 ```bash
-cd ~/code/codespace1
-git fetch origin feat/vps-mcp-gateway
-git switch --detach origin/feat/vps-mcp-gateway
-cd vps-mcp
-.venv/bin/pip install -r requirements.txt
-sudo install -m 644 deploy/vps-mcp.service /etc/systemd/system/vps-mcp.service
-sudo systemctl daemon-reload
-sudo systemctl restart vps-mcp
-sudo systemctl is-active vps-mcp
+sudo bash vps-mcp/deploy/production/install.sh
 ```
 
-**Note:** an existing ignored/untracked `.venv` is retained. If the checkout has local tracked changes, back them up and reconcile them first instead of overwriting. Updating the MCP server does not require restarting `vps-mcp-tunnel`. The ChatGPT plugin may need a refresh to discover the new tool.
-
-## Testing
-
-```bash
-cd vps-mcp
-.venv/bin/python smoke_test.py
-```
-
-GitHub Actions runs the same protocol smoke test when this project changes. The test checks startup, MCP tool listing, read/write, path traversal rejection, shell exit codes, timeout enforcement, and output truncation.
-
-## Scope
-
-Code is developed in `thieuhua/codespace1`, branch `feat/vps-mcp-gateway`. Deploy only after GitHub Actions passes. Shell calls execute as the service user with systemd restrictions; additional host-level access would require separate, explicit authorization.
+This prepares an immutable release and systemd unit definitions; it **does not restart any services**. The owner controls activation separately. Service accounts, root-owned policy and approval secrets must already exist. Do not commit SSH keys, tunnel tokens or approval credentials.
