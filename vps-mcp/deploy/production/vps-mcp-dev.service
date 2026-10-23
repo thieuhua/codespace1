@@ -1,0 +1,49 @@
+[Unit]
+Description=Sandboxed VPS MCP development worker
+After=local-fs.target
+Before=vps-mcp.service
+[Service]
+Type=simple
+User=mcp-dev
+Group=mcp-gateway
+Environment=MCP_GATEWAY_UID=996
+Environment='MCP_REPOS={"codespace1":"/home/thieuhua/code/codespace1"}'
+Environment=MCP_WORKER_SOCKET=/run/vps-mcp/worker.sock
+Environment=MCP_JOB_DIR=/var/lib/vps-mcp-dev/jobs
+WorkingDirectory=/home/thieuhua/code/codespace1
+ExecStart=/opt/vps-mcp/current/venv/bin/python /opt/vps-mcp/current/worker.py
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=vps-mcp
+RuntimeDirectoryMode=0750
+StateDirectory=vps-mcp-dev
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/thieuhua/code/codespace1
+ReadWritePaths=/home/thieuhua/code/codespace1 /var/lib/vps-mcp-dev
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=localhost
+TasksMax=100
+MemoryMax=700M
+KillMode=control-group
+TimeoutStopSec=10
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+[Unit]
+Description=Immutable VPS MCP protocol gateway
+After=network.target vps-mcp-dev.service vps-mcp-approval.service
+Requires=vps-mcp-dev.service vps-mcp-approval.service
+[Service]
+Type=simple
+User=mcp-gateway
+Group=mcp-gateway
+WorkingDirectory=/opt/vps-mcp/current
+ExecStart=/opt/vps-mcp/current/venv/bin/python /opt/vps-mcp/current/gateway.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+UMask=0077
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=190M
+TasksMax=45
+KillMode=control-group
+[Install]
+WantedBy=multi-user.target
