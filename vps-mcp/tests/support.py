@@ -1,11 +1,25 @@
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from mailbox_core.admin import Provisioner
 from mailbox_core.database import Database
+from mailbox_core.errors import GatewayError
 from mailbox_core.identity import Principal, trusted_identity
 from mailbox_core.sessions import SessionService
 from mailbox_core.settings import Settings
+
+
+def retry_storage_busy(fn, *args, **kwargs):
+    """Retry transient SQLite contention with the same idempotent arguments."""
+    for retry in range(10):
+        try:
+            return fn(*args, **kwargs), retry
+        except GatewayError as error:
+            if (error.code != "RESOURCE_EXHAUSTED"
+                    or error.message != "Storage busy or full; retry later" or retry == 9):
+                raise
+            time.sleep(min(0.01 * 2**retry, 0.25))
 
 
 class ServiceCase(unittest.TestCase):

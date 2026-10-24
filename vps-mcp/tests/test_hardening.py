@@ -18,7 +18,7 @@ from mailbox_core.errors import GatewayError
 from mailbox_core.mailboxes import MailboxService
 from mailbox_core.sessions import SessionService
 from tests.test_production_contract import check
-from tests.support import ServiceCase
+from tests.support import ServiceCase, retry_storage_busy
 
 
 class HardeningTests(ServiceCase):
@@ -61,6 +61,23 @@ class HardeningTests(ServiceCase):
             lock.rollback()
         with self.as_user():
             self.assertEqual(short.send(self.mid, "after unlock")["sequence"], 1)
+
+    def test_client_retries_storage_contention_without_retrying_quota_errors(self):
+        short = MailboxService(Database(replace(self.settings, busy_timeout_ms=40, max_messages=1)),
+                               clock=lambda: self.now[0])
+        with closing(sqlite3.connect(self.settings.db_path, isolation_level=None)) as lock:
+            lock.execute("BEGIN IMMEDIATE")
+            with self.as_user(), patch("tests.support.time.sleep", side_effect=lambda _: lock.rollback()):
+                sent, retries = retry_storage_busy(short.send, self.mid, "once", idempotency_key="retry")
+            self.assertEqual(retries, 1)
+        with self.as_user(), patch("tests.support.time.sleep", side_effect=AssertionError("Unexpected retry")):
+            replay, retries = retry_storage_busy(short.send, self.mid, "once", idempotency_key="retry")
+            self.assertEqual(replay["message_id"], sent["message_id"])
+            self.assertTrue(replay["duplicated"])
+            self.assertEqual(retries, 0)
+            self.assert_code("RESOURCE_EXHAUSTED", retry_storage_busy, short.send, self.mid, "full")
+            self.assert_code("CONFLICT", retry_storage_busy, short.send, self.mid, "changed", idempotency_key="retry")
+            self.assertEqual(len(asyncio.run(short.receive(self.mid))["messages"]), 1)
 
     def test_rate_key_byte_mailbox_quotas_and_cleanup(self):
         with self.as_user():

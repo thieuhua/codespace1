@@ -21,7 +21,15 @@ smoke separately with `python -m unittest -v production_smoke_test.py`.
   offline release checking and complete source packaging without installation.
 - `stress_worker.py` commits 2,000 1-KiB messages with eight writers, paginates
   history and exercises 32 pollers inside an enforced 1 GiB child-process limit.
-  Run it directly for aggregate timing, peak RSS, DB size and retry counts.
+  The child deadline is 300 seconds on Windows and 90 seconds on POSIX to allow
+  for Windows hosted-runner FULL-sync disk latency. Run it directly for aggregate
+  timing, peak RSS, DB size and retry counts.
+
+Concurrent writers share `support.retry_storage_busy`: at most ten attempts
+with bounded backoff and unchanged idempotency keys. Only the SQLite storage
+busy/full error is retried; quota, validation and ACL errors propagate. The
+hardening tests still require a held lock to fail within its configured deadline
+and verify retry recovery without duplicate messages or masked quota failures.
 
 `protocol_support.py` owns ephemeral sockets continuously through shutdown.
 Tests never bind/contact production port 8765, privileged sockets, live state,

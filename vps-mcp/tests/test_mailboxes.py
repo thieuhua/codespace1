@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from mailbox_core.database import Database
 from mailbox_core.mailboxes import MailboxService
-from tests.support import ServiceCase
+from tests.support import ServiceCase, retry_storage_busy
 
 
 class MailboxTests(ServiceCase):
@@ -47,7 +47,7 @@ class MailboxTests(ServiceCase):
     def test_concurrent_order_pagination_idempotency(self):
         def send(i):
             with self.as_user():
-                return self.mail.send(self.mid, str(i), idempotency_key=str(i))
+                return retry_storage_busy(self.mail.send, self.mid, str(i), idempotency_key=str(i))[0]
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(send, range(50)))
         self.assertEqual(sorted(r["sequence"] for r in results), list(range(1, 51)))
@@ -64,7 +64,7 @@ class MailboxTests(ServiceCase):
             self.assert_code("CONFLICT", self.mail.send, self.mid, "changed", idempotency_key="0")
         def duplicate(_):
             with self.as_user("B"):
-                return self.mail.send(self.mid, "same", idempotency_key="same")
+                return retry_storage_busy(self.mail.send, self.mid, "same", idempotency_key="same")[0]
         with ThreadPoolExecutor(max_workers=8) as pool:
             dupes = list(pool.map(duplicate, range(16)))
         self.assertEqual(sum(not r["duplicated"] for r in dupes), 1)

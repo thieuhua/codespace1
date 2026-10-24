@@ -21,7 +21,7 @@ def main():
     from mailbox_core.sessions import SessionService
     from mailbox_core.settings import Settings
     from mailbox_core.tools import register
-    from mailbox_core.errors import GatewayError
+    from tests.support import retry_storage_busy
     started = time.monotonic()
     count = 2000
     with tempfile.TemporaryDirectory() as root:
@@ -37,13 +37,8 @@ def main():
             mid = mail.create(sid)["mailbox_id"]
         def write(i):
             with trusted_identity(Principal("stress")):
-                for retry in range(10):
-                    try:
-                        return mail.send(mid, "x" * 1024, idempotency_key=str(i))["sequence"], retry
-                    except GatewayError as error:
-                        if error.code != "RESOURCE_EXHAUSTED" or retry == 9:
-                            raise
-                        time.sleep(min(0.01 * 2**retry, 0.25))
+                result, retry = retry_storage_busy(mail.send, mid, "x" * 1024, idempotency_key=str(i))
+                return result["sequence"], retry
         with ThreadPoolExecutor(max_workers=8) as pool:
             writes = list(pool.map(write, range(count)))
         sequences = [seq for seq, _ in writes]

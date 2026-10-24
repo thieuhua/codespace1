@@ -141,6 +141,40 @@ The [Windows PR job](https://github.com/thieuhua/codespace1/actions/runs/4007909
 also succeeded, with POSIX-only tests skipped as intended. Full CI evidence is
 attached to [PR #4](https://github.com/thieuhua/codespace1/pull/4).
 
+### Windows CI follow-up (2026-10-24)
+
+The earlier successful CI evidence above does **not** establish that head
+`da3063e` passed. [PR run 40079262193](https://github.com/thieuhua/codespace1/actions/runs/40079262193)
+failed Windows step 7: `test_concurrent_order_pagination_idempotency` did not
+retry SQLite storage contention, and `test_under_one_gib_process_limit` exceeded
+its 90-second child deadline. Ubuntu and unprivileged Debian passed.
+
+The test-only fix shares bounded storage retry between concurrent mailbox/session
+writers and stress, preserving idempotency keys and all result assertions, and
+allows 300 seconds for Windows FULL-sync commits (POSIX remains 90 seconds).
+A real-lock regression verifies recovery, dedupe and immediate quota/conflict
+errors. No runtime source, dependency, service unit or fixture is changed.
+
+Local Windows CPython 3.11.4 verification after the fix: **46 tests, 39 passed,
+7 existing POSIX-only skips**, plus **3/3 source smoke tests**. Compileall,
+Git Bash syntax-only checking and `git diff --check origin/main` passed. The
+stress workload completed in 14.875 seconds with 66,609,152 peak RSS bytes under
+the enforced 1 GiB Windows Job limit. This is local evidence; the fix has not
+been pushed or checked by GitHub Actions.
+
+A fresh staged checkout with `core.autocrlf=true` also passed all 46 tests
+(39 passed, 7 skipped), 3 smoke tests, compileall and Git Bash syntax checking.
+Recorded release hashes still match the baseline Git blobs; release verification
+continues hashing exact bytes, and manifest paths remain POSIX-style. A held
+1.3-second SQLite lock reproduced the original concurrency failure and passed
+with retry. Adding 50 ms per write transaction reproduced the 90-second stress
+timeout, then completed all 2,000 messages in 126.062 seconds under the same
+Windows Job limit with the 300-second budget.
+
+Separately, current `origin/main` at `5eedae7` conflicts with this branch in
+`.github/workflows/vps-mcp-test.yml`, `vps-mcp/PRODUCTION.md` and `vps-mcp/README.md`.
+Those mainline changes have not been merged into this test-only fix.
+
 ### Compatibility/security review and Git gates
 
 The selective comparison against `8a73554` leaves the core implementation

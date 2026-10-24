@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from mailbox_core.database import Database
 from mailbox_core.sessions import SessionService
-from tests.support import ServiceCase
+from tests.support import ServiceCase, retry_storage_busy
 
 
 class SessionTests(ServiceCase):
@@ -51,13 +51,13 @@ class SessionTests(ServiceCase):
     def test_concurrent_create_and_close(self):
         def create(_):
             with self.as_user():
-                return self.sessions.open(idempotency_key="concurrent")["session_id"]
+                return retry_storage_busy(self.sessions.open, idempotency_key="concurrent")[0]["session_id"]
         with ThreadPoolExecutor(max_workers=8) as pool:
             ids = list(pool.map(create, range(16)))
         self.assertEqual(len(set(ids)), 1)
         def close(_):
             with self.as_user():
-                return self.sessions.close(ids[0])["status"]
+                return retry_storage_busy(self.sessions.close, ids[0])[0]["status"]
         with ThreadPoolExecutor(max_workers=8) as pool:
             self.assertEqual(list(pool.map(close, range(16))), ["closed"] * 16)
 
