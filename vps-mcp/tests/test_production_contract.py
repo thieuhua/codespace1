@@ -11,7 +11,9 @@ import unittest
 from unittest.mock import patch
 
 from mailbox_core.identity import Principal, trusted_identity
+from mailbox_core.mailboxes import MailboxService
 from tests.protocol_support import client, local_server, make_gateway
+from tests.support import ServiceCase
 
 HERE = Path(__file__).resolve().parents[1]
 FIXTURES = HERE / "tests" / "fixtures"
@@ -48,13 +50,15 @@ class SocketDouble:
         return io.BytesIO(self.payload)
 
 
-async def check():
-    gateway = make_gateway()
+async def check(services=None):
+    gateway = make_gateway(services)
     baseline = json.loads((FIXTURES / "production_tools.json").read_text())
     cases = json.loads((FIXTURES / "production_dispatch.json").read_text())
     async with local_server(gateway.mcp.streamable_http_app()) as url, client(url) as session:
-        actual = {t.name: t.model_dump(mode="json", exclude_none=True) for t in (await session.list_tools()).tools}
-        assert set(actual) == set(baseline) | NEW_TOOLS
+        tools = (await session.list_tools()).tools
+        actual = {t.name: t.model_dump(mode="json", exclude_none=True) for t in tools}
+        assert len(tools) == (16 if services is None else 29)
+        assert set(actual) == set(baseline) | (NEW_TOOLS if services is not None else set())
         for name, definition in baseline.items():
             assert actual[name] == definition, name
         for case in cases:
@@ -85,7 +89,7 @@ async def check():
 
 
 class ProductionContractTests(unittest.TestCase):
-    def test_exact_16_plus_13_schemas_dispatch_and_response_shapes(self):
+    def test_default_exact_16_schemas_dispatch_and_response_shapes(self):
         asyncio.run(check())
 
     def test_original_functions_and_privilege_components_unchanged(self):
@@ -117,13 +121,13 @@ class ProductionContractTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, message):
                         method("test")
 
-    def test_all_new_tools_deny_forged_identity_without_state_or_ipc(self):
+    def test_default_new_tools_absent_despite_forged_identity_or_context(self):
         async def scenario():
-            gateway = make_gateway()
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, MCP_STATE_DB=str(HERE / "must-not-create.db"),
                                               MCP_PRINCIPAL="A", MCP_PRINCIPAL_ID="A", MCP_CLIENT_ID="A"))
                 database = stack.enter_context(patch("mailbox_core.database.Database", side_effect=AssertionError("no database")))
+                gateway = make_gateway()
                 stack.enter_context(patch.object(gateway, "call", side_effect=AssertionError("no worker")))
                 stack.enter_context(patch.object(gateway, "approval_call", side_effect=AssertionError("no broker")))
                 # Test malicious transport headers using the same ephemeral SDK client.
@@ -133,19 +137,60 @@ class ProductionContractTests(unittest.TestCase):
                     async with streamablehttp_client(url, headers={"X-Principal-ID": "A", "X-Client-ID": "A", "Authorization": "Bearer forged"}) as (read, write, _):
                         async with ClientSession(read, write) as session:
                             await session.initialize()
-                            for tool in (await session.list_tools()).tools:
-                                if tool.name not in NEW_TOOLS:
-                                    continue
+                            baseline = json.loads((FIXTURES / "production_tools.json").read_text())
+                            tools = (await session.list_tools()).tools
+                            self.assertEqual(len(tools), 16)
+                            self.assertEqual({t.name: t.model_dump(mode="json", exclude_none=True) for t in tools}, baseline)
+                            for name in NEW_TOOLS:
+                                result = await session.call_tool(name, {})
+                                self.assertTrue(result.isError, name)
+                                self.assertIn("Unknown tool", result.content[0].text, name)
+                            # A ContextVar alone cannot register tools or activate storage.
+                            with trusted_identity(Principal("A")):
+                                self.assertEqual({t.name for t in await gateway.mcp.list_tools()}, set(baseline))
+                                for name in NEW_TOOLS:
+                                    result = await session.call_tool(name, {})
+                                    self.assertTrue(result.isError, name)
+                                    self.assertIn("Unknown tool", result.content[0].text, name)
+                                gateway.stop_mailbox_waiters()
+                database.assert_not_called()
+                self.assertFalse((HERE / "must-not-create.db").exists())
+        asyncio.run(scenario())
+
+
+class InjectedProductionContractTests(ServiceCase):
+    def test_injected_exact_16_plus_13_schemas_dispatch_and_response_shapes(self):
+        asyncio.run(check((self.sessions, MailboxService(self.db))))
+
+    def test_all_new_tools_deny_forged_identity_without_storage_access_or_ipc(self):
+        async def scenario():
+            gateway = make_gateway((self.sessions, MailboxService(self.db)))
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, MCP_STATE_DB=str(HERE / "must-not-create.db"),
+                                              MCP_PRINCIPAL="A", MCP_PRINCIPAL_ID="A", MCP_CLIENT_ID="A"))
+                database = stack.enter_context(patch("mailbox_core.database.Database", side_effect=AssertionError("no database")))
+                run_db = stack.enter_context(patch("mailbox_core.tools.run_db", side_effect=AssertionError("no storage access")))
+                stack.enter_context(patch.object(gateway, "call", side_effect=AssertionError("no worker")))
+                stack.enter_context(patch.object(gateway, "approval_call", side_effect=AssertionError("no broker")))
+                from mcp.client.streamable_http import streamablehttp_client
+                from mcp import ClientSession
+                async with local_server(gateway.mcp.streamable_http_app()) as url:
+                    async with streamablehttp_client(url, headers={"X-Principal-ID": "A", "X-Client-ID": "A", "Authorization": "Bearer forged"}) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            tools = {t.name: t for t in (await session.list_tools()).tools}
+                            baseline = json.loads((FIXTURES / "production_tools.json").read_text())
+                            self.assertEqual(set(tools), set(baseline) | NEW_TOOLS)
+                            self.assertEqual(len(tools), 29)
+                            for name in NEW_TOOLS:
+                                tool = tools[name]
                                 self.assertFalse({"principal_id", "owner", "client_id", "approved", "participants"} & set(tool.inputSchema["properties"]))
                                 args = {name: "forged" for name in tool.inputSchema.get("required", [])}
                                 args.update(principal_id="A", owner="A", client_id="A", session_id="forged", approved=True)
                                 result = await session.call_tool(tool.name, args)
                                 self.assertTrue(result.isError, tool.name)
                                 self.assertEqual(result.structuredContent["error"]["code"], "UNAUTHENTICATED", tool.name)
-                            # A ContextVar alone is insufficient to activate runtime storage.
-                            with trusted_identity(Principal("A")):
-                                result = await gateway.mcp.call_tool("session_open", {})
-                                self.assertEqual(result.structuredContent["error"]["code"], "UNAUTHENTICATED")
                 database.assert_not_called()
+                run_db.assert_not_called()
                 self.assertFalse((HERE / "must-not-create.db").exists())
         asyncio.run(scenario())

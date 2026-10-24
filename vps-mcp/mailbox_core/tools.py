@@ -18,6 +18,14 @@ def register(mcp, *, services=None):
     """
     state = services
 
+    def stop_waiters():
+        if state is not None:
+            state[1].stop_waiters()
+
+    # Keep the production tool inventory identical until services are injected.
+    if state is None:
+        return stop_waiters
+
     async def invoke(index, method, **kwargs):
         try:
             current_principal()  # Deny before opening/creating any state database.
@@ -102,9 +110,5 @@ def register(mcp, *, services=None):
     async def mailbox_get_message(mailbox_id: StrictStr, message_id: StrictStr) -> CallToolResult:
         """Read one retained message and this principal's acknowledgement state."""
         return await invoke(1, "get_message", mailbox_id=mailbox_id, message_id=message_id)
-
-    def stop_waiters():
-        if state is not None:
-            state[1].stop_waiters()
 
     return stop_waiters

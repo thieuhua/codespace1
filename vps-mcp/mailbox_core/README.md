@@ -14,9 +14,11 @@ path replacement. `admin.py` is an offline trusted provisioning/cleanup API;
 it is never an MCP tool and has no public administration endpoint.
 
 `identity.py` has a ContextVar bridge with no header, field or environment
-fallback. `tools.py` registers 13 tools. Production supplies no services:
-requests deny before accessing storage, even if an identity context is present.
-Only isolated tests inject services and fixed identities. A future verified
+fallback. `tools.py` registers 13 tools only when services are injected.
+Production supplies no services, so it advertises exactly the original 16 tools;
+an identity context alone cannot register tools or access storage. With services
+injected the inventory is 29, and calls still deny before storage access unless
+a trusted identity is bound. Only isolated tests inject services and fixed identities. A future verified
 runtime adapter requires an independent owner review; there is no enable flag.
 
 `async_db.py` shares four threads and a 64-operation admission limit while

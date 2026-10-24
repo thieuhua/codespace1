@@ -1,9 +1,10 @@
 # VPS MCP — production gateway
 
 This repository contains the three-process VPS MCP implementation, based on the
-16-tool production source at `b4b3f1e`, plus 13 additive Session/Mailbox tools.
-**The new tools are unactivated:** runtime requests return `UNAUTHENTICATED`.
-There is no trusted runtime identity/private-state adapter. The existing 16 tool
+16-tool production source at `b4b3f1e`, plus 13 optional Session/Mailbox tools.
+**The default gateway advertises exactly 16 tools.** The 13 new tools are not
+registered until services are explicitly injected, yielding 29 tools after
+activation. There is no trusted runtime identity/private-state adapter. The existing 16 tool
 implementations, worker, broker, service units and approval semantics are preserved.
 The old single-process server and security prototypes remain retired.
 
@@ -50,12 +51,16 @@ locally against production sockets. Its runtime entrypoint remains loopback
 cd vps-mcp
 .venv/bin/python -m unittest -v production_smoke_test.py
 .venv/bin/python -m unittest discover -v
-.venv/bin/python -m compileall -q gateway.py worker.py broker.py mailbox_core tests deploy/production/release_manifest.py
+.venv/bin/python -m compileall -q gateway.py worker.py broker.py mailbox_core tests oauth production_smoke_test.py deploy/production/release_manifest.py
 bash -n deploy/production/install.sh
 .venv/bin/python -m pip install -r oauth/requirements.txt
 (cd oauth && ../.venv/bin/python -m unittest -v test_oauth_proxy && ../.venv/bin/python e2e_check.py)
 for f in oauth/deploy/*.sh; do bash -n "$f"; done
 ```
+
+On Windows substitute `.venv/Scripts/python.exe` (or `../.venv/Scripts/python.exe`
+inside `oauth`) and use Git Bash for syntax checks. OAuth E2E owns an ephemeral
+gateway port and mocks privileged IPC; it does not contact port 8765 or live sockets.
 
 Default verification reads checked-in sources only, including original function
 ASTs and canonical Git-content hashes (checkout CRLF is normalized). It never

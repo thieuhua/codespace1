@@ -1,11 +1,14 @@
 # Session + Mailbox API (schema version 1)
 
-The production gateway advertises 29 tools: the original 16 plus the 13 below.
-**Mailbox runtime use remains unactivated.** There is no verified provider
-identity/private-state adapter; every valid runtime invocation of the new tools
-returns `UNAUTHENTICATED` before opening storage. Unknown arguments and forged
-headers cannot select an identity. Isolated tests inject fixed identities and
-temporary services in process; that Python API is privileged, not authentication.
+The default production gateway advertises exactly the original 16 tools with
+unchanged schemas. **Mailbox runtime use remains unactivated:** the 13 tools
+below are not registered until services are explicitly injected, yielding 29
+tools after activation. There is no verified provider identity/private-state
+adapter. A Principal context, environment variables, tool arguments or forged
+headers cannot activate the tools. Once services are injected, new tools still
+return `UNAUTHENTICATED` before storage access unless a trusted identity is bound.
+Isolated tests inject fixed identities and temporary services in process; that
+Python API is privileged, not authentication.
 
 ## Tool contract
 

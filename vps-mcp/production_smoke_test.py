@@ -42,13 +42,13 @@ class ProductionSourceTests(unittest.TestCase):
             self.assertEqual(definitions[name], original, name)
         base_tools = set(json.loads((FIXTURES / 'production_tools.json').read_text()))
         registered = {n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.decorator_list}
-        self.assertTrue(base_tools <= registered)
+        self.assertEqual(base_tools, registered)
         core = ast.parse((HERE / 'mailbox_core' / 'tools.py').read_bytes())
         added = {n.name for n in ast.walk(core) if isinstance(n, ast.AsyncFunctionDef) and n.decorator_list}
         required = {'session_open', 'session_get', 'session_list', 'session_renew', 'session_close',
                     'list_recent_activity', 'mailbox_create', 'mailbox_list', 'mailbox_send',
                     'mailbox_receive', 'mailbox_ack', 'mailbox_reply', 'mailbox_get_message'}
-        self.assertTrue(required <= added)
+        self.assertEqual(required, added)
         self.assertFalse(base_tools & added)
 
     def test_worker_separation(self):

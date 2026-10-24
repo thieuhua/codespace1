@@ -37,8 +37,11 @@ for this port.
 ## Unactivated mailbox feature and owner prerequisites
 
 No production installation, restart, provisioning or activation is part of this
-port. Production registration passes no services. The new tools deny before
-opening a DB even when a Principal context exists. There is no environment flag
+port. Production registration passes no services and advertises exactly the
+original 16 tools with unchanged schemas. The 13 Session/Mailbox tools are not
+registered; 29 tools are advertised only after explicit service injection in a
+future activated adapter (or isolated tests). A Principal context alone cannot
+register them or open a DB. There is no environment flag
 to enable them, and `MCP_STATE_DB` is not consumed. `trusted_identity` and service
 injection are privileged Python integration APIs exercised in temporary tests.
 
@@ -61,7 +64,8 @@ Before any separate future activation the owner must:
    source now includes modules/migration in its manifest, hash and comparisons;
    it preserves owner SSH/root ownership/approval units and performs no restart.
    Never invoke it through development MCP. Test provider auth, A/B/C ACLs,
-   worker isolation and all 29 tool schemas in staging before rollout.
+   worker isolation, the default 16-tool inventory and all 29 tool schemas after
+   explicit activation in staging before rollout.
 
 These are prerequisites for later runtime use, not permission to deploy now.
 
