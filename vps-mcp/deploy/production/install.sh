@@ -12,14 +12,18 @@ test -d "$repo/.git"
 test -f /etc/vps-mcp/protected.json && test -f /etc/vps-mcp/approval-password || {
   echo 'Missing separately managed policy/password' >&2; exit 1;
 }
-release_id="$(sha256sum "$src/gateway.py" "$src/worker.py" "$src/broker.py" | sha256sum | cut -c1-16)"
+# The additive gateway imports a package. Include every runtime module and
+# migration in both the immutable release identity and the staged file set.
+file_list="$(python3 "$src/deploy/production/release_manifest.py" "$src")"
+mapfile -t source_files <<< "$file_list"
+release_id="$(cd "$src" && sha256sum "${source_files[@]}" | sha256sum | cut -c1-16)"
 release="$dest/releases/$release_id"
 mkdir -p "$dest/releases"
 if test -e "$release"; then
-  for f in gateway.py worker.py broker.py; do cmp -s "$src/$f" "$release/$f"; done
+  for f in "${source_files[@]}"; do cmp -s "$src/$f" "$release/$f"; done
 else
   mkdir -p "$release"
-  install -m 0644 "$src/gateway.py" "$src/worker.py" "$src/broker.py" "$release/"
+  for f in "${source_files[@]}"; do install -D -m 0644 "$src/$f" "$release/$f"; done
   python3 -m venv "$release/venv"
   "$release/venv/bin/pip" install 'mcp==1.30.0'
   chown -R root:root "$release"

@@ -1,0 +1,360 @@
+[
+  {
+    "tool": "projects",
+    "args": {},
+    "method": "projects",
+    "ipc": {},
+    "result": {
+      "codespace1": "/isolated/repo"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"codespace1\": \"/isolated/repo\"\n}"
+      }
+    ],
+    "structured": {
+      "codespace1": "/isolated/repo"
+    }
+  },
+  {
+    "tool": "list_files",
+    "args": {},
+    "method": "list_files",
+    "ipc": {
+      "path": "."
+    },
+    "result": [
+      "a.txt",
+      "sub/"
+    ],
+    "content": [
+      {
+        "type": "text",
+        "text": "a.txt"
+      },
+      {
+        "type": "text",
+        "text": "sub/"
+      }
+    ],
+    "structured": {
+      "result": [
+        "a.txt",
+        "sub/"
+      ]
+    }
+  },
+  {
+    "tool": "read_file",
+    "args": {
+      "path": "a.txt"
+    },
+    "method": "read_file",
+    "ipc": {
+      "path": "a.txt"
+    },
+    "result": "hello",
+    "content": [
+      {
+        "type": "text",
+        "text": "hello"
+      }
+    ],
+    "structured": {
+      "result": "hello"
+    }
+  },
+  {
+    "tool": "write_file",
+    "args": {
+      "path": "a",
+      "content": "ok"
+    },
+    "method": "write_file",
+    "ipc": {
+      "path": "a",
+      "content": "ok"
+    },
+    "result": "/isolated/repo/a",
+    "content": [
+      {
+        "type": "text",
+        "text": "/isolated/repo/a"
+      }
+    ],
+    "structured": {
+      "result": "/isolated/repo/a"
+    }
+  },
+  {
+    "tool": "mkdir",
+    "args": {
+      "path": "sub"
+    },
+    "method": "mkdir",
+    "ipc": {
+      "path": "sub",
+      "parents": false
+    },
+    "result": "/isolated/repo/sub",
+    "content": [
+      {
+        "type": "text",
+        "text": "/isolated/repo/sub"
+      }
+    ],
+    "structured": {
+      "result": "/isolated/repo/sub"
+    }
+  },
+  {
+    "tool": "rename",
+    "args": {
+      "source": "a",
+      "target": "b"
+    },
+    "method": "rename",
+    "ipc": {
+      "source": "a",
+      "target": "b"
+    },
+    "result": "/isolated/repo/b",
+    "content": [
+      {
+        "type": "text",
+        "text": "/isolated/repo/b"
+      }
+    ],
+    "structured": {
+      "result": "/isolated/repo/b"
+    }
+  },
+  {
+    "tool": "remove",
+    "args": {
+      "path": "b"
+    },
+    "method": "remove",
+    "ipc": {
+      "path": "b"
+    },
+    "result": "/isolated/repo/b",
+    "content": [
+      {
+        "type": "text",
+        "text": "/isolated/repo/b"
+      }
+    ],
+    "structured": {
+      "result": "/isolated/repo/b"
+    }
+  },
+  {
+    "tool": "git_status",
+    "args": {},
+    "method": "git_status",
+    "ipc": {
+      "path": "."
+    },
+    "result": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.01\n## test\n",
+    "content": [
+      {
+        "type": "text",
+        "text": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.01\n## test\n"
+      }
+    ],
+    "structured": {
+      "result": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.01\n## test\n"
+    }
+  },
+  {
+    "tool": "run_tests",
+    "args": {},
+    "method": "run_shell",
+    "ipc": {
+      "command": "python3 -m pytest -q",
+      "path": ".",
+      "timeout_seconds": 90
+    },
+    "result": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.1\n1 passed\n",
+    "content": [
+      {
+        "type": "text",
+        "text": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.1\n1 passed\n"
+      }
+    ],
+    "structured": {
+      "result": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.1\n1 passed\n"
+    }
+  },
+  {
+    "tool": "run_shell",
+    "args": {
+      "command": "echo ok"
+    },
+    "method": "run_shell",
+    "ipc": {
+      "command": "echo ok",
+      "path": ".",
+      "timeout_seconds": 30
+    },
+    "result": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.1\nok\n",
+    "content": [
+      {
+        "type": "text",
+        "text": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.1\nok\n"
+      }
+    ],
+    "structured": {
+      "result": "exit=0 timed_out=false output_limited=false truncated=false duration_s=0.1\nok\n"
+    }
+  },
+  {
+    "tool": "start_job",
+    "args": {
+      "command": "echo ok"
+    },
+    "method": "start_job",
+    "ipc": {
+      "command": "echo ok",
+      "path": "."
+    },
+    "result": {
+      "job_id": "j",
+      "pid": 123,
+      "status": "running"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"job_id\": \"j\",\n  \"pid\": 123,\n  \"status\": \"running\"\n}"
+      }
+    ],
+    "structured": null
+  },
+  {
+    "tool": "job_status",
+    "args": {
+      "job_id": "j"
+    },
+    "method": "job_status",
+    "ipc": {
+      "job_id": "j"
+    },
+    "result": {
+      "job_id": "j",
+      "status": "finished",
+      "result": "exit=0\nok"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"job_id\": \"j\",\n  \"status\": \"finished\",\n  \"result\": \"exit=0\\nok\"\n}"
+      }
+    ],
+    "structured": null
+  },
+  {
+    "tool": "read_job_log",
+    "args": {
+      "job_id": "j"
+    },
+    "method": "read_job_log",
+    "ipc": {
+      "job_id": "j",
+      "offset": 0,
+      "max_bytes": 32768
+    },
+    "result": {
+      "job_id": "j",
+      "offset": 0,
+      "next_offset": 2,
+      "total_bytes": 2,
+      "data": "ok"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"job_id\": \"j\",\n  \"offset\": 0,\n  \"next_offset\": 2,\n  \"total_bytes\": 2,\n  \"data\": \"ok\"\n}"
+      }
+    ],
+    "structured": null
+  },
+  {
+    "tool": "stop_job",
+    "args": {
+      "job_id": "j"
+    },
+    "method": "stop_job",
+    "ipc": {
+      "job_id": "j"
+    },
+    "result": {
+      "job_id": "j",
+      "status": "finished",
+      "result": "exit=-9\n"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"job_id\": \"j\",\n  \"status\": \"finished\",\n  \"result\": \"exit=-9\\n\"\n}"
+      }
+    ],
+    "structured": null
+  },
+  {
+    "tool": "request_protected",
+    "args": {
+      "operation": "restart_service",
+      "unit": "example.service"
+    },
+    "method": "request",
+    "ipc": {
+      "operation": "restart_service",
+      "params": {
+        "unit": "example.service"
+      }
+    },
+    "result": {
+      "request_id": "r",
+      "operation": "restart_service",
+      "params": {
+        "unit": "example.service"
+      },
+      "status": "pending"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"request_id\": \"r\",\n  \"operation\": \"restart_service\",\n  \"params\": {\n    \"unit\": \"example.service\"\n  },\n  \"status\": \"pending\"\n}"
+      }
+    ],
+    "structured": null
+  },
+  {
+    "tool": "execute_protected",
+    "args": {
+      "request_id": "r",
+      "key": "test-only-key"
+    },
+    "method": "execute",
+    "ipc": {
+      "request_id": "r",
+      "key": "test-only-key"
+    },
+    "result": {
+      "request_id": "r",
+      "exit_code": 0,
+      "output": "",
+      "status": "finished"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"request_id\": \"r\",\n  \"exit_code\": 0,\n  \"output\": \"\",\n  \"status\": \"finished\"\n}"
+      }
+    ],
+    "structured": null
+  }
+]

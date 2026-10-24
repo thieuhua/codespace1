@@ -1,0 +1,442 @@
+{
+  "projects": {
+    "name": "projects",
+    "description": "List the exact repository directories that this MCP instance may develop.",
+    "inputSchema": {
+      "properties": {},
+      "title": "projectsArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "projectsDictOutput",
+      "type": "object"
+    }
+  },
+  "list_files": {
+    "name": "list_files",
+    "description": "List project directories. Use 'codespace1' or its absolute path for that project.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "title": "list_filesArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Result",
+          "type": "array"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "list_filesOutput",
+      "type": "object"
+    }
+  },
+  "read_file": {
+    "name": "read_file",
+    "description": "Read UTF-8 file inside an allowed repository (up to 1 MiB).",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "read_fileArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "read_fileOutput",
+      "type": "object"
+    }
+  },
+  "write_file": {
+    "name": "write_file",
+    "description": "Write UTF-8 file inside an allowed repository (up to 1 MiB).",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "title": "write_fileArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "write_fileOutput",
+      "type": "object"
+    }
+  },
+  "mkdir": {
+    "name": "mkdir",
+    "description": "Create a directory within a granted repository.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "parents": {
+          "default": false,
+          "title": "Parents",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "mkdirArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "mkdirOutput",
+      "type": "object"
+    }
+  },
+  "rename": {
+    "name": "rename",
+    "description": "Rename a file or directory; never overwrite the destination.",
+    "inputSchema": {
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ],
+      "title": "renameArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "renameOutput",
+      "type": "object"
+    }
+  },
+  "remove": {
+    "name": "remove",
+    "description": "Remove a file or EMPTY directory in an allowed repository, not a repository itself.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "removeArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "removeOutput",
+      "type": "object"
+    }
+  },
+  "git_status": {
+    "name": "git_status",
+    "description": "Run git status without modifying the repository.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "title": "git_statusArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "git_statusOutput",
+      "type": "object"
+    }
+  },
+  "run_tests": {
+    "name": "run_tests",
+    "description": "Run a conventional test command (pytest, unittest, ctest) in the sandbox.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        },
+        "test_command": {
+          "default": "pytest",
+          "title": "Test Command",
+          "type": "string"
+        }
+      },
+      "title": "run_testsArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "run_testsOutput",
+      "type": "object"
+    }
+  },
+  "run_shell": {
+    "name": "run_shell",
+    "description": "Arbitrary Bash development command inside an OS sandbox, 1-90 second deadline.\n\n    Initial cwd must be an approved repository. Filesystem access is limited by\n    systemd mount permissions; this is NOT a shell command regex gate. Commands\n    do not have sudo/root. For tasks longer than 90 seconds, use start_job.\n    ",
+    "inputSchema": {
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 30,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "run_shellArguments",
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "result": {
+          "title": "Result",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "title": "run_shellOutput",
+      "type": "object"
+    }
+  },
+  "start_job": {
+    "name": "start_job",
+    "description": "Start a bounded, long-running development job. Return job ID for follow-up.",
+    "inputSchema": {
+      "properties": {
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "start_jobArguments",
+      "type": "object"
+    }
+  },
+  "job_status": {
+    "name": "job_status",
+    "description": "Read process status and recent output for development job.",
+    "inputSchema": {
+      "properties": {
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "title": "job_statusArguments",
+      "type": "object"
+    }
+  },
+  "read_job_log": {
+    "name": "read_job_log",
+    "description": "Page through complete background-job output with byte offsets; max 64 KiB per call.",
+    "inputSchema": {
+      "properties": {
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 32768,
+          "title": "Max Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "title": "read_job_logArguments",
+      "type": "object"
+    }
+  },
+  "stop_job": {
+    "name": "stop_job",
+    "description": "Stop a development job; never affects gateway, tunnel or other services.",
+    "inputSchema": {
+      "properties": {
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "title": "stop_jobArguments",
+      "type": "object"
+    }
+  },
+  "request_protected": {
+    "name": "request_protected",
+    "description": "Request approval to restart an EXACT owner-allowlisted non-MCP service.\n\n    Does not execute anything. The owner must approve independently via authenticated\n    web or root-only CLI. No MCP service or tunnel may ever be targeted.\n    ",
+    "inputSchema": {
+      "properties": {
+        "operation": {
+          "title": "Operation",
+          "type": "string"
+        },
+        "unit": {
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "unit"
+      ],
+      "title": "request_protectedArguments",
+      "type": "object"
+    }
+  },
+  "execute_protected": {
+    "name": "execute_protected",
+    "description": "Execute the previously approved EXACT protected operation once.\n\n    Key is issued through the owner's separate approval UI or SSH; AI messages\n    without a valid key are NOT authorization. Key consumed before execution.\n    ",
+    "inputSchema": {
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "key"
+      ],
+      "title": "execute_protectedArguments",
+      "type": "object"
+    }
+  }
+}

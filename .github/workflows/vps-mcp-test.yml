@@ -12,25 +12,68 @@ on:
 
 jobs:
   source:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: vps-mcp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Compile production Python
-        run: python -m compileall -q vps-mcp/gateway.py vps-mcp/worker.py vps-mcp/broker.py
+        run: python -m compileall -q gateway.py worker.py broker.py mailbox_core tests oauth production_smoke_test.py deploy/production/release_manifest.py
+      - name: Install unchanged production dependencies
+        run: python -m pip install -r requirements.txt
       - name: Verify production sources and units
-        run: python -m unittest -v vps-mcp/production_smoke_test.py
+        run: python -m unittest -v production_smoke_test.py
+      - name: Verify 16-tool compatibility, sessions, mailbox and stress
+        run: python -m unittest discover -v
       - name: Check owner-SSH installer syntax
-        run: bash -n vps-mcp/deploy/production/install.sh
+        shell: bash
+        run: bash -n deploy/production/install.sh
+      - name: Check patch whitespace
+        run: git diff --check
       - name: Install OAuth front door dependencies
-        run: python -m pip install -r vps-mcp/oauth/requirements.txt
+        run: python -m pip install -r oauth/requirements.txt
       - name: OAuth front door tests
         working-directory: vps-mcp/oauth
         run: python -m unittest -v test_oauth_proxy
       - name: OAuth end-to-end (real gateway + SDK OAuth client)
         working-directory: vps-mcp/oauth
-        run: PYTHONPATH=. python e2e_check.py
+        run: python e2e_check.py
       - name: Check OAuth deploy scripts syntax
-        run: for f in vps-mcp/oauth/deploy/*.sh; do bash -n "$f"; done
+        shell: bash
+        run: for f in oauth/deploy/*.sh; do bash -n "$f"; done
+
+  debian-unprivileged:
+    runs-on: ubuntu-latest
+    container: python:3.11-bookworm
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: vps-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies and create isolated unprivileged test account
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r oauth/requirements.txt
+          useradd --uid 1001 --create-home mcp-test
+          chmod -R a+rX .
+      - name: Verify as unprivileged Debian 12 user
+        run: |
+          runuser -u mcp-test -- python -m unittest -v production_smoke_test.py
+          runuser -u mcp-test -- python -m unittest discover -v
+          bash -n deploy/production/install.sh
+          for f in oauth/deploy/*.sh; do bash -n "$f"; done
+      - name: Verify OAuth as unprivileged Debian 12 user
+        working-directory: vps-mcp/oauth
+        run: |
+          runuser -u mcp-test -- python -m unittest -v test_oauth_proxy
+          runuser -u mcp-test -- python e2e_check.py

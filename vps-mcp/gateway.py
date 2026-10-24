@@ -134,5 +134,10 @@ def execute_protected(request_id: str, key: str) -> dict:
     """
     return approval_call("execute", request_id=request_id, key=key)
 
+from mailbox_core.tools import register as register_session_mailbox
+
+stop_mailbox_waiters = register_session_mailbox(mcp)
+
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    from mailbox_core.http_runtime import run_http
+    run_http(mcp, stop_mailbox_waiters)

@@ -1,4 +1,8 @@
 .venv/
 __pycache__/
 *.py[cod]
-.pytest_cache/
+.test-results/
+*.db
+*.db-*
+*.sqlite3
+*.sqlite3-*
