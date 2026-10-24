@@ -1,0 +1,2 @@
+# Same supported range as vps-mcp (>=1.15,<2); exact validated source version.
+mcp==1.30.0
