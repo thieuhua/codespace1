@@ -71,7 +71,8 @@ def owner_only(path):
 $ErrorActionPreference = 'Stop'
 $p = $env:AGENT_MAILBOX_ACL_PATH
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-if ([System.IO.Directory]::Exists($p)) {
+$isDirectory = [System.IO.Directory]::Exists($p)
+if ($isDirectory) {
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
 } else {
@@ -80,9 +81,16 @@ if ([System.IO.Directory]::Exists($p)) {
 }
 $acl.SetAccessRuleProtection($true, $false)
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $p -AclObject $acl
+# Only the DACL was modified. Persist it through .NET without Set-Acl's
+# provider handling of owner/SACL sections (which can require extra privileges).
+if ($isDirectory) {
+    [System.IO.Directory]::SetAccessControl($p, $acl)
+} else {
+    [System.IO.File]::SetAccessControl($p, $acl)
+}
 """
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                             "-NonInteractive", "-Command", script],
                             env=env, capture_output=True, timeout=30)
     if result.returncode:
         if restricted_windows_token():

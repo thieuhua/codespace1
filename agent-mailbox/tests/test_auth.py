@@ -8,7 +8,7 @@ from unittest.mock import patch
 from agent_mailbox.auth import AUTH_SQL, AuthenticatedDatabase, issue_token, verify
 from agent_mailbox.core.identity import Principal
 from agent_mailbox.core.sessions import SessionService
-from agent_mailbox.paths import owner_only
+from agent_mailbox.paths import owner_only, private_directory
 from tests.support import ServiceCase
 
 
@@ -38,11 +38,13 @@ class AuthTests(ServiceCase):
 
         before = permissions()
         token_path = parent / "custom.token"
-        with patch("agent_mailbox.auth.owner_only", wraps=owner_only) as protected:
+        with patch("agent_mailbox.auth.owner_only", wraps=owner_only) as protected, \
+                patch("agent_mailbox.auth.private_directory", wraps=private_directory) as directory:
             token = issue_token(self.db, "B", token_path)
         self.assertEqual(token_path.read_text().strip(), token)
         self.assertEqual(permissions(), before)
         protected.assert_called_once_with(token_path.resolve())
+        directory.assert_not_called()
 
     def test_constant_time_digest_comparison_even_for_unknown_id(self):
         with self.db.transaction() as conn:

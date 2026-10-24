@@ -11,9 +11,12 @@ Yêu cầu Windows PowerShell 5.1+, Python 3.11 (`py -3.11`), `codex` và `agy`
 trong PATH nếu cần đăng ký. Chạy từ thư mục dự án:
 
 ```powershell
-.\scripts\setup.ps1 -WhatIf
-.\scripts\setup.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
+
+`-ExecutionPolicy Bypass` chỉ áp dụng cho tiến trình PowerShell này; không đổi
+execution policy của tài khoản hay máy.
 
 Script tạo `.venv`, cài MCP **1.30.0** và package ở chế độ editable, khởi tạo
 state, cấp token cho `codex`/`antigravity`, tạo session chung và mailbox `collab`.
@@ -47,17 +50,21 @@ Token không được in mặc định. Chỉ dùng `--print-token` khi chủ đ
 `admin revoke codex` thu hồi token; `admin disable codex` đồng thời vô hiệu hóa
 principal. Đổi token bằng `admin add-principal codex --rotate --token-file
 D:\AgentState\tokens\codex-new.token`, rồi cập nhật đường dẫn client và khởi động lại.
+Sau rotation, dùng `-CodexTokenFile D:\AgentState\tokens\codex-new.token` cho cả
+`setup.ps1` và `register-clients.ps1` (tương tự `-AntigravityTokenFile`). Các lần
+chạy sau phải giữ lựa chọn này: file mặc định cũ đã mất hiệu lực; script không
+tự tìm token hoặc khôi phục credential đã thu hồi. Đường dẫn tương đối tính từ `$PWD`.
 `admin cleanup` dọn dữ liệu quá retention và checkpoint WAL. Tất cả lệnh admin là
 quyền offline của người dùng Windows, không phải công cụ dành cho model.
 
 ## Đăng ký client
 
 ```powershell
-.\scripts\register-clients.ps1 -WhatIf
-.\scripts\register-clients.ps1
-.\scripts\unregister-clients.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-clients.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-clients.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\unregister-clients.ps1 -WhatIf
 # Chỉ chạy khi muốn gỡ cả hai cấu hình:
-.\scripts\unregister-clients.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\unregister-clients.ps1
 ```
 
 Hỗ trợ `-Client codex`, `-Client antigravity`, `-StateDir` và `-DryRun`.

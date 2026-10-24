@@ -9,7 +9,27 @@ Python and token-file paths. `unregister-clients.ps1` removes `agent_mailbox`
 from selected clients; it leaves state and token files for the operator.
 `common.ps1` prints safely quoted commands and checks native exit codes.
 
+Run from the project directory, including when the effective policy is Restricted:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-clients.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-clients.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\unregister-clients.ps1 -WhatIf
+# Run to remove the selected client registrations:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\unregister-clients.ps1
+```
+
+`-ExecutionPolicy Bypass` applies only to this PowerShell process; it never changes
+the current user's or machine's execution policy.
+
 Use `-WhatIf` or `-DryRun` to print only. Registration/removal supports
 `-Client all|codex|antigravity`; setup/registration accepts `-StateDir`.
+Both setup and registration accept `-CodexTokenFile` and `-AntigravityTokenFile`.
+After rotation, pass the new filename to both scripts on every subsequent run;
+defaults still refer to `tokens/<principal>.token`. Relative paths use `$PWD`.
+Command lookup preserves PowerShell's normal `.ps1`/native executable selection;
+argv forwarding, including Codex's `--`, is verified against temporary fixtures.
 Do not run real registration during automated tests. See the
 [project README](../README.md) for commands and approval settings.

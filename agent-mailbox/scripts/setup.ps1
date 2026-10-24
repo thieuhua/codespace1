@@ -1,5 +1,5 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
-param([string]$StateDir, [switch]$DryRun)
+param([string]$StateDir, [string]$CodexTokenFile, [string]$AntigravityTokenFile, [switch]$DryRun)
 . (Join-Path $PSScriptRoot 'common.ps1')
 $StateDir = Get-MailboxStateDir $StateDir
 $Python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
@@ -19,6 +19,8 @@ Invoke-MailboxCommand $Python @('-m', 'pip', '--isolated', 'install', '--no-cach
 $prefix = @('-I', '-m', 'agent_mailbox', '--state-dir', $StateDir, 'admin')
 Invoke-MailboxCommand $Python ($prefix + @('init')) $Preview
 foreach ($principal in @('codex', 'antigravity')) {
-    Invoke-MailboxCommand $Python ($prefix + @('add-principal', $principal, '--if-missing')) $Preview
+    $selected = if ($principal -eq 'codex') { $CodexTokenFile } else { $AntigravityTokenFile }
+    $tokenFile = Get-MailboxTokenFile $selected $StateDir $principal
+    Invoke-MailboxCommand $Python ($prefix + @('add-principal', $principal, '--if-missing', '--token-file', $tokenFile)) $Preview
 }
 Invoke-MailboxCommand $Python ($prefix + @('create-shared-session', '--owner', 'codex', '--participant', 'antigravity', '--mailbox', 'collab')) $Preview

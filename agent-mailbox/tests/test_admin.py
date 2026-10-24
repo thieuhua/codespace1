@@ -61,7 +61,8 @@ $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $entries=@($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })
 @{protected=$acl.AreAccessRulesProtected; owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; current=$sid; entries=$entries} | ConvertTo-Json -Compress
 """
-            result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                                     "-NonInteractive", "-Command", script],
                                     env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             acl = json.loads(result.stdout)
@@ -92,6 +93,50 @@ $entries=@($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System
         run_async(scenario())
         self.cli("add-principal", "codex", "--if-missing", "--token-file", str(rotation_path), success=False)
         self.cli("cleanup")
+
+    def test_owner_only_spaced_file_and_directory(self):
+        directory = self.home
+        directory.mkdir()
+        token_file = Path(self.temp.name) / "token with spaces.token"
+        token_file.write_text("temporary test data", encoding="utf-8")
+        restricted = os.name == "nt" and restricted_windows_token()
+        if os.name == "nt" and not restricted:
+            import ntsecuritycon
+            import win32api
+            import win32con
+            import win32security
+            token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+            try:
+                current_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            finally:
+                token.Close()
+        for target in (directory, token_file):
+            with self.subTest(path=target):
+                if restricted:
+                    with self.assertWarnsRegex(RuntimeWarning, "inherited ACLs remain"):
+                        self.assertFalse(owner_only(target))
+                    continue
+                self.assertTrue(owner_only(target))
+                if os.name == "nt":
+                    # Conditional on an unrestricted token: the sandbox cannot
+                    # apply these DACLs. Read actual DACLs using a separate API.
+                    descriptor = win32security.GetFileSecurity(
+                        str(target), win32security.DACL_SECURITY_INFORMATION)
+                    control, _ = descriptor.GetSecurityDescriptorControl()
+                    self.assertTrue(control & win32security.SE_DACL_PROTECTED)
+                    dacl = descriptor.GetSecurityDescriptorDacl()
+                    self.assertIsNotNone(dacl)
+                    self.assertEqual(dacl.GetAceCount(), 1)
+                    (ace_type, flags), mask, sid = dacl.GetAce(0)
+                    self.assertEqual(ace_type, win32security.ACCESS_ALLOWED_ACE_TYPE)
+                    self.assertEqual(win32security.ConvertSidToStringSid(sid),
+                                     win32security.ConvertSidToStringSid(current_sid))
+                    self.assertEqual(mask, ntsecuritycon.FILE_ALL_ACCESS)
+                    inheritance = (win32security.OBJECT_INHERIT_ACE | win32security.CONTAINER_INHERIT_ACE
+                                   if target.is_dir() else 0)
+                    self.assertEqual(flags, inheritance)
+                else:
+                    self.assertEqual(target.stat().st_mode & 0o777, 0o700 if target.is_dir() else 0o600)
 
     def test_token_file_precedence_bom_missing_oversized_and_no_repo_state(self):
         path = Path(self.temp.name) / "secret.token"
@@ -127,8 +172,12 @@ $entries=@($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System
         scripts = PROJECT / "scripts"
         env = os.environ.copy()
         env.pop("PSModulePath", None)
+        # Prove the command-line override works even when the inherited process
+        # policy is Restricted; never change user/machine policy.
+        env["PSEXECUTIONPOLICYPREFERENCE"] = "Restricted"
         for name in ("setup.ps1", "register-clients.ps1", "unregister-clients.ps1"):
-            cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-File", str(scripts / name), "-WhatIf"]
+            cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-NonInteractive", "-File", str(scripts / name), "-WhatIf"]
             if name != "unregister-clients.ps1":
                 cmd += ["-StateDir", str(self.home)]
             result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=20)

@@ -43,6 +43,7 @@ class SessionService(ServiceBase):
         with self.database.transaction(write=True) as db:
             pid = self.principal(db)
             self.session(db, pid, session_id)
+            self.rate(db, pid)
             db.execute("UPDATE logical_sessions SET last_seen=? WHERE session_id=?", (self.clock(), session_id))
             return self._view(self.session(db, pid, session_id))
 

@@ -15,7 +15,7 @@ IDs are opaque strings authorized by ACL, never credentials. Timestamps are UTC.
 | Tool and parameters | Result / policy |
 | --- | --- |
 | `session_open(name?, ttl_seconds?, idempotency_key?)` | session_id, name, status, created_at, expires_at, last_seen; caller owns session |
-| `session_get(session_id)` | Same view; refreshes last_seen, serves resume/status |
+| `session_get(session_id)` | Same view; refreshes last_seen, consumes write quota even on closed/expired sessions |
 | `session_list(cursor?, limit?)` | sessions, next_cursor; only accessible sessions |
 | `session_renew(session_id, ttl_seconds?)` | Session view; active/unexpired owner only |
 | `session_close(session_id)` | Session view; owner only, idempotent close |
@@ -80,6 +80,10 @@ one-day default TTL/seven-day maximum. Pages default to 20/max 100. There are
 four DB workers, 64 admitted operations and 32 pollers/process, max 20 seconds
 per wait. Admission rejects overload; polls hold no DB lock while sleeping.
 The wait bound excludes network latency and any in-progress DB busy timeout.
+Session refreshes share the mutation quota; use `session_list` for read-only
+discovery. Quotas bound accepted writes, not the number of attempted requests.
+Inaccessible WAL/SHM metadata returns retryable RESOURCE_EXHAUSTED before opening
+SQLite, preserving link checks; the caller retries the complete operation.
 Revocation/expiry/closure is rechecked while waiting. The stdio lifespan stops waiters during transport shutdown.
 An abruptly disconnected client must reconnect and retry with its saved cursor/key.
 

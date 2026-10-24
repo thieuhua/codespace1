@@ -5,6 +5,9 @@ SQLite 3.42.0, MCP 1.30.0, on branch `feat/mcp-baseline-recovery`.
 All dependency installation was inside `agent-mailbox/.venv`. No commit, push,
 branch change, VPS access, production endpoint or remote MCP call was performed.
 
+The initial build and independent review verification below are historical.
+Current follow-up results are in [Normal-user ACL and execution-policy fixes](#normal-user-acl-and-execution-policy-fixes).
+
 ## Delivered behavior
 
 A standalone `python -m agent_mailbox serve` stdio MCP server exposes the exact
@@ -13,8 +16,10 @@ client starts its own server; a shared external SQLite WAL database provides
 durable messages, per-principal ACK, reply links, ACLs, TTL, retention, cursors,
 idempotency, quotas and bounded polling. No server listener or service is needed.
 
-The core's 13 Python/SQL runtime files match source commit `a5d3062` after newline
-normalization, verified against Git blobs. There is no cross-project import or
+At the initial build, all 13 core Python/SQL runtime files matched source commit
+`a5d3062` after newline normalization. Review resolution now deliberately changes
+`database.py` and `sessions.py`; the remaining 11 still match Git blobs. See
+[provenance](../agent_mailbox/core/PROVENANCE.md). There is no cross-project import or
 runtime source dependency. Core README/provenance and local adapter/docs are new.
 The source requirements specify `mcp>=1.15,<2`, not an exact version; this project
 pins **1.30.0**, the exact version recorded in the source port's validation report,
@@ -243,3 +248,155 @@ git status --short
 There are no implementation/test blockers. Normal-token Windows ACL application
 and real Codex/Antigravity registration/model execution remain operator checks,
 deliberately outside this build's authorized execution against real client state.
+
+## Independent review resolution verification
+
+Verified on 2026-10-25, Windows PowerShell **5.1.26100.9711**, Python **3.11.4**,
+SQLite **3.42.0**, MCP **1.30.0**, branch `feat/mcp-baseline-recovery`.
+Starting HEAD was `a8d496d` (reviewer changes already committed), with a clean
+working tree. Build `0abd13a` was the comparison baseline. This resolution made
+no commits, pushes, branch changes or dependency installs.
+
+**12 findings are confirmed-fixed; F-07 is rejected-with-reason**. None is deferred.
+At that verification, the original review's bytes remained an unchanged prefix of
+[REVIEW_ANTIGRAVITY.md](REVIEW_ANTIGRAVITY.md); its appended Resolution records
+each failure path, disposition, regression coverage and verification limits.
+The follow-up below updates only two runnable commands in that original prefix
+to include process-scoped execution-policy bypass; review findings remain intact.
+Correct reviewer edits were retained. The parent-ACL test now observes
+`private_directory` as well as the token's protection call. Forced native command
+lookup was reverted after actual PowerShell 5.1 runs disproved F-07: the original
+helper and an npm-style `.ps1` shim preserve `--` through to a native capture
+program. Normal PowerShell command discovery and shim-only installations remain
+supported; exact argv assertions cover native and shim forwarding.
+
+New runtime behavior adds explicit per-client token-file selections to both
+setup and registration, classifies inaccessible WAL/SHM metadata as retryable
+storage exhaustion without skipping any link check, and counts session status
+refreshes against the existing per-principal write quota. No schema migration
+or connection-lifetime change was needed. Fourteen regression tests were added;
+all 45 existing tests and their security/stress assertions remain.
+
+Commands actually run from `agent-mailbox`:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest -v tests.test_review_resolution tests.test_auth
+.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe -m compileall -q agent_mailbox tests
+.\.venv\Scripts\python.exe -m pip check
+git diff --check
+```
+
+| Check | Actual result |
+| --- | --- |
+| Focused review/auth regressions | 19 passed, zero failures/errors/skips, 29.998 s; final full run also includes subsequent stronger rotation and expiry/close-race assertions |
+| Intermediate full suite before F-07 rejection | 59 passed, zero failures/errors/skips, 127.337 s; superseded by final verification below |
+| Final PowerShell forwarding regressions | 2 passed, zero failures/errors/skips, 2.554 s |
+| **Full suite on final runtime/test sources** | **59 passed, zero failures/errors/skips, 135.232 s** |
+| Real cross-process long-poll | Wake after send **0.141 s**, original <2 s assertion retained |
+| Stress, enforced Windows Job 1 GiB limit | **2,000 messages x 1,024 bytes**, **8 writers**, **32 waiting consumers**, **27.250 s**, **66,543,616 peak RSS bytes** (~63.46 MiB), **4,128,768 DB bytes**, **35 bounded busy retries** |
+| Compileall | Exit 0 |
+| Dependency consistency | `No broken requirements found.` |
+| PowerShell syntax | All **4** `.ps1` files parsed by actual Windows PowerShell 5.1 without errors |
+| Final script previews | **6 passed**: setup, register, unregister, each with both `-WhatIf` and `-DryRun`; temporary directory remained empty |
+| Additional previews inside full suite | Default paths, selected-client modes, and both principals' rotated token paths; fake CLI sentinels never invoked |
+| Source parity | **11/13** core runtime blobs match `a5d3062` after newline normalization; only documented `database.py`/`sessions.py` deviations |
+| Review preservation | Original `a8d496d` review intact, all **13** resolution rows present |
+| Whitespace/scope | `git diff --check` passed; all changed/untracked source paths are inside `agent-mailbox/` |
+
+The final verbose full-suite transcript is retained locally at ignored
+`.test-results/review-unittest-final.txt`.
+
+Failure-path checks also replayed original `0abd13a` functions/classes in memory
+without replacing source files. They produced expected regression failures for
+F-01, F-02, F-03, F-05, F-08, F-09, F-11 and F-12. The original database adapter
+reported sidecar metadata denial as `UNAUTHENTICATED`; the unmetered session get
+did not raise at quota; the original direct transaction left identity unbound.
+An injected parent-directory protection call failed the strengthened F-10 test
+under this host's restricted token. These expected negative probes are separate
+from the green full suite.
+
+Actual Windows PowerShell 5.1 runs of the original `common.ps1` reproduced both
+F-06 failures: a relative state directory resolved against process CWD after
+`Set-Location`, and a spaced path ending in backslash merged the following native
+argument into the path. The same original helper passed `--` unchanged through
+a temporary npm-style `.ps1` shim and native capture executable, disproving F-07.
+The installed npm shim was inspected read-only and uses the same `$args` pattern;
+the real Codex/Antigravity CLI was never invoked. Final regression assertions
+require exact argv through native, competing-shim and shim-only installations.
+
+SQLite WAL/SHM creation while connected and deletion on final close were
+observed in a real temporary database. Permission denial was injected at the
+actual `Path.lstat` boundary to verify pre-auth, direct transaction and later
+MCP dispatch paths, retry recovery and closed link validation. The specific
+NTFS DELETE_PENDING race was not naturally captured. Resolved repository
+exclusion used real repository metadata with a controlled path-resolution
+boundary; no subst drive or mount was created.
+
+Rotation verification executed only Python admin commands extracted from
+`setup.ps1 -WhatIf`, against explicit temporary state. The setup script itself
+ran only in preview mode: no pip/install or registration occurred. Native argv
+tests used temporary fake `.cmd`/`.ps1` fixtures. No real client CLI, client
+configuration, `%LOCALAPPDATA%/agent-mailbox`, `~/.codex`, `~/.gemini`, remote
+service, VPS or production endpoint was accessed.
+
+That restricted-token run had no failures. Restricted-token ACL warnings were
+expected and asserted; strict normal-token DACL assertions were conditional and
+did not execute in the sandbox. Supported symlink/hardlink tests ran without
+skips. The subsequent operator run below exposed failures outside the sandbox.
+
+## Normal-user ACL and execution-policy fixes
+
+Follow-up on 2026-10-25, preserving all uncommitted review-resolution changes on
+`feat/mcp-baseline-recovery`. The operator reported **59 tests, 4 failures and
+14 errors** under a normal, unrestricted user token. The sandbox's prior green
+run did not exercise normal-token ACL persistence or Restricted script policy.
+
+`owner_only()` now calls .NET `Directory.SetAccessControl` / `File.SetAccessControl`
+on a fresh security descriptor with only its DACL modified. This avoids `Set-Acl`
+provider writes of owner/SACL sections and the reported `SeSecurityPrivilege`
+failure. Restricted-token failures still emit the inherited-ACL warning;
+unrestricted-token failures still raise `OSError` before protected data is written.
+
+`AdminTests.test_owner_only_spaced_file_and_directory` uses TEMP paths with spaces
+for both object types. On an unrestricted Windows token it independently reads
+the actual DACL through Win32 and requires protection from inheritance, exactly
+one allow ACE for the current user SID, full control and the correct directory
+inheritance flags. Those strict DACL assertions are explicitly conditional on an
+unrestricted token. In this restricted sandbox the test instead requires the
+warning/failure fallback for both objects; no test is skipped or weakened.
+
+All script tests now invoke `powershell.exe -NoProfile -ExecutionPolicy Bypass
+-File <script> ...` (also using `-NonInteractive`). They explicitly inherit
+`PSExecutionPolicyPreference=Restricted` before the command-line process override,
+including the temporary script that dot-sources `common.ps1` and executes fake
+PowerShell/native CLI fixtures. Project/scripts README commands and the review's
+Interop run instructions use the same process-only bypass. No machine/user
+execution policy is changed.
+
+Verification of the final sources is recorded below. The unrestricted full-suite
+run, including both strict file/directory ACL assertions, is **pending operator
+verification**; this sandbox cannot establish those results.
+
+Final checks on this restricted Windows token:
+
+| Check | Actual result |
+| --- | --- |
+| Full suite, including the corrected inherited Restricted-policy setup | **60 passed, zero failures/errors/skips, 127.775 s** |
+| Spaced directory/file ACL regression | Both restricted-token warning/failure checks passed; unrestricted-only DACL assertions were not executed |
+| Normal-token ACL failure classification | Existing injected ACL-failure test still requires `OSError`; passed |
+| Execution-policy negative control, TEMP fixture only | Without Bypass, inherited Restricted blocked the script; with process-only Bypass, it ran and reported effective policy `Bypass` |
+| Real cross-process long-poll | Wake after send **0.125 s**, original <2 s assertion retained |
+| Stress, Windows Job 1 GiB limit | **2,000 messages**, **8 writers**, **32 waiters**, **27.313 s**, **67,276,800 peak RSS bytes**, **4,128,768 DB bytes**, **32 bounded busy retries** |
+| Compileall / dependency consistency | Exit 0 / `No broken requirements found.` |
+| Whitespace / scope | `git diff --check` passed; changes remain inside `agent-mailbox/` |
+
+The final full-suite transcript is retained at ignored
+`.test-results/user-token-fixes-unittest-final.txt`. The full-suite command was
+`.\.venv\Scripts\python.exe -m unittest discover -v`, streamed to that transcript
+through a Python subprocess runner. The policy controls used temporary files and
+process environment/command-line settings only. No real client registration,
+default state, `~/.codex`, `~/.gemini`, VPS or production access was performed.
+No commit or push was made; the existing review-resolution changes remain
+uncommitted alongside these fixes. **Unrestricted full-suite verification remains
+pending the operator**, including both actual protected owner-only DACL assertions.

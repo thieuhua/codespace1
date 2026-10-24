@@ -1,6 +1,8 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$StateDir,
+    [string]$CodexTokenFile,
+    [string]$AntigravityTokenFile,
     [ValidateSet('all', 'codex', 'antigravity')][string]$Client = 'all',
     [switch]$DryRun
 )
@@ -11,7 +13,8 @@ $Preview = [bool]($WhatIfPreference -or $DryRun)
 if (-not $Preview -and -not (Test-Path -LiteralPath $Python)) { throw 'Run setup.ps1 first.' }
 foreach ($principal in @('codex', 'antigravity')) {
     if ($Client -ne 'all' -and $Client -ne $principal) { continue }
-    $tokenFile = Join-Path $StateDir ('tokens\' + $principal + '.token')
+    $selected = if ($principal -eq 'codex') { $CodexTokenFile } else { $AntigravityTokenFile }
+    $tokenFile = Get-MailboxTokenFile $selected $StateDir $principal
     if (-not $Preview -and -not (Test-Path -LiteralPath $tokenFile)) { throw "Missing token file for $principal; run setup.ps1." }
     $environmentArgs = @('--env', ('AGENT_MAILBOX_HOME=' + $StateDir), '--env', ('AGENT_MAILBOX_TOKEN_FILE=' + $tokenFile))
     $serverArgs = @($Python, '-I', '-m', 'agent_mailbox', 'serve')

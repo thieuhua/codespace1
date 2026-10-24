@@ -53,6 +53,13 @@ class Database:
             except FileNotFoundError:
                 # SQLite removes idle WAL/SHM files when the last connection closes.
                 continue
+            except PermissionError:
+                if candidate == path:
+                    raise
+                # NTFS can deny stat while SQLite's last connection unlinks a
+                # sidecar. Fail closed and let the caller retry the entire txn;
+                # never skip link validation or misreport a bad credential.
+                raise GatewayError("RESOURCE_EXHAUSTED", "Storage busy or full; retry later") from None
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink > 1
                     or getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
                 raise ValueError("State files must not be linked")

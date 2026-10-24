@@ -20,8 +20,22 @@ Popen/thread fallback. This avoids named-pipe permission failures of Python's
 Proactor under restricted Windows tokens; it does not replace the SDK, protocol
 or server processes. ACL tests require exact owner-only DACLs outside restricted
 tokens; in a restricted token they require the explicit inherited-ACL warning.
+The spaced-file/directory regression reads the actual DACL through a separate
+Windows API: protection, exactly one current-user allow ACE, full control and
+directory inheritance flags are asserted only with an unrestricted token.
+Every script test starts `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+<script> ...`, with an inherited process policy of Restricted. This also covers
+dot-sourced helpers and temporary `.ps1` shims without changing user/machine policy.
 The original symlink test skips only if the OS forbids creating symlinks.
 
-Only `-WhatIf` is used for setup/register/unregister scripts. No real client
+Only `-WhatIf`/`-DryRun` previews are used for setup/register/unregister scripts. No real client
 configuration, real default state, remote MCP, VPS or production endpoint is used.
 Detailed measured results are in [BUILD_REPORT](../docs/BUILD_REPORT.md).
+
+`test_review_resolution.py` covers resolved repository paths, every admin parser
+position, first-transaction identity binding, WAL/SHM failure classification and
+link rejection, session refresh quotas, provisioning prechecks, ACL reapplication,
+rotation through previewed commands, shared-session expiry/close races, and real
+PowerShell 5.1 native argv against temporary fake executables. Only preview mode
+invokes setup/registration scripts; extracted Python admin commands run on TEMP
+state, without installing packages or registering clients.

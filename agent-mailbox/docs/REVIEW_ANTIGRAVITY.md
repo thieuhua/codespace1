@@ -72,8 +72,8 @@ Count by severity: **0 Critical, 4 High, 6 Medium, 3 Low**.
 1. Provision external state and register both clients from an ordinary Windows PowerShell 5.1 session:
    ```powershell
    cd E:\thieuh\FolderCode\codespace1\agent-mailbox
-   .\scripts\setup.ps1
-   .\scripts\register-clients.ps1
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-clients.ps1
    ```
 2. Verify offline state has active principals `codex` and `antigravity` (`enabled: 1, revoked: 0`):
    ```powershell
@@ -126,3 +126,68 @@ Count by severity: **0 Critical, 4 High, 6 Medium, 3 Low**.
 4. **Owner vs Participant ACL Check**:
    - **Antigravity** (participant, non-owner) calls `session_renew({"session_id": "<SID>"})` and `session_close({"session_id": "<SID>"})` -> both must fail with `isError: true` and `error.code == "FORBIDDEN"`.
    - **Codex** (owner) calls `session_renew({"session_id": "<SID>", "ttl_seconds": 604800})` -> succeeds with `status: "active"`.
+
+
+---
+
+## Resolution (verified 2026-10-25)
+
+The original review above is preserved, except that the two Interop setup commands
+now use process-only `-ExecutionPolicy Bypass` for Restricted-policy machines.
+The working tree was clean at
+start: reviewer changes were already committed in `a8d496d`, following build
+`0abd13a`. Every changed file in that commit was inspected against the build.
+**12 findings are confirmed-fixed; F-07 is rejected-with-reason**. No finding is deferred.
+The qualifications below distinguish deterministic failure-path verification
+from host conditions that were not reproduced naturally.
+
+| ID | Resolution | Verified failure path, disposition and regression evidence |
+| --- | --- | --- |
+| F-01 | confirmed-fixed | Retained lexical AND resolved ancestor checks and explicit empty-path rejection. The old implementation returns a resolved repository path unchecked; empty CLI paths select defaults. `PathReviewTests.test_resolved_repository_and_explicit_empty_paths_fail_closed` checks real repository metadata across a controlled alias-resolution boundary, empty/whitespace state paths and token-file failure without environment fallback. Admin regression also rejects an empty token filename. No system drive mapping was created. |
+| F-02 | confirmed-fixed | Retained `owner_only(mailbox.db)` on init and `owner_only(token_file)` on reuse. Repeated initialization previously protected directories only, and the token reuse branch returned before protecting the file. `AdminReviewTests.test_init_and_if_missing_reapply_file_protection` invokes real admin actions, observes both file protection calls and retains real ACL/mode application. Existing normal-token ACL assertions remain unchanged. |
+| F-03 | confirmed-fixed | Retained existing-path/disabled-principal checks before provisioning and existing-label preservation. The original `Provisioner.principal()` commits before exclusive token creation rejects an existing filename. `test_rejected_provisioning_preserves_principals_credentials_and_labels` proves rejected commands leave no new principal, do not relabel or change credentials, and cannot issue a token to a disabled identity. Existing `test_admin_roundtrip_tokens_acl_idempotency_rotation_and_revoke` proves rotation preserves a custom label and revokes the old credential. |
+| F-04 | confirmed-fixed | Reproduced rotating both principals, leaving invalid default files and observing default `--if-missing` fail `UNAUTHENTICATED`. Added `-CodexTokenFile` / `-AntigravityTokenFile` to setup AND registration; paths are absolute and relative values resolve from PowerShell `$PWD`. `test_rotated_tokens_flow_through_setup_and_registration_previews` executes only the Python admin commands extracted from setup's preview against temporary state, then verifies registration's preview selects the same live files, old credentials remain invalid, and neither token contents nor files change. README explains carrying these overrides into subsequent runs; revoked tokens are never automatically restored or discovered by scanning. |
+| F-05 | confirmed-fixed | Retained first-successful-transaction binding and single verification in `authenticate()`. The reviewer's expanded test still authenticated before remapping, so it did not independently exercise the earlier gap. Added `test_first_direct_transaction_binds_before_any_authenticate`: direct service transaction, actual credential remap, then direct service rejection before any `authenticate()` call. `test_authenticate_verifies_once` covers redundant verification. |
+| F-06 | confirmed-fixed | Retained `$PWD`-relative resolution and trailing-separator normalization. `PowerShellReviewTests.test_relative_state_native_argv_and_powershell_shim_forwarding` runs actual Windows PowerShell 5.1, changes its location independently of process CWD, resolves a relative path with spaces/trailing slash, and checks exact argv captured by a temporary native-command fixture. Setup/registration rotation previews also cover absolute state paths with spaces/trailing slash. |
+| F-07 | rejected-with-reason | Actual Windows PowerShell 5.1 execution of the original helper and an npm-style `.ps1` shim forwards `["mcp","add","--","-I","-m","agent_mailbox"]` unchanged to a native capture executable. Read-only inspection of the installed `codex.ps1` confirms the same `$args` forwarding pattern. The claimed binder consumption does not occur. Reverted the reviewer's forced `Application` lookup: it adds an unnecessary compatibility restriction and can bypass the selected PowerShell shim. The argv regression now requires identical correct forwarding through a native `.cmd`, competing `.ps1`/`.cmd` entries, and a `.ps1`-only entry. No real client CLI was executed. |
+| F-08 | confirmed-fixed | Retained `argparse.SUPPRESS` declarations on all seven admin action parsers, which avoid overwriting an earlier state selection. `test_state_dir_at_every_admin_parser_level` covers all seven actions at all three option positions. The original parser rejects the trailing position. |
+| F-09 | confirmed-fixed | A real `Path.lstat()` failure on WAL/SHM previously becomes `UNAUTHENTICATED` during authentication and escapes as `PermissionError` during a direct service transaction. Changed only sidecar metadata denial to fail closed with bounded retryable `RESOURCE_EXHAUSTED`; SQLite is never opened with unchecked sidecars. `test_sidecar_permission_denial_is_retryable_before_sql_and_during_dispatch` injects that OS failure at the actual filesystem boundary, covers pre-auth and later dispatch snapshots, successful full-operation retry, and matching MCP text/structured errors. `test_sidecar_links_still_rejected_after_permission_denial` retains hardlink rejection and recovery; original symlink/reparse tests remain. SQLite's last-close sidecar unlink is observed separately. The exact NTFS DELETE_PENDING scheduling race was not captured naturally, so that specific cause remains an inference. Connection-per-transaction lifetime and bounded polling are preserved. |
+| F-10 | confirmed-fixed | Confirmed that actual SDDL equality alone is insufficient under a restricted token. Repaired the reviewer test: its spy on `auth.owner_only` cannot see `paths.private_directory` calling `paths.owner_only`. Kept the real permission comparison and file-call assertion, and additionally require `auth.private_directory` never to be called for an existing parent. An injected parent-protection regression now causes the test to fail even on this restricted host. |
+| F-11 | confirmed-fixed | Added `self.rate(db, pid)` after ACL authorization and before `last_seen` update, in the same transaction. `test_get_refresh_consumes_participant_quota_and_rolls_back_when_exhausted` exercises active/closed/expired sessions, a granted participant's limit, unchanged `last_seen` after rejection, next-window recovery, read-only listing and unauthorized callers not consuming quota. Docs clarify that quotas bound accepted writes, not attempted lock acquisitions/requests. |
+| F-12 | confirmed-fixed | Retained direct renewal with narrowly handled `EXPIRED`/`CONFLICT`; other errors still propagate. `test_expired_shared_session_replaced_without_refreshing_history` verifies the original expired session's sentinel `last_seen` stays unchanged. `test_shared_session_handles_expiry_and_close_races_but_preserves_other_errors` changes real state between selection and renewal, covers both expiry and close, verifies replacement, and ensures quota failures are not swallowed. |
+| F-13 | confirmed-fixed | Retained both ignore patterns and all added Codex/Antigravity flag-order assertions; these strengthen the existing tests. `test_client_selection_and_dryrun_have_no_cli_side_effects` additionally covers both preview switches and selected-client modes with temporary CLI sentinels, absent token/state paths, and no CLI invocation or state creation. Ignore patterns are accidental-commit protection; repository path rejection remains the runtime boundary. |
+
+### Reviewer edit audit
+
+- Kept `.gitignore`, `__main__.py`, `paths.py`, `admin.py` and their correct
+  behavioral fixes, after adding the regressions above.
+- Kept the `auth.py` fix and both reviewer's existing authentication assertions;
+  added an independent test that remaps identity before authentication.
+- Kept `common.ps1` path normalization fixes. Reverted forced native command
+  lookup after disproving F-07; verified exact argv through both native commands
+  and npm-style PowerShell shims, including a shim-only installation.
+- Kept every original assertion in `tests/test_admin.py` and `tests/test_auth.py`.
+  Strengthened the parent-permission test to observe the missing call boundary.
+  No original tests were skipped, weakened, removed or given looser limits.
+- Two local core changes (`database.py`, `sessions.py`) are intentional deviations
+  from `a5d3062`; updated provenance documents them. The other eleven runtime
+  blobs and SQL migration retain source parity after newline normalization.
+
+### Verification boundaries
+
+Regression probes loaded original `0abd13a` functions into memory without
+replacing files. They produced expected failures for resolved-path exclusion,
+ACL reapplication, provisioning prechecks, direct identity binding, admin option
+placement, sidecar error mapping, session refresh quota, and expired-session
+history. An injected parent-ACL regression also failed the strengthened test.
+Separate baseline PowerShell runs reproduced F-06's wrong relative CWD and
+trailing-backslash argument merging, while disproving F-07's separator claim.
+The full suite and measured results are recorded in
+[BUILD_REPORT.md](BUILD_REPORT.md#independent-review-resolution-verification).
+
+Only project sources and temporary test fixtures were written. No setup script
+was executed outside preview mode, no registration/removal touched real configs,
+no default operator state or home client configs were accessed, and no remote
+production/VPS contact, commit or push was performed. Actual unrestricted-token
+ACL application and live client/model exchange remain operator checks outside
+this task's authorized execution; they are not deferred code fixes.

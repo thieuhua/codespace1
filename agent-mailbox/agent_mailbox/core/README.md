@@ -1,6 +1,7 @@
 # Session + Mailbox core
 
-Vendored unchanged runtime from `vps-mcp/mailbox_core` at `a5d3062`.
+Vendored runtime from `vps-mcp/mailbox_core` at `a5d3062`, with two local
+review fixes in storage error handling and session refresh quotas.
 See [provenance](PROVENANCE.md) and the [project README](../../README.md).
 
 - `sessions.py`: durable sessions, owners, ACLs, TTL, metadata activity.
