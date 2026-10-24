@@ -54,5 +54,3 @@ async def client(url):
         async with ClientSession(read, write) as session:
             await session.initialize()
             yield session
-
-

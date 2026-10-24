@@ -29,4 +29,3 @@ class Settings:
                 raise ValueError(f"{name} must be a positive integer")
         if self.default_ttl > self.max_ttl or self.max_wait_seconds > 20:
             raise ValueError("invalid TTL or wait limit")
-
