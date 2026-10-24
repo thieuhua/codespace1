@@ -22,6 +22,12 @@ sudo bash vps-mcp/oauth/deploy/front-nginx.sh --host mcp.example.com --issue-cer
 - `front-nginx.sh` ghi **một** file `/etc/nginx/conf.d/vps-mcp-oauth.conf`, kiểm tra `nginx -t`, tự hoàn tác nếu lỗi, chỉ `reload`. Không có nginx: proxy `https://<tên miền>` tới `http://127.0.0.1:8770`, giữ nguyên `Host` và đặt `X-Real-IP` là địa chỉ người truy cập.
 - Dùng Claude Code CLI với connector này: thêm `--allow-loopback`. Callback khác: `--extra-redirect <url>`.
 
+## Triển khai hiện tại
+
+- Tên miền `mcp.xuanthieu.site`, Cloudflare proxy cam (SSL Full), chứng chỉ Let's Encrypt cấp bằng `--issue-cert`, front-nginx chạy với `--cloudflare`.
+- Nếu bật proxy cam trước khi xin chứng chỉ, `--issue-cert` vẫn qua được (đường ACME ở cổng 80 không bị chặn).
+- Sau khi cài xong có thể xóa bản clone tạm (`/tmp/cs1`): dịch vụ chạy từ `/opt/vps-mcp/oauth`.
+
 ## Thêm connector
 
 claude.ai → Settings → Connectors → Add custom connector → URL `https://mcp.example.com/mcp`. Khi bấm kết nối, trang `/owner/approve` hiện ra: nhập mật khẩu và mã TOTP để phê duyệt.
@@ -34,7 +40,7 @@ claude.ai → Settings → Connectors → Add custom connector → URL `https://
 - Mã, token chỉ lưu dạng băm SHA-256. DB `0600` thuộc `mcp-oauth`. Chỉ cho phép đăng ký client có callback của Claude (`claude.ai`, `claude.com`).
 - Log chỉ ghi tên tool và client, không ghi tham số lệnh.
 - Header `Authorization` bị gỡ trước khi chuyển tiếp; chỉ loopback mới được tin `X-Real-IP`.
-- **Chưa thử với claude.ai thật** (chỉ với client OAuth chính thức của SDK `mcp`). Nếu đăng ký bị từ chối, `journalctl -u vps-mcp-oauth` in ra callback thật; thêm bằng `--extra-redirect`.
+- Đã thử với claude.ai thật (web và di động): đăng ký client, duyệt owner và gọi tool đều chạy. Nếu một client khác bị từ chối đăng ký, `journalctl -u vps-mcp-oauth` in ra callback thật; thêm bằng `--extra-redirect`.
 
 ## Vận hành
 
