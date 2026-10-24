@@ -35,6 +35,8 @@ def parser():
     shared.add_argument("--name", default="collab")
     shared.add_argument("--mailbox", default="collab")
     shared.add_argument("--ttl-seconds", type=int, default=604800)
+    for sub in actions.choices.values():
+        sub.add_argument("--state-dir", default=argparse.SUPPRESS)
     return root
 
 

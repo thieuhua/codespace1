@@ -109,6 +109,7 @@ class AuthenticatedDatabase(Database):
             principal = verify(conn, self.token)
             if self.bound_principal is not None and self.bound_principal != principal:
                 unauthenticated()
+            self.bound_principal = principal
             with trusted_identity(principal):
                 yield conn
 
@@ -116,9 +117,7 @@ class AuthenticatedDatabase(Database):
         if not TOKEN_PATTERN.fullmatch(self.token):
             unauthenticated()
         try:
-            with self.transaction() as conn:
-                principal = verify(conn, self.token)
-                self.bound_principal = principal
-                return principal
+            with self.transaction():
+                return self.bound_principal
         except (OSError, ValueError, sqlite3.Error):
             unauthenticated()

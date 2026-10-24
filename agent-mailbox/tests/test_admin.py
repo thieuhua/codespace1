@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from agent_mailbox.__main__ import parser
 from agent_mailbox.auth import load_token
 from agent_mailbox.paths import safe_path, state_home, owner_only, restricted_windows_token
 from tests.local_support import run_async, call, client
@@ -31,7 +32,7 @@ class AdminTests(unittest.TestCase):
     def test_admin_roundtrip_tokens_acl_idempotency_rotation_and_revoke(self):
         self.assertTrue(self.cli("init")["initialized"])
         self.assertTrue(self.cli("init")["initialized"])
-        created = self.cli("add-principal", "codex")
+        created = self.cli("add-principal", "codex", "--label", "Codex CLI")
         self.assertNotIn("token", created)
         token_path = Path(created["token_file"])
         secret = token_path.read_text().strip()
@@ -45,6 +46,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(first["mailbox"], second["mailbox"])
         listed = self.cli("list-principals")
         self.assertEqual([r["principal_id"] for r in listed["principals"]], ["antigravity", "codex"])
+        self.assertEqual({r["principal_id"]: r["label"] for r in listed["principals"]}["codex"], "Codex CLI")
         self.assertNotIn(secret, json.dumps(listed))
         self.assertNotIn(secret.encode(), (self.home / "mailbox.db").read_bytes())
         # Inspect actual Windows ACL, not chmod's synthetic Windows permission bits.
@@ -78,6 +80,7 @@ $entries=@($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System
         rotated = self.cli("add-principal", "codex", "--rotate", "--token-file", str(rotation_path), "--print-token")
         self.assertEqual(rotated["token"], rotation_path.read_text().strip())
         self.assertNotEqual(secret, rotated["token"])
+        self.assertEqual({r["principal_id"]: r["label"] for r in self.cli("list-principals")["principals"]}["codex"], "Codex CLI")
 
         async def scenario():
             async with client(self.home, token_path) as old:
@@ -104,6 +107,9 @@ $entries=@($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System
             with patch.dict(os.environ, {"AGENT_MAILBOX_HOME": str(self.home)}):
                 self.assertEqual(state_home(), self.home)
                 self.assertEqual(state_home(Path(self.temp.name) / "override"), Path(self.temp.name) / "override")
+        self.assertEqual(parser().parse_args(["admin", "init", "--state-dir", str(self.home)]).state_dir, str(self.home))
+        with self.assertRaises(ValueError):
+            safe_path("")
         with self.assertRaises(ValueError):
             safe_path(PROJECT / "secret.token", file=True)
         repo = Path(self.temp.name) / "fake-repo"
@@ -131,7 +137,11 @@ $entries=@($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System
             if name == "register-clients.ps1":
                 self.assertIn("AGENT_MAILBOX_TOKEN_FILE=", result.stdout)
                 self.assertNotIn("AGENT_MAILBOX_TOKEN=", result.stdout)
+                codex = next(line for line in result.stdout.splitlines() if "'codex'" in line)
+                self.assertLess(codex.index("'--env'"), codex.index("'agent_mailbox'"))
+                self.assertLess(codex.index("'agent_mailbox'"), codex.index("'--'"))
                 agy = next(line for line in result.stdout.splitlines() if "'agy'" in line)
                 self.assertLess(agy.index("'--env'"), agy.index("'agent_mailbox'"))
+                self.assertNotIn("'--'", agy)
                 self.assertIn(str(PROJECT / ".venv" / "Scripts" / "python.exe"), result.stdout)
         self.assertFalse(self.home.exists())

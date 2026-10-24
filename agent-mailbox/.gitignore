@@ -4,6 +4,8 @@ __pycache__/
 *.log
 *.db*
 *.sqlite*
+*.token
+tokens/
 .test-results/
 *.egg-info/
 build/

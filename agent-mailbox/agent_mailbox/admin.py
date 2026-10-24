@@ -5,11 +5,12 @@ import re
 from .auth import AUTH_SQL, issue_token, load_token, verify
 from .core.admin import Provisioner
 from .core.database import Database
+from .core.errors import GatewayError
 from .core.identity import Principal, trusted_identity
 from .core.mailboxes import MailboxService
 from .core.sessions import SessionService
 from .core.settings import Settings
-from .paths import private_directory, safe_path
+from .paths import owner_only, private_directory, safe_path
 
 
 def initialize(home):
@@ -25,21 +26,30 @@ def run(args, home):
     database = initialize(home)
     provisioner = Provisioner(database)
     if args.action == "init":
+        owner_only(database.settings.db_path)
         return {"state_dir": str(home), "initialized": True}
     if args.action == "add-principal":
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", args.id):
             raise ValueError("Principal ID must be 1..128 ASCII letters, digits, dots, underscores or hyphens")
-        path = safe_path(args.token_file or home / "tokens" / f"{args.id}.token", file=True)
+        raw_path = args.token_file if args.token_file is not None else home / "tokens" / f"{args.id}.token"
+        path = safe_path(raw_path, file=True)
         with database.transaction() as conn:
+            principal_row = conn.execute("SELECT label,enabled FROM principals WHERE principal_id=?", (args.id,)).fetchone()
+            if principal_row and not principal_row["enabled"]:
+                raise ValueError("Principal is disabled")
             existing = conn.execute("SELECT 1 FROM local_credentials WHERE principal_id=?", (args.id,)).fetchone()
             if existing and args.if_missing:
                 identity = verify(conn, load_token(str(path), {}))
                 if identity.principal_id != args.id:
                     raise ValueError("Existing token file belongs to a different principal")
+                owner_only(path)
                 return {"principal_id": args.id, "token_file": str(path), "created": False}
             if existing and not args.rotate:
                 raise ValueError("Principal already has a credential; use --if-missing or --rotate with a new token file")
-        provisioner.principal(args.id, args.label or args.id)
+        if path.exists():
+            raise ValueError("Token file already exists; choose a new path when rotating")
+        label = args.label or (principal_row["label"] if principal_row else args.id)
+        provisioner.principal(args.id, label)
         token = issue_token(database, args.id, path, rotate=args.rotate)
         result = {"principal_id": args.id, "token_file": str(path), "created": True}
         if args.print_token:
@@ -78,7 +88,12 @@ def run(args, home):
                                       AND status='active' ORDER BY ordinal DESC LIMIT 1""",
                                    (args.owner, args.name)).fetchone()
             if row:
-                session = sessions.renew(row[0], args.ttl_seconds) if sessions.get(row[0])["status"] == "active" else None
+                try:
+                    session = sessions.renew(row[0], args.ttl_seconds)
+                except GatewayError as exc:
+                    if exc.code not in ("EXPIRED", "CONFLICT"):
+                        raise
+                    session = None
             else:
                 session = None
             if session is None:

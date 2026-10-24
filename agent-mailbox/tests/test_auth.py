@@ -38,9 +38,11 @@ class AuthTests(ServiceCase):
 
         before = permissions()
         token_path = parent / "custom.token"
-        token = issue_token(self.db, "B", token_path)
+        with patch("agent_mailbox.auth.owner_only", wraps=owner_only) as protected:
+            token = issue_token(self.db, "B", token_path)
         self.assertEqual(token_path.read_text().strip(), token)
         self.assertEqual(permissions(), before)
+        protected.assert_called_once_with(token_path.resolve())
 
     def test_constant_time_digest_comparison_even_for_unknown_id(self):
         with self.db.transaction() as conn:
@@ -84,12 +86,15 @@ class AuthTests(ServiceCase):
 
     def test_process_cannot_rebind_to_another_principal_and_disabled_rechecked(self):
         runtime = AuthenticatedDatabase(self.settings, self.token)
+        self.assertEqual(SessionService(runtime).list()["sessions"], [])
+        self.assertEqual(runtime.bound_principal, Principal("A"))
         self.assertEqual(runtime.authenticate(), Principal("A"))
         self.admin.disable("A")
         self.assert_code("UNAUTHENTICATED", runtime.authenticate)
         with self.db.transaction(write=True) as conn:
             conn.execute("UPDATE local_credentials SET principal_id='B'")
         self.assert_code("UNAUTHENTICATED", runtime.authenticate)
+        self.assert_code("UNAUTHENTICATED", SessionService(runtime).list)
 
     def test_acl_failure_is_not_silently_ignored_for_normal_windows_token(self):
         import os

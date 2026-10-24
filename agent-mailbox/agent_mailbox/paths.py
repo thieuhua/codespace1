@@ -19,10 +19,8 @@ def restricted_windows_token():
         token.Close()
 
 
-def safe_path(value, *, file=False):
-    path = Path(value).expanduser().absolute()
-    # Check lexical ancestors before resolve() can hide a junction/symlink.
-    for candidate in (path, *path.parents):
+def _check_ancestors(target):
+    for candidate in (target, *target.parents):
         try:
             info = candidate.lstat()
         except FileNotFoundError:
@@ -32,7 +30,17 @@ def safe_path(value, *, file=False):
             raise ValueError("State/token paths must not contain links or reparse points")
         if (candidate / ".git").exists():
             raise ValueError("State and tokens must be outside repositories")
+
+
+def safe_path(value, *, file=False):
+    if value is None or not str(value).strip():
+        raise ValueError("State/token path must not be empty")
+    path = Path(value).expanduser().absolute()
+    # Check lexical ancestors before resolve() can hide a junction/symlink,
+    # then re-check resolved ancestors to catch subst drives or mount points.
+    _check_ancestors(path)
     path = path.resolve()
+    _check_ancestors(path)
     if file and path.exists():
         info = path.stat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -41,8 +49,9 @@ def safe_path(value, *, file=False):
 
 
 def state_home(value=None):
-    value = value or os.environ.get("AGENT_MAILBOX_HOME")
-    if not value:
+    if value is None:
+        value = os.environ.get("AGENT_MAILBOX_HOME") or None
+    if value is None:
         local = os.environ.get("LOCALAPPDATA")
         if not local:
             raise ValueError("Set AGENT_MAILBOX_HOME or --state-dir when LOCALAPPDATA is absent")
