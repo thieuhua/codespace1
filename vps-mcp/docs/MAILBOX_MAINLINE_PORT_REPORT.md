@@ -213,6 +213,15 @@ Windows. Final-head CI results belong to the current
 [PR checks](https://github.com/thieuhua/codespace1/pull/4/checks); earlier run
 links above are historical evidence, not claims about the final head.
 
+The first integrated head `151dec0` passed Ubuntu and Debian in both push and
+PR runs, and passed the Windows main suite/stress. Its Windows OAuth run failed
+while creating the ACL fixture (PowerShell subprocess exit 1). The follow-up
+creates only a DACL without changing directory ownership, clears inherited
+`PSModulePath` for Windows PowerShell and reports subprocess stderr on failure.
+A local incompatible-module fixture reproduced the inherited-module failure;
+the isolated helper passed and still rejected a deliberate ACL command error.
+All 42 OAuth tests passed again locally with the same permission assertions.
+
 ### Compatibility/security review and Git gates
 
 The selective comparison against `8a73554` leaves the core implementation

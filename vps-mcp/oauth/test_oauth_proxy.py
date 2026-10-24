@@ -23,26 +23,35 @@ CLAUDE_CB = "https://claude.ai/api/mcp/auth_callback"
 PASSWORD = "correct horse battery staple"
 
 
+def windows_acl(script, **variables):
+    # Windows PowerShell must not import PowerShell 7 modules inherited from CI.
+    env = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); "
+         "$ErrorActionPreference = 'Stop'; " + script],
+        env={**env, **variables}, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if result.returncode:
+        raise AssertionError(f"Windows fixture ACL command failed: {result.stderr.strip()} {result.stdout.strip()}")
+    return result.stdout
+
+
 @contextmanager
 def private_tempdir():
     """Create private Windows fixtures instead of relying on POSIX mode bits."""
     with tempfile.TemporaryDirectory() as path:
         if os.name == "nt":
             script = r"""
-            $ErrorActionPreference = 'Stop'
             $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-            $acl = Get-Acl -LiteralPath $env:VPS_MCP_TEST_PRIVATE_DIR
+            $acl = [System.Security.AccessControl.DirectorySecurity]::new()
             $acl.SetAccessRuleProtection($true, $false)
-            $acl.SetOwner($user)
             $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
                 $user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
             $acl.AddAccessRule($rule)
             Set-Acl -LiteralPath $env:VPS_MCP_TEST_PRIVATE_DIR -AclObject $acl
             """
-            subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                env={**os.environ, "VPS_MCP_TEST_PRIVATE_DIR": path}, check=True, capture_output=True,
-            )
+            windows_acl(script, VPS_MCP_TEST_PRIVATE_DIR=path)
         yield path
 
 
@@ -52,7 +61,6 @@ def assert_private_file(test, path, mode):
         test.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(mode))
         return
     script = r"""
-    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
     $acl = Get-Acl -LiteralPath $env:VPS_MCP_TEST_PRIVATE_FILE -ErrorAction Stop
     $sidType = [System.Security.Principal.SecurityIdentifier]
     $entries = @($acl.Access | ForEach-Object {
@@ -62,12 +70,7 @@ def assert_private_file(test, path, mode):
     @{user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
       owner = $acl.GetOwner($sidType).Value; entries = $entries} | ConvertTo-Json -Depth 4 -Compress
     """
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-        env={**os.environ, "VPS_MCP_TEST_PRIVATE_FILE": path},
-        check=True, capture_output=True, text=True, encoding="utf-8",
-    )
-    acl = json.loads(result.stdout)
+    acl = json.loads(windows_acl(script, VPS_MCP_TEST_PRIVATE_FILE=path))
     allowed = {acl["user"], "S-1-5-18", "S-1-5-32-544"}  # user, SYSTEM, Administrators
     test.assertIn(acl["owner"], allowed)
     grants = [entry for entry in acl["entries"] if entry["type"] == "Allow"]
