@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Owner SSH only:  sudo bash front-nginx.sh --host mcp.example.com [--cloudflare] [--cert F --key F]
+# Owner SSH only:  sudo bash front-nginx.sh --host mcp.example.com [--cloudflare] [--issue-cert [--email you@x]] [--cert F --key F]
 #
 # Publishes the OAuth front door (127.0.0.1:8770) through the nginx already on this VPS by writing ONE
 # new file, /etc/nginx/conf.d/vps-mcp-oauth.conf, with its own server_name. Existing sites are not edited.
@@ -7,11 +7,14 @@
 #
 # Cloudflare: set SSL/TLS mode to "Full" or "Full (strict)" (not "Flexible"), and pass --cloudflare so the
 # real visitor address (CF-Connecting-IP) is used for login throttling.
+# --issue-cert: when no certificate covers the host, get one from Let's Encrypt (certbot --webroot). It adds
+# /etc/nginx/conf.d/vps-mcp-oauth-acme.conf (port 80, ACME path only, kept so renewals keep working). The DNS
+# record for the host must already exist (proxied through Cloudflare is fine) and reach this VPS.
 set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "Chạy bằng sudo (qua SSH của chủ sở hữu)." >&2; exit 1; }
 
-host=""; cert=""; key=""; realip='$remote_addr'
+host=""; cert=""; key=""; realip='$remote_addr'; issue=0; email=""
 conf=/etc/nginx/conf.d/vps-mcp-oauth.conf
 
 while [ $# -gt 0 ]; do
@@ -20,7 +23,9 @@ while [ $# -gt 0 ]; do
     --cert) cert="${2:?thiếu đường dẫn}"; shift 2 ;;
     --key) key="${2:?thiếu đường dẫn}"; shift 2 ;;
     --cloudflare) realip='$http_cf_connecting_ip'; shift ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    --issue-cert) issue=1; shift ;;
+    --email) email="${2:?thiếu email}"; shift 2 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "Tham số lạ: $1" >&2; exit 1 ;;
   esac
 done
@@ -46,22 +51,59 @@ covers() {  # $1=host $2=danh sách SAN
   done
   return 1
 }
-if [ -z "$cert" ]; then
+find_cert() {
+  local f sans
   for f in /etc/letsencrypt/live/*/fullchain.pem /etc/ssl/cloudflare/*.pem /etc/nginx/ssl/*.crt /etc/nginx/ssl/*.pem; do
     [ -f "$f" ] || continue
     sans="$(openssl x509 -in "$f" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d '\n' || true)"
     if covers "$host" "$sans"; then
       cert="$f"
       key="${f%fullchain.pem}privkey.pem"; [ -f "$key" ] || key="${f%.*}.key"
-      break
+      return 0
     fi
   done
+  return 1
+}
+
+issue_cert() {
+  local webroot=/var/www/vps-mcp-acme acme=/etc/nginx/conf.d/vps-mcp-oauth-acme.conf err
+  command -v certbot >/dev/null || { echo "Cài certbot..."; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot >/dev/null; }
+  mkdir -p "$webroot"
+  cat >"$acme" <<ACME
+# Managed by vps-mcp/oauth/deploy/front-nginx.sh -- answers Let's Encrypt HTTP-01 for $host (renewals need it too).
+server {
+    listen 80;
+    server_name $host;
+    location /.well-known/acme-challenge/ { root $webroot; }
+    location / { return 404; }
+}
+ACME
+  err="$(mktemp)"
+  if ! nginx -t 2>"$err"; then
+    cat "$err" >&2; rm -f "$err" "$acme"
+    echo "nginx -t thất bại với block ACME: đã gỡ block, chưa reload." >&2; exit 1
+  fi
+  rm -f "$err"
+  systemctl reload nginx
+  local contact=(--register-unsafely-without-email); [ -n "$email" ] && contact=(--email "$email")
+  certbot certonly --webroot -w "$webroot" -d "$host" --non-interactive --agree-tos "${contact[@]}" || {
+    cat >&2 <<HELP
+certbot thất bại. Kiểm tra: (1) bản ghi DNS của $host đã có và trỏ về VPS này (Cloudflare: bật proxy cam);
+(2) cổng 80 tới được nginx (Cloudflare chỉ cần "Always Use HTTPS" không chặn đường /.well-known/acme-challenge/).
+HELP
+    exit 1
+  }
+}
+
+if [ -z "$cert" ]; then
+  find_cert || { [ "$issue" -eq 1 ] && issue_cert && find_cert; } || true
 fi
 [ -n "$cert" ] && [ -n "$key" ] && [ -f "$cert" ] && [ -f "$key" ] || {
   cat >&2 <<EOF
-Không tìm thấy chứng chỉ TLS phủ $host. Hãy chọn một trong hai:
-  - certbot certonly --nginx -d $host        rồi chạy lại script này
+Không tìm thấy chứng chỉ TLS phủ $host. Hãy chọn một trong ba:
+  - chạy lại với --issue-cert           (tự xin chứng chỉ Let's Encrypt; cần DNS của $host đã trỏ về VPS)
   - truyền --cert /đường/dẫn/fullchain.pem --key /đường/dẫn/privkey.pem  (ví dụ Cloudflare Origin Certificate)
+  - tự chạy certbot rồi chạy lại script này
 EOF
   exit 1
 }

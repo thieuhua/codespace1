@@ -130,7 +130,7 @@ cat <<EOF
 HOÀN TẤT (không dịch vụ cũ nào bị restart).
 
 Bước tiếp theo:
-  1. Cho $public_url trỏ tới nginx của VPS:   sudo bash $here/front-nginx.sh --host $host
+  1. Cho $public_url trỏ tới nginx của VPS:   sudo bash $here/front-nginx.sh --host $host --issue-cert [--cloudflare]
      (hoặc dùng Caddy / Cloudflare Tunnel: proxy tới http://127.0.0.1:8770, xem README)
   2. Thử từ ngoài:   curl -s $public_url/.well-known/oauth-protected-resource/mcp
   3. claude.ai -> Settings -> Connectors -> Add custom connector -> URL: $public_url/mcp

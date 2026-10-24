@@ -14,10 +14,11 @@ claude.ai ──HTTPS──► nginx/Cloudflare ──► 127.0.0.1:8770 vps-mcp
 ```bash
 git clone --quiet https://github.com/thieuhua/codespace1.git /tmp/cs1 && cd /tmp/cs1 && git checkout <commit-đã-ghim>
 sudo bash vps-mcp/oauth/deploy/install-oauth.sh --public-url https://mcp.example.com
-sudo bash vps-mcp/oauth/deploy/front-nginx.sh --host mcp.example.com [--cloudflare]
+sudo bash vps-mcp/oauth/deploy/front-nginx.sh --host mcp.example.com --issue-cert [--cloudflare]
 ```
 
 - `install-oauth.sh` chỉ **tạo mới**: user `mcp-oauth`, `/opt/vps-mcp/oauth`, `/etc/vps-mcp-oauth`, một unit systemd. Không restart `vps-mcp*`. Chạy lại an toàn (nâng cấp mã). Script hỏi mật khẩu (≥ 14 ký tự) và in khóa TOTP để thêm vào ứng dụng xác thực.
+- `--issue-cert` tự xin chứng chỉ Let's Encrypt (certbot webroot) nếu chưa có chứng chỉ phủ tên miền; cần bản ghi DNS đã trỏ về VPS (Cloudflare: bật proxy cam). Thêm file `vps-mcp-oauth-acme.conf` (cổng 80, chỉ đường ACME) để gia hạn tự động.
 - `front-nginx.sh` ghi **một** file `/etc/nginx/conf.d/vps-mcp-oauth.conf`, kiểm tra `nginx -t`, tự hoàn tác nếu lỗi, chỉ `reload`. Không có nginx: proxy `https://<tên miền>` tới `http://127.0.0.1:8770`, giữ nguyên `Host` và đặt `X-Real-IP` là địa chỉ người truy cập.
 - Dùng Claude Code CLI với connector này: thêm `--allow-loopback`. Callback khác: `--extra-redirect <url>`.
 
