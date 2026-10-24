@@ -1,9 +1,13 @@
 """Tests for the OAuth front door. Run from this directory: python -m unittest -v test_oauth_proxy"""
 import base64
+from contextlib import closing, contextmanager, redirect_stdout
 import hashlib
+import io
 import json
 import os
+from pathlib import Path
 import secrets
+import subprocess
 import tempfile
 import time
 import unittest
@@ -17,6 +21,61 @@ import oauth_proxy as op
 
 CLAUDE_CB = "https://claude.ai/api/mcp/auth_callback"
 PASSWORD = "correct horse battery staple"
+
+
+@contextmanager
+def private_tempdir():
+    """Create private Windows fixtures instead of relying on POSIX mode bits."""
+    with tempfile.TemporaryDirectory() as path:
+        if os.name == "nt":
+            script = r"""
+            $ErrorActionPreference = 'Stop'
+            $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $acl = Get-Acl -LiteralPath $env:VPS_MCP_TEST_PRIVATE_DIR
+            $acl.SetAccessRuleProtection($true, $false)
+            $acl.SetOwner($user)
+            $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+                $user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+            Set-Acl -LiteralPath $env:VPS_MCP_TEST_PRIVATE_DIR -AclObject $acl
+            """
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                env={**os.environ, "VPS_MCP_TEST_PRIVATE_DIR": path}, check=True, capture_output=True,
+            )
+        yield path
+
+
+def assert_private_file(test, path, mode):
+    """Check POSIX permissions or the actual Windows DACL, never skip privacy."""
+    if os.name != "nt":
+        test.assertEqual(oct(os.stat(path).st_mode & 0o777), oct(mode))
+        return
+    script = r"""
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    $acl = Get-Acl -LiteralPath $env:VPS_MCP_TEST_PRIVATE_FILE -ErrorAction Stop
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $entries = @($acl.Access | ForEach-Object {
+        @{sid = $_.IdentityReference.Translate($sidType).Value;
+          type = $_.AccessControlType.ToString(); rights = [int]$_.FileSystemRights}
+    })
+    @{user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
+      owner = $acl.GetOwner($sidType).Value; entries = $entries} | ConvertTo-Json -Depth 4 -Compress
+    """
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        env={**os.environ, "VPS_MCP_TEST_PRIVATE_FILE": path},
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    acl = json.loads(result.stdout)
+    allowed = {acl["user"], "S-1-5-18", "S-1-5-32-544"}  # user, SYSTEM, Administrators
+    test.assertIn(acl["owner"], allowed)
+    grants = [entry for entry in acl["entries"] if entry["type"] == "Allow"]
+    test.assertTrue(grants, "Private file must have an explicit non-null DACL")
+    for grant in grants:
+        test.assertIn(grant["sid"], allowed, "Private test state grants another account access")
+    test.assertTrue(any(entry["sid"] == acl["user"] and entry["rights"] & 3 == 3 for entry in grants),
+                    "The current user must retain read/write access")
 
 
 class Harness:
@@ -301,12 +360,17 @@ class RegistrationAndRoutingTests(unittest.TestCase):
         self.assertNotIn(429, codes[:60])
 
     def test_state_survives_restart(self):
-        with tempfile.TemporaryDirectory() as d:
+        with private_tempdir() as d:
             path = os.path.join(d, "o.db")
-            store = op.Store(path)
-            store.put_client("c1", "{}")
-            self.assertEqual(op.Store(path).get_client("c1"), "{}")
-            self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+            with mock.patch.object(op.os, "chmod", wraps=os.chmod) as chmod:
+                store = op.Store(path)
+                with closing(store.db):
+                    store.put_client("c1", "{}")
+                restarted = op.Store(path)
+                with closing(restarted.db):
+                    self.assertEqual(restarted.get_client("c1"), "{}")
+                    assert_private_file(self, path, 0o600)
+                self.assertEqual(chmod.call_args_list, [mock.call(path, 0o600), mock.call(path, 0o600)])
 
 
 class UnitTests(unittest.TestCase):
@@ -359,13 +423,17 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(op.Settings(public_url="https://mcp.test/").resource_url, "https://mcp.test/mcp")
 
     def test_init_owner_cli_writes_private_file_and_rejects_short_password(self):
-        with tempfile.TemporaryDirectory() as d:
+        with private_tempdir() as d:
             path = os.path.join(d, "oauth", "owner.json")
             with mock.patch("getpass.getpass", side_effect=["short", "short"]), self.assertRaises(SystemExit):
                 op.main(["init-owner", "--file", path])
-            with mock.patch("getpass.getpass", side_effect=[PASSWORD + " 12345", PASSWORD + " 12345"]):
+            output = io.StringIO()
+            with mock.patch("getpass.getpass", side_effect=[PASSWORD + " 12345", PASSWORD + " 12345"]), \
+                    mock.patch.object(op.os, "open", wraps=os.open) as create, redirect_stdout(output):
                 op.main(["init-owner", "--file", path])
-            self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o640")
+            create.assert_called_once_with(Path(path + ".tmp"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            assert_private_file(self, path, 0o640)
+            self.assertIn("otpauth://totp/", output.getvalue())
             self.assertTrue(op.OwnerCredentials.load(path).check_password(PASSWORD + " 12345"))
             with mock.patch("getpass.getpass", side_effect=["x" * 20, "x" * 20]), self.assertRaises(SystemExit):
                 op.main(["init-owner", "--file", path])  # refuses to overwrite without --force
@@ -391,7 +459,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(op.Settings.from_env({"OAUTH_PUBLIC_URL": "https://mcp.test"}).allow_loopback_redirects)
 
     def test_service_unit_is_locked_down_and_loopback_only(self):
-        with open(os.path.join(self.ROOT, "deploy", "vps-mcp-oauth.service")) as f:
+        with open(os.path.join(self.ROOT, "deploy", "vps-mcp-oauth.service"), encoding="utf-8") as f:
             unit = f.read()
         for directive in ("User=mcp-oauth", "NoNewPrivileges=yes", "ProtectSystem=strict", "IPAddressDeny=any",
                           "IPAddressAllow=localhost", "CapabilityBoundingSet=", "StateDirectoryMode=0700", "PrivateTmp=yes",
@@ -402,7 +470,7 @@ class DeploymentTests(unittest.TestCase):
 
     def test_scripts_do_not_restart_existing_mcp_services(self):
         for name in ("install-oauth.sh", "front-nginx.sh"):
-            with open(os.path.join(self.ROOT, "deploy", name)) as f:
+            with open(os.path.join(self.ROOT, "deploy", name), encoding="utf-8") as f:
                 text = f.read()
             for protected in ("vps-mcp.service", "vps-mcp-dev", "vps-mcp-approval", "vps-mcp-tunnel"):
                 for verb in ("restart", "stop", "disable", "kill"):

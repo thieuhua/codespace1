@@ -1,20 +1,18 @@
-"""End-to-end check: the unmodified gateway.py + the MCP SDK's own OAuth client + this proxy.
+"""End-to-end check: the real gateway + the MCP SDK's OAuth client + this proxy.
 
-Not part of unit-test discovery. Needs the packages from requirements.txt and a free port 8765:
+Not part of unit-test discovery. Needs the packages from requirements.txt:
 
     python e2e_check.py
 
 The proxy is served in-process (ASGI) under the public name https://mcp.test, so no DNS or TLS
-is needed; the gateway runs as a real subprocess and the proxy talks to it over real HTTP.
+is needed. The gateway uses an owned ephemeral HTTP listener and mocked privileged IPC;
+no production port, socket, state or credentials are accessed.
 """
 import asyncio
-import os
-import socket
-import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -27,7 +25,9 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAu
 
 import oauth_proxy as op
 
-GATEWAY = Path(__file__).resolve().parents[1] / "gateway.py"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tests.protocol_support import local_server, make_gateway
+
 PASSWORD = "e2e password that is long enough"
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 
@@ -50,24 +50,21 @@ class MemoryStorage:
         self.client = info
 
 
-def wait_for_port(port: int, seconds: float = 20.0) -> None:
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                return
-        time.sleep(0.2)
-    raise SystemExit(f"port {port} never opened")
-
-
 async def main() -> None:
-    gateway = subprocess.Popen([sys.executable, str(GATEWAY)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        wait_for_port(8765)
-        settings = op.Settings(public_url="https://mcp.test", db_path=":memory:")
+    gateway = make_gateway()
+    with patch.object(gateway, "call", side_effect=RuntimeError("isolated worker offline")) as worker, \
+            patch.object(gateway, "approval_call", side_effect=AssertionError("no broker IPC")) as broker:
+        async with local_server(gateway.mcp.streamable_http_app()) as url:
+            await check_oauth(url)
+        worker.assert_called_once_with("projects")
+        broker.assert_not_called()
+
+
+async def check_oauth(upstream_url: str) -> None:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=5), trust_env=False) as upstream:
+        settings = op.Settings(public_url="https://mcp.test", db_path=":memory:", upstream=upstream_url)
         owner = op.OwnerCredentials.create(PASSWORD)
         store = op.Store(":memory:")
-        upstream = httpx.AsyncClient(timeout=httpx.Timeout(30, connect=5), trust_env=False)
         app = op.build_app(settings, store, owner, op.FailureLimiter(), upstream)
         captured: dict = {}
 
@@ -133,15 +130,11 @@ async def main() -> None:
                     assert captured["logins"] == 2, captured["logins"]
                     print("after revoke-all the old token is useless; client had to log in with the owner again")
 
-        anonymous = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://mcp.test")
-        assert (await anonymous.post("/mcp", json={})).status_code == 401
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://mcp.test") as anonymous:
+            assert (await anonymous.post("/mcp", json={})).status_code == 401
         print("anonymous request rejected with 401")
         print("E2E OK")
-    finally:
-        gateway.terminate()
-        gateway.wait(timeout=10)
 
 
 if __name__ == "__main__":
-    os.chdir(tempfile.gettempdir())
     asyncio.run(main())

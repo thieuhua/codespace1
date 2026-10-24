@@ -15,8 +15,8 @@ No whole milestone is cherry-picked.
 | PORT/RENAME | M0 `gateway/__init__.py`, settings; M1 database, identity, sessions, admin, common, errors, migration | `mailbox_core/`; avoids shadowing production `gateway.py` |
 | PORT/RENAME | M2 mailboxes; M3 tools/activity; M4 bounded workers, HTTP shutdown and durability hardening | `mailbox_core/`; preserve the functional core |
 | ADAPT | M3/M4 registration in obsolete `server.py` | Add registration to production `gateway.py`; preserve its FastMCP configuration |
-| ADAPT | M0/M4 environment-derived storage defaults | Remove implicit storage activation; runtime has no services/identity adapter and denies before any database access |
-| ADAPT | M1–M4 service, protocol, hardening and stress tests | Rename imports; test actual 29-tool production gateway with temporary adapters and isolated IPC |
+| ADAPT | M0/M4 environment-derived storage defaults | Remove implicit storage activation; no services means no registration and exactly 16 default tools |
+| ADAPT | M1–M4 service, protocol, hardening and stress tests | Rename imports; assert exact 16 default tools and 29 only after service injection with temporary adapters and isolated IPC |
 | ADAPT | M0 six-tool fixture and smoke harness | New exact 16-tool fixture captured from production baseline; source-only smoke plus owned ephemeral HTTP |
 | ADAPT | M4 CI and docs | Windows/Linux checks for the production architecture; accurate activation prerequisites |
 | ADAPT | Main `deploy/production/install.sh` | Include `mailbox_core` modules/migration in immutable release hashing, copy and comparison; otherwise the additive gateway would fail to import after owner staging. New pure source-manifest helper has isolated tests. No installer or production action was run |
@@ -35,10 +35,13 @@ record schemas/descriptions/output schemas and response shapes, not live values.
 
 - No `gateway/` directory, obsolete server/smoke/prototype or stale CI is restored.
   Import checks resolve `gateway` to production `gateway.py`.
-- Production passes no services to the 13-tool registration. `Settings` has no
-  environment-derived path, and no runtime DB factory exists. Even a Principal
-  context alone is insufficient. Fixed identity/services injection exists only
-  in isolated tests; no header, model argument or environment flag enables it.
+- Production passes no services, so the 13 new tools are not registered: the
+  default inventory is exactly the original 16 tools with baseline schemas.
+  Explicit service injection registers 29 tools only after activation (currently
+  isolated tests); these calls still require a trusted identity before storage
+  access. `Settings` has no environment-derived path or runtime DB factory.
+  A Principal context alone, header, model argument or environment flag cannot
+  activate tools. Fixed identity/services injection exists only in isolated tests.
 - Gateway-worker-broker separation and original function ASTs are preserved.
   No mailbox import or state path is introduced into worker/broker, no new
   privileged policy or administration tool is exposed.
@@ -55,8 +58,9 @@ record schemas/descriptions/output schemas and response shapes, not live values.
 ## 16 + 13 contract matrix
 
 All original signatures, descriptions, input/output schemas and dispatch bodies
-match the baseline fixture. Default argument forwarding and structured response
-envelopes are tested over real ephemeral HTTP plus socket doubles on both OSes.
+match the baseline fixture. The default inventory is exactly 16; with services
+injected it is exactly 29. Default argument forwarding and structured response
+envelopes are tested in both modes over ephemeral HTTP plus socket doubles on both OSes.
 Linux additionally exercises actual temporary Unix worker IPC and POSIX jobs.
 
 | Original tool | Preserved dispatch / response |
@@ -159,8 +163,8 @@ Local Windows CPython 3.11.4 verification after the fix: **46 tests, 39 passed,
 7 existing POSIX-only skips**, plus **3/3 source smoke tests**. Compileall,
 Git Bash syntax-only checking and `git diff --check origin/main` passed. The
 stress workload completed in 14.875 seconds with 66,609,152 peak RSS bytes under
-the enforced 1 GiB Windows Job limit. This is local evidence; the fix has not
-been pushed or checked by GitHub Actions.
+the enforced 1 GiB Windows Job limit. At that point the fix had not yet been
+pushed or checked by GitHub Actions.
 
 A fresh staged checkout with `core.autocrlf=true` also passed all 46 tests
 (39 passed, 7 skipped), 3 smoke tests, compileall and Git Bash syntax checking.
@@ -171,9 +175,43 @@ with retry. Adding 50 ms per write transaction reproduced the 90-second stress
 timeout, then completed all 2,000 messages in 126.062 seconds under the same
 Windows Job limit with the 300-second budget.
 
-Separately, current `origin/main` at `5eedae7` conflicts with this branch in
+### Main integration and conditional registration (2026-10-24)
+
+`origin/main` at `5eedae7` conflicted with the branch in
 `.github/workflows/vps-mcp-test.yml`, `vps-mcp/PRODUCTION.md` and `vps-mcp/README.md`.
-Those mainline changes have not been merged into this test-only fix.
+Merge commit `7e0c647` now incorporates main, retaining its OAuth front door,
+tests and documentation alongside mailbox additions, the Windows/Ubuntu matrix
+and unprivileged Debian job. Workflow paths and shell commands work on Windows.
+Main did not change the legacy gateway functions, worker, broker, production
+units or dependencies. All 16 tool bodies and both IPC helpers match main's
+Git LF bytes; baseline fixtures remain unchanged.
+
+Default registration now returns before adding tools unless services are
+injected. Separate contract/auth checks cover exact 16 and 29 inventories,
+baseline schemas/dispatch, absent default mailbox tools despite forged identity
+or a Principal context, and authentication before storage in injected mode.
+The A/B/C protocol and ACL scenarios retain their existing assertions.
+Main's OAuth E2E retains its 16-tool/auth/refresh/revocation assertions and now
+uses an owned ephemeral gateway listener plus mocked worker/broker IPC. OAuth
+checks also execute under the unprivileged Debian account.
+
+Local Windows verification after integration: **48 tests, 41 passed and the
+same 7 POSIX-only skips** in 27.560 seconds; **3/3 source smoke tests**;
+**42/42 OAuth tests**, with no OAuth skips; and **OAuth E2E passed**. Compileall,
+all installer/deployment-script syntax checks and `git diff --check origin/main`
+passed. Stress retained all 2,000 messages/eight writers/32 pollers, completed
+in 17.453 seconds, and used 65,851,392 peak RSS bytes under the 1 GiB Windows
+Job limit. Source fixtures, legacy tool bodies and protocol/ACL assertions
+remain unchanged except for the explicit default/injected inventory split.
+
+OAuth test portability fixes close SQLite handles before restart/cleanup, read
+deployment sources as UTF-8 and capture test CLI output. POSIX permission
+assertions still require exactly `0600`/`0640`; Windows fixtures use private
+inherited DACLs and assert actual owner/access entries. Both platforms also
+assert the requested chmod/create modes. No test is skipped to accommodate
+Windows. Final-head CI results belong to the current
+[PR checks](https://github.com/thieuhua/codespace1/pull/4/checks); earlier run
+links above are historical evidence, not claims about the final head.
 
 ### Compatibility/security review and Git gates
 
@@ -189,9 +227,10 @@ The original MVP branch remains `8a73554e5438a639e31cfa79fce192ab440820a9`.
 Integration commits are grouped into baseline contract/inventory (`7c1c87b`),
 core (`bae53e3`), complete owner staging package (`e8eb6f7`), isolated verification/
 CI (`896f16b`), operational/API report (`158b99d`), and whitespace (`c5f2e4a`).
-The pre-existing planning commit `11d50c5` is retained. PR #4 targets the original
-production baseline; only a regular two-parent merge commit is permitted after
-all final-head checks pass. No force push, main rewrite or deployment is used.
+The pre-existing planning commit `11d50c5` is retained; its obsolete task prompt
+is removed. PR #4 incorporates current main via a normal two-parent merge
+commit. Only the feature branch is pushed; merging the PR is outside this task.
+No force push, main rewrite or deployment is used.
 
 This is source integration only. No production endpoint, state, credentials,
 services, installation or restart is used by this task. Runtime activation

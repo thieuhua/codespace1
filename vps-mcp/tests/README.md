@@ -7,13 +7,23 @@ smoke separately with `python -m unittest -v production_smoke_test.py`.
 
 - `fixtures/` records the production baseline schemas, function ASTs, canonical
   source hashes, dispatch/result envelopes and exact released-source hashes.
-- `test_production_contract.py` uses the actual production gateway, SDK/HTTP,
-  socket doubles and exact 16+13 inventory. No real privileged socket is opened.
+- `test_production_contract.py` uses the actual production gateway, SDK/HTTP
+  and socket doubles. Default registration asserts exactly 16 baseline tools
+  and schemas; injected services assert exactly 29 tools with the same legacy
+  schemas and dispatch. Both modes reject forged identity. No real privileged
+  socket is opened.
 - `test_sessions.py`, `test_mailboxes.py`, `test_hardening.py`,
   `test_mainline_hardening.py` cover ACLs, context isolation, ID confusion,
   dedupe, migrations, storage bounds/errors, crash recovery, cancel and shutdown.
 - `test_protocol.py` tests A/B/C restart, ACK/reply and shutdown through the
-  real 29-tool gateway with test-only fixed identities and temporary state.
+  real 29-tool gateway after service injection, with test-only fixed identities
+  and temporary state.
+- `../oauth/test_oauth_proxy.py` and `../oauth/e2e_check.py` retain main's OAuth
+  assertions, including exactly 16 tools through the default gateway. E2E uses
+  the shared owned ephemeral HTTP listener and mocked worker/broker IPC. Run
+  these separately from discovery as described in [OAuth](../oauth/README.md).
+  OAuth permission tests keep exact POSIX modes on Linux and verify actual
+  Windows DACLs in private temporary fixtures; all 42 tests run on both OSes.
 - `test_posix_production.py` runs actual worker Unix sockets, Bash and jobs
   only in Linux temporary fixtures; broker policy/account/systemctl are mocked.
   These seven POSIX cases are explicitly skipped on Windows.

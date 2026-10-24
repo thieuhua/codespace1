@@ -60,6 +60,14 @@ Sự cố thường gặp: `502` = gateway hoặc dịch vụ chưa chạy; tran
 ```bash
 pip install -r requirements.txt
 python -m unittest -v test_oauth_proxy      # 42 test: luồng OAuth, tấn công, cấu hình
-PYTHONPATH=. python e2e_check.py            # gateway.py thật + client OAuth của SDK
-bash -n deploy/*.sh
+python e2e_check.py                       # gateway.py thật + client OAuth của SDK
+for f in deploy/*.sh; do bash -n "$f"; done
 ```
+
+E2E dùng cổng HTTP tạm do bài test sở hữu và giả lập IPC worker/broker; không
+truy cập cổng 8765, socket, trạng thái hay thông tin xác thực production.
+Gateway mặc định phải quảng bá đúng 16 tool; 29 tool chỉ có sau khi inject
+services Session/Mailbox. Trên Windows dùng Python trong `.venv/Scripts` và
+Git Bash để kiểm tra cú pháp shell.
+42 test chạy trên cả Windows và Linux: Linux kiểm tra chính xác mode
+`0600/0640`; Windows kiểm tra DACL thực tế của file trong thư mục tạm riêng.
