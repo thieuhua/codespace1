@@ -83,3 +83,6 @@ separate private directory while no process has it open. Never mix older DB
 files with newer WAL/SHM. Pre-mailbox code simply leaves the separate store unused.
 Backup restoration omits later messages; retain/reconcile the candidate data
 explicitly. Approval policy/state/secrets and tunnel are outside this procedure.
+## OAuth front door (separate, additive)
+
+`vps-mcp-oauth` (`vps-mcp/oauth/`) listens on `127.0.0.1:8770`, runs as `mcp-oauth`, and forwards authenticated requests to the unchanged gateway. It is installed by owner SSH with `oauth/deploy/install-oauth.sh`, which never restarts the services above. Its secrets live outside Git: `/etc/vps-mcp-oauth/owner.json` (password hash + TOTP secret) and `/var/lib/vps-mcp-oauth/oauth.db`. **Never commit** either, nor the TOTP secret printed during setup.

@@ -1,0 +1,43 @@
+[Unit]
+Description=VPS MCP OAuth front door (Claude custom connector)
+After=network.target vps-mcp.service
+Wants=vps-mcp.service
+[Service]
+Type=simple
+User=mcp-oauth
+Group=mcp-oauth
+EnvironmentFile=/etc/vps-mcp-oauth/oauth.env
+WorkingDirectory=/opt/vps-mcp/oauth
+ExecStart=/opt/vps-mcp/oauth/venv/bin/python -I /opt/vps-mcp/oauth/oauth_proxy.py serve
+Restart=on-failure
+RestartSec=3
+StateDirectory=vps-mcp-oauth
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=200M
+TasksMax=40
+KillMode=control-group
+[Install]
+WantedBy=multi-user.target

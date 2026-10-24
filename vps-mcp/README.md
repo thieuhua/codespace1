@@ -20,6 +20,7 @@ The application exposes repository discovery, file CRUD, Git status, shell/test 
 
 ## Layout
 
+- `oauth/` — OAuth 2.1 front door (password + TOTP owner approval) so Claude custom connectors can reach the gateway over HTTPS; separate service, gateway untouched. See [oauth/README.md](oauth/README.md).
 - `deploy/production/` — systemd units and owner-SSH staging installer.
 - `production_smoke_test.py` — basic source, unit and deployed-release consistency checks.
 - `PRODUCTION.md` — environment-specific deployment notes, secret boundary and source provenance.
@@ -51,6 +52,9 @@ cd vps-mcp
 .venv/bin/python -m unittest discover -v
 .venv/bin/python -m compileall -q gateway.py worker.py broker.py mailbox_core tests deploy/production/release_manifest.py
 bash -n deploy/production/install.sh
+.venv/bin/python -m pip install -r oauth/requirements.txt
+(cd oauth && ../.venv/bin/python -m unittest -v test_oauth_proxy && ../.venv/bin/python e2e_check.py)
+for f in oauth/deploy/*.sh; do bash -n "$f"; done
 ```
 
 Default verification reads checked-in sources only, including original function
