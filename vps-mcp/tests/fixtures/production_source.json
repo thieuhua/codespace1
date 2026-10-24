@@ -24,9 +24,9 @@
     "vps-mcp/worker.py": "4f3d72d0b4d56c1672fe618a94d7642e7f9808d394f932ff7d5eff0684ea12fb",
     "vps-mcp/broker.py": "e8cb493f780d06530e83def0036300bce11773e993fde1146e4360557ce8884d",
     "vps-mcp/requirements.txt": "6fb8bd460feacf38c07acf41073aabc364e05f2e1b0503cc2608e53df4e8f63e",
-    "vps-mcp/deploy/production/install.sh": "b7e4265f8b70edec4a7ad2046a58ce4e029a3b0e80be4912cd65e834895cd95f",
     "vps-mcp/deploy/production/vps-mcp-approval.service": "ac12e9476c9fc02ae08b785328a802a2d8e372d07c5e86e2e715dfa16ab95a76",
     "vps-mcp/deploy/production/vps-mcp-dev.service": "9119af9e12286540a7132f90038c0f4f586f468f3de9048f28d3881b060e9c08",
     "vps-mcp/deploy/production/vps-mcp.service": "698b7a94eedafde96fd4bc09349743ec3cd58232491f02d110c869700bb29ab0"
-  }
+  },
+  "adapted_installer_reason": "The gateway now imports mailbox_core; staging and release hashing must include its Python modules and SQL migration. Owner-only activation semantics remain unchanged."
 }
