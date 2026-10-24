@@ -1,0 +1,3 @@
+[submodule "combat-analysis"]
+	path = combat-analysis
+	url = git@github.com:thieuhua/combat-analysis.git
