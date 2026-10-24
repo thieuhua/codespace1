@@ -236,6 +236,14 @@ after that correction passed all 48 tests (41 passed, 7 existing skips) in
 34.093 seconds, source smoke 3/3, compileall, all Bash syntax checks and
 whitespace checks against `origin/main`.
 
+At `316e242` both Ubuntu main suites (including the synchronized UID test)
+passed. Its PR OAuth replay test then crossed a real 30-second boundary and
+generated a fresh code instead of replaying the first one. The test harness
+now freezes its clock at construction and advances only by its explicit offset;
+the replay scenario sends the identical captured code while simulating a wall
+clock step. The original `401` replay and `303` next-step assertions remain.
+This is a test-clock correction; OAuth runtime authentication is unchanged.
+
 ### Compatibility/security review and Git gates
 
 The selective comparison against `8a73554` leaves the core implementation

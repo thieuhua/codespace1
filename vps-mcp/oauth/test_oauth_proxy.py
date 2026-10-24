@@ -85,8 +85,9 @@ class Harness:
     """Builds the app with injected fakes: in-memory store, fake gateway, controllable clock."""
 
     def __init__(self, **overrides):
+        self.epoch = time.time()
         self.offset = 0.0
-        self.clock = lambda: time.time() + self.offset
+        self.clock = lambda: self.epoch + self.offset
         self.settings = op.Settings(public_url="https://mcp.test", **overrides)
         self.store = op.Store(":memory:", self.clock)
         self.owner = op.OwnerCredentials.create(PASSWORD)
@@ -269,10 +270,14 @@ class OwnerApprovalTests(unittest.TestCase):
         self.assertEqual(self.h.approve(self.location, password="", code="").status_code, 401)
 
     def test_totp_cannot_be_replayed(self):
-        first = self.h.approve(self.location)
+        code = self.h.totp()
+        first = self.h.approve(self.location, code=code)
         self.assertEqual(first.status_code, 303)
         second_location = self.h.authorize(self.info, self.verifier).headers["location"]
-        replay = self.h.approve(second_location)  # same 30 s step
+        # Replay the identical code even if the wall clock crosses a TOTP step.
+        with mock.patch("time.time", return_value=self.h.epoch + 31):
+            self.assertEqual(self.h.clock(), self.h.epoch)
+            replay = self.h.approve(second_location, code=code)
         self.assertEqual(replay.status_code, 401)
         self.h.next_totp_step()
         self.assertEqual(self.h.approve(second_location).status_code, 303)
