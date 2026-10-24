@@ -120,8 +120,44 @@ git diff --check
   4,132,864 DB bytes, 57 bounded busy retries. Windows Job enforces a 1 GiB
   process memory limit. These values are workload measurements, not host-wide
   flood/190-MiB production-service guarantees.
-- CI defines Python 3.11 Windows/Ubuntu and unprivileged Debian 12 jobs. Linux
-  results are not inferred from Windows; merge requires their actual success.
+- GitHub Actions ran Python 3.11 Windows/Ubuntu and unprivileged Debian 12 on
+  source head `c5f2e4a26dd709f1c55b8614a8883a0c2b995bb5`. All push and PR jobs
+  succeeded. The final evidence-only documentation commit must also have green
+  checks before merge. No branch protection or review requirement is bypassed.
+
+### Measured Linux CI evidence (2026-10-24)
+
+| Runner | Full suite | Source smoke | Stress time / peak RSS / retry count |
+| --- | --- | --- | --- |
+| [Ubuntu PR job](https://github.com/thieuhua/codespace1/actions/runs/40079094649/job/120828698255) | 45/45 passed, 13.269s | 3/3 passed | 4.237s / 79,032,320 bytes / 2 |
+| [Debian 12, UID 1001 PR job](https://github.com/thieuhua/codespace1/actions/runs/40079094649/job/120828698147) | 45/45 passed, 15.333s | 3/3 passed | 5.491s / 80,089,088 bytes / 9 |
+
+Both Linux runs enforce `RLIMIT_AS=1GiB` and execute all seven POSIX tests:
+actual temporary Unix IPC/file/Git/Bash/jobs, peer UID rejection, single-use
+broker key consumption, changed service fingerprint rejection and forbidden
+MCP/tunnel/development service policy. Broker systemctl/account/policy interactions
+use in-process fixtures; no host service is restarted or credential read.
+The [Windows PR job](https://github.com/thieuhua/codespace1/actions/runs/40079094649/job/120828698357)
+also succeeded, with POSIX-only tests skipped as intended. Full CI evidence is
+attached to [PR #4](https://github.com/thieuhua/codespace1/pull/4).
+
+### Compatibility/security review and Git gates
+
+The selective comparison against `8a73554` leaves the core implementation
+unchanged apart from package/import renaming, explicit fail-closed registration,
+removing implicit storage settings and preserving legacy HTTP drain defaults.
+All 16 original gateway function ASTs and all worker/broker/dependency/unit
+Git-content hashes match `b4b3f1e`. No unresolved critical compatibility/security
+finding remains in this unactivated implementation. Provider identity and OS
+state provisioning remain requirements for a separate activation review.
+
+The original MVP branch remains `8a73554e5438a639e31cfa79fce192ab440820a9`.
+Integration commits are grouped into baseline contract/inventory (`7c1c87b`),
+core (`bae53e3`), complete owner staging package (`e8eb6f7`), isolated verification/
+CI (`896f16b`), operational/API report (`158b99d`), and whitespace (`c5f2e4a`).
+The pre-existing planning commit `11d50c5` is retained. PR #4 targets the original
+production baseline; only a regular two-parent merge commit is permitted after
+all final-head checks pass. No force push, main rewrite or deployment is used.
 
 This is source integration only. No production endpoint, state, credentials,
 services, installation or restart is used by this task. Runtime activation
