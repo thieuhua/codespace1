@@ -222,6 +222,20 @@ A local incompatible-module fixture reproduced the inherited-module failure;
 the isolated helper passed and still rejected a deliberate ACL command error.
 All 42 OAuth tests passed again locally with the same permission assertions.
 
+The next push run at `0bf8029` exposed a POSIX UID-test timing race: rejection
+could close the socket before client `sendall`, producing `BrokenPipeError`
+instead of the asserted reset/missing-response rejection. The test now gates
+the real worker handler until the client has sent, retains the original
+rejection assertion, additionally proves dispatch was never called, and verifies
+that the correct UID can still use the same worker afterwards. Production
+gateway/worker code and the seven pre-existing Windows skips are unchanged.
+The [PR run for that head](https://github.com/thieuhua/codespace1/actions/runs/40099878341)
+passed all three jobs, confirming the Windows ACL fix; the intermittent push
+failure still required the deterministic UID-test correction. Windows recheck
+after that correction passed all 48 tests (41 passed, 7 existing skips) in
+34.093 seconds, source smoke 3/3, compileall, all Bash syntax checks and
+whitespace checks against `origin/main`.
+
 ### Compatibility/security review and Git gates
 
 The selective comparison against `8a73554` leaves the core implementation

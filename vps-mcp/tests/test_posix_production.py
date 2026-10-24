@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import importlib.util
 import os
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import threading
@@ -98,9 +99,31 @@ class PosixWorkerTests(unittest.TestCase):
             g.job_status("missing")
 
     def test_unix_peer_credential_rejects_unexpected_uid(self):
-        with patch.dict(os.environ, MCP_GATEWAY_UID=str(os.getuid() + 1)):
+        sent = threading.Event()
+        original_handle = self.worker.Handler.handle
+
+        class SendFirstSocket(socket.socket):
+            def sendall(self, data):
+                super().sendall(data)
+                sent.set()
+
+        def handle_after_send(handler):
+            # Exercise the real peer check after send completes; otherwise an
+            # early close can race sendall and raise BrokenPipeError instead.
+            if not sent.wait(5):
+                raise AssertionError("test client did not finish sending")
+            return original_handle(handler)
+
+        proxy = SimpleNamespace(AF_UNIX=socket.AF_UNIX, SOCK_STREAM=socket.SOCK_STREAM, socket=SendFirstSocket)
+        with patch.dict(os.environ, MCP_GATEWAY_UID=str(os.getuid() + 1)), \
+                patch.object(self.worker.Handler, "handle", handle_after_send), \
+                patch.object(self.gateway, "socket", proxy), \
+                patch.object(self.worker, "dispatch", side_effect=AssertionError("untrusted peer must not dispatch")) as dispatch:
             with self.assertRaises((RuntimeError, ConnectionResetError)):
                 self.gateway.projects()
+            self.assertTrue(sent.is_set())
+            dispatch.assert_not_called()
+        self.assertEqual(self.gateway.projects(), {"fixture": str(self.repo)})
 
 
 @unittest.skipUnless(os.name == "posix", "Production broker imports POSIX account APIs")
