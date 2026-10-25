@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+*.db*
+*.sqlite*
+*.token
+tokens/
+.test-results/
+*.egg-info/
+build/
+dist/
