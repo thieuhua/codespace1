@@ -88,7 +88,11 @@ Có thể ghi `default_tools_approval_mode = "approve"` trong bảng
 Script không tự thay đổi policy phê duyệt. Chính sách quản trị có thể ghi đè.
 Xem [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) và
 [cấu hình Codex](https://learn.chatgpt.com/docs/config-file/config-reference).
-Chưa chạy một phiên model `codex exec` hoặc `agy` thật; xem báo cáo kiểm chứng.
+Antigravity chạy headless (`agy -p`) tự từ chối tool MCP nếu chưa có allow-rule.
+Thêm `mcp(agent_mailbox/<tool>)` cho từng tool vào `permissions.allow` trong
+`~/.gemini/antigravity-cli/settings.json`; không cần `--dangerously-skip-permissions`.
+Phiên `codex exec` và `agy` thật đã trao đổi qua mailbox: xem
+[interop report](docs/INTEROP_REPORT.md).
 
 ## Luồng trao đổi
 
@@ -138,4 +142,5 @@ RAM 1 GiB, admin CLI, kiểm tra token và long-poll xuyên tiến trình.
 
 - [Core và nguồn gốc](agent_mailbox/core/README.md)
 - [Tests](tests/README.md), [scripts](scripts/README.md)
-- [API](docs/MAILBOX_API.md), [build report](docs/BUILD_REPORT.md)
+- [API](docs/MAILBOX_API.md), [build report](docs/BUILD_REPORT.md),
+  [review](docs/REVIEW_ANTIGRAVITY.md), [interop report](docs/INTEROP_REPORT.md)
