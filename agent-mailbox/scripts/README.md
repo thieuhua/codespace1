@@ -1,5 +1,24 @@
 # PowerShell scripts
 
+Router mode adds `router-start.ps1` (hidden background server, PID/creation-time
+record and stdout/stderr logs under state), `router-stop.ps1` (verified PID,
+graceful offline shutdown), and `register-router-clients.ps1` (replace the
+`agent_mailbox` registration with a loopback HTTP URL). All support `-WhatIf` and
+`-DryRun`, which never read tokens, invoke CLIs or write state.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\router-start.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-router-clients.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\router-stop.ps1 -WhatIf
+```
+
+Router start accepts `-BindHost`, `-Port`, `-HoldSeconds`, `-AllowNonLoopback` and
+`-StateDir`. Registration accepts `-Url`, `-Client` and token-file selections.
+Codex requires `AGENT_MAILBOX_ROUTER_TOKEN` in its launching shell; the script
+only registers the environment variable's name. Antigravity reads its token at
+registration and stores the header in plaintext in its config; output is redacted.
+See [ROUTER.md](../docs/ROUTER.md) for commands, protocol and security limits.
+
 Windows PowerShell 5.1 compatible. `setup.ps1` creates the project-local venv,
 installs the editable package, initializes external state, provisions `codex`
 and `antigravity` without replacing their tokens and creates/renews `collab`.

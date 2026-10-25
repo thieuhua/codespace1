@@ -1,9 +1,102 @@
 # Agent Mailbox — Session + Mailbox MCP cục bộ
 
 Cho Codex CLI và Antigravity CLI (`agy`) trao đổi tin nhắn bền vững trên cùng
-máy Windows. Mỗi client chạy một tiến trình stdio riêng; tất cả dùng chung SQLite
-WAL. Có 13 công cụ session/mailbox và `whoami`, không có công cụ quản trị qua MCP.
+máy Windows. Có hai chế độ: **router HTTP duy nhất** cho vòng lặp nhận lệnh và
+**stdio riêng cho từng client** cho session/mailbox hiện có. Hai chế độ dùng chung
+token principal, nhưng lưu thư riêng trong `router.db` và `mailbox.db` (SQLite WAL).
+Không có công cụ quản trị qua MCP.
 Core được chép độc lập từ `vps-mcp` tại `a5d3062`; xem [nguồn gốc](agent_mailbox/core/PROVENANCE.md).
+
+## Router: một server, nhiều agent chờ lệnh
+
+```text
+Claude / operator (CLI offline, tin cậy)
+          | router ctl send / inbox / status / stop
+          v
+       router.db <-- watcher chung mỗi 100 ms --> một FastMCP HTTP /mcp
+                                                       ^           ^
+                                                   token codex  token antigravity
+                                                       |           |
+                                                    Codex CLI    agy CLI
+                                                    receive -> xử lý/reply -> receive ...
+```
+
+Router có đúng 5 tool: `whoami`, `mailbox_receive`, `mailbox_send`, `mailbox_reply`,
+`mailbox_ack`. Không cần tạo session/mailbox chung; dùng các principal/token đã cấp
+bằng setup/admin. Operator dùng địa chỉ `operator` (alias `claude` khi agent gửi).
+Chạy từ thư mục dự án, sau khi thiết lập bên dưới:
+
+```powershell
+.\.venv\Scripts\python.exe -m agent_mailbox router serve --host 127.0.0.1 --port 8766 --hold-seconds 50
+# Hoặc chạy nền (PID/log trong state dir); dùng -WhatIf để xem trước:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\router-start.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\router-stop.ps1
+```
+
+Endpoint mặc định: `http://127.0.0.1:8766/mcp`. State vẫn theo `--state-dir`,
+`AGENT_MAILBOX_HOME`, rồi `%LOCALAPPDATA%\agent-mailbox`. Router không đọc token từ
+argument để chọn danh tính: mỗi request phải có Bearer token hợp lệ của principal.
+Thu hồi/disable có hiệu lực cả khi đang long-poll. Mỗi state chỉ có một server router.
+
+Đăng ký thay thế entry `agent_mailbox` hiện có bằng URL (script chỉ chạy khi người
+vận hành chủ động gọi; không chạy trong build/test với config thật):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-router-clients.ps1 -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-router-clients.ps1
+$env:AGENT_MAILBOX_ROUTER_TOKEN = (Get-Content -Raw "$env:LOCALAPPDATA\agent-mailbox\tokens\codex.token").Trim()
+codex exec -c 'mcp_servers.agent_mailbox.tool_timeout_sec=90' -c 'mcp_servers.agent_mailbox.default_tools_approval_mode="approve"' 'Gọi agent_mailbox.whoami, rồi lặp mailbox_receive. Có thư thì xử lý và reply, no_mail thì nhận tiếp. Chỉ kết thúc khi status stop.'
+```
+
+Script hỗ trợ `-Client`, `-Url`, `-StateDir`, `-CodexTokenFile`,
+`-AntigravityTokenFile`, `-WhatIf` và `-DryRun`. Codex lưu tên biến môi trường
+`AGENT_MAILBOX_ROUTER_TOKEN`; **shell khởi chạy Codex phải đặt biến này** từ token
+được chọn, kể cả sau rotation. `-CodexTokenFile` chỉ chọn đường dẫn được hướng dẫn,
+không tự đặt biến cho shell cha. Tool timeout phải lớn hơn hold (nếu hold 300 giây,
+đặt timeout lớn hơn 300). Các cờ đã được đối chiếu bằng CLI `--help` cài trên máy và
+[OpenAI Docs về MCP](https://learn.chatgpt.com/docs/extend/mcp).
+Antigravity dùng header đọc từ file tại lúc đăng ký và **lưu token plaintext trong
+config agy**, cần đăng ký lại sau rotation. Script che token khi in lệnh.
+Allow-rule hiện có cho đúng 5 tên tool trên tiếp tục dùng được.
+
+Vòng lặp agent: gọi `whoami`, rồi liên tục `mailbox_receive()`; `no_mail` thì gọi
+lại ngay, `mail` thì xử lý và `mailbox_send`/`mailbox_reply` rồi nhận tiếp; **không
+kết thúc turn** cho tới khi `status: stop`, khi đó tóm tắt một dòng và kết thúc.
+Hold mặc định 50 giây, `wait_seconds` là số nguyên không âm được giới hạn bởi hold.
+`set-hold` nhận cả số lẻ 0..300 giây và áp dụng từ lần receive tiếp theo.
+
+```powershell
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl send --to codex 'Kiểm tra công việc rồi báo lại operator'
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl send --to all 'Báo tiến độ'
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl inbox --wait 30 --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl inbox --all --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl status --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl stats --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl log --tail 20 --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl stop all --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl resume all --json
+.\.venv\Scripts\python.exe -m agent_mailbox router ctl set-hold 50 --json
+```
+
+Tất cả lệnh ctl có `--json`; `inbox` đánh dấu đã đọc, `--all` xem cả lịch sử.
+`status` hiển thị waiting, lần nhận gần nhất, tổng số lần nhận, streak hiện tại,
+số thư vào/ra, pending và lỗi gần nhất. Streak là các receive thành công mail/no_mail
+cách nhau tối đa 60 giây; stop, hủy, lỗi hoặc restart làm reset. `stats` có từng bản
+ghi receive, tổng send và số task/thread/connection/waiter. Lịch sử router không tự được
+dọn bởi lệnh `admin cleanup` của stdio.
+
+Thư nhận thành công được coi là delivered, ACK là tùy chọn và idempotent. Hủy/ngắt
+kết nối trước khi gửi response trả thư về pending; lần receive sau nhận được một
+lần. Có cửa sổ hiếm sau commit delivered nhưng response bị mất trước khi client
+nhận: thư vẫn được đánh dấu delivered. Đây không phải bảo đảm exactly-once qua lỗi
+mạng; xem [API, semantics và thiết kế router](docs/ROUTER.md).
+
+Mặc định chỉ bind loopback, bật bảo vệ DNS rebinding/Host/Origin của SDK; địa chỉ
+khác cần cờ rõ ràng `--allow-non-loopback`. Không có TLS. Cùng tài khoản Windows
+vẫn có thể đọc token/config/DB hoặc chạy ctl, nên token không tạo cách ly OS.
+Router giới hạn 1 receive/principal, 64 receive và 64 session HTTP; tối đa 100 thư
+mỗi lượt và 65.536 byte UTF-8 mỗi thư. Muốn trở về stdio, chạy script
+`register-clients.ps1` hiện có.
 
 ## Thiết lập
 

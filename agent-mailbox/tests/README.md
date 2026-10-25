@@ -1,5 +1,15 @@
 # Isolated verification
 
+`test_router.py` runs real HTTP router subprocesses and MCP SDK clients against
+TEMP state on ephemeral ports: timed holds, cross-process ctl wake <1 second,
+routing/replies/operator inbox, ACK/idempotency/ownership, auth/revocation/disable,
+cancellation notifications and disconnected POSTs, stop/resume/set-hold,
+instrumentation, 205 consecutive receives with bounded OS/runtime resources and
+SDK Host/Origin protection. `test_router_scripts.py` checks PowerShell 5.1
+previews without reading tokens or invoking registration and runs background
+start/stop only on explicit TEMP state and an ephemeral port. Real client
+registration and real model polling endurance are operator measurements.
+
 Run from `agent-mailbox`: `.venv/Scripts/python.exe -m unittest discover -v`.
 All runtime state is in `tempfile.TemporaryDirectory`, outside repositories.
 

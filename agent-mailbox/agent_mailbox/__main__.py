@@ -10,6 +10,8 @@ def parser():
     root = argparse.ArgumentParser(description="Local stdio Session + Mailbox MCP")
     root.add_argument("--state-dir", help="State outside repositories (default LOCALAPPDATA/agent-mailbox)")
     commands = root.add_subparsers(dest="command", required=True)
+    from .router_cli import add_parser
+    add_parser(commands)
     serve = commands.add_parser("serve", help="stdio MCP; no state initialization")
     serve.add_argument("--token-file")
     serve.add_argument("--state-dir", default=argparse.SUPPRESS)
@@ -48,12 +50,19 @@ def main():
             from .auth import load_token
             from .server import serve
             serve(home, load_token(args.token_file))
+        elif args.command == "router":
+            from .router_cli import run
+            run(args, home)
         else:
             from .admin import run
             print(json.dumps(run(args, home), ensure_ascii=True))
         return 0
-    except Exception:
+    except Exception as exc:
         # Never print SQL, token contents, payloads or exception strings.
+        if args.command == "router" and getattr(args, "json", False):
+            from .core.errors import GatewayError
+            code = exc.code if isinstance(exc, GatewayError) else "OPERATION_FAILED"
+            print(json.dumps({"error": {"code": code, "message": "Router operation failed"}}))
         print("agent-mailbox: operation failed; check arguments, provisioning, paths and permissions", file=sys.stderr)
         return 1
 

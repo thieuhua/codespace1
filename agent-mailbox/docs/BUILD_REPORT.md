@@ -400,3 +400,97 @@ default state, `~/.codex`, `~/.gemini`, VPS or production access was performed.
 No commit or push was made; the existing review-resolution changes remain
 uncommitted alongside these fixes. **Unrestricted full-suite verification remains
 pending the operator**, including both actual protected owner-only DACL assertions.
+
+## Single-server long-polling router (2026-10-25)
+
+Starting branch `feat/mcp-baseline-recovery`, clean HEAD `3686ab0`. Added a separate
+HTTP router without replacing the stdio server or modifying its core/auth schema.
+Changes are confined to `agent-mailbox/`; no commit, push or dependency install.
+Runtime verified here: Windows PowerShell **5.1.26100.9711**, Python **3.11.4**,
+SQLite **3.42.0**, MCP **1.30.0**, restricted Windows access token.
+
+Implementation includes exactly five MCP tools, per-request existing-token auth
+and SDK session ownership, explicit SDK Host/Origin protection, loopback bind
+validation, one 100-ms watcher, bounded receive/session admission, SQLite WAL
+router state, reservation/delivery/cancellation handling, restart recovery,
+offline JSON operator control and per-call/per-send instrumentation. Short SQL
+transactions execute on the event loop so cancellation cannot abandon an
+unobserved worker-thread delivery commit; no transaction spans a wait.
+Streaks reset on stop/error/cancellation, a 60-second gap or server restart.
+See [ROUTER.md](ROUTER.md) for exact API and the documented response-loss window.
+
+PowerShell background startup uses explicit log/stdin handles, `close_fds` and
+Windows `CREATE_NO_WINDOW`/`CREATE_NEW_PROCESS_GROUP`. This avoids inheriting a
+capturing shell's pipe handles and the PS 5.1 duplicate execution-policy
+environment-key error found during actual TEMP lifecycle testing. PID/creation
+time is checked before graceful offline shutdown; there is no forced kill.
+Registration previews redact the Antigravity header token and do not read it.
+
+The installed `codex mcp add --help` confirmed `--url` and
+`--bearer-token-env-var`; `agy mcp add --help` confirmed `--header` before the
+server name and automatic HTTP URL detection. Codex's installed help executable
+emitted access-denied warnings for its own arg0 temporary-cache housekeeping;
+no registration or real client configuration write was performed. Actual
+registration remains an operator action, with Codex's token environment variable,
+per-server approval and timeout documented in the Vietnamese README.
+
+Verification uses real HTTP subprocesses and SDK clients, real offline ctl
+subprocesses, TEMP state and ephemeral ports. New coverage includes timed empty
+polls, cross-process wake under one second, agent routing/replies/operator inbox,
+ACK/replay/conflict/UTF-8 bounds, forged inbox arguments and stolen-session
+rejection, missing/wrong/revoked/disabled auth, revocation during receive,
+cancellation notifications and raw disconnects, reservation rollback/recovery
+and commit-time auth, stop/resume/hold changes, invalid-call instrumentation,
+singleton/bind/Host/Origin checks, 205 sequential polls and actual background
+script start/stop. The 60 pre-existing tests remain intact; 12 tests were added.
+
+Commands run from `agent-mailbox`:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe -m compileall -q agent_mailbox tests
+.\.venv\Scripts\python.exe -m pip check
+git diff --check
+```
+
+All **7** PowerShell scripts were also parsed by actual PowerShell 5.1. Script
+previews ran with inherited Restricted policy and process-scoped Bypass; the
+background lifecycle test used only an explicit TEMP directory and ephemeral
+port. Registration was never executed, including against fake configurations.
+
+Final verification on the final runtime and test sources:
+
+| Check | Actual result |
+| --- | --- |
+| Full old + new unittest suite | **72 passed**, zero failures/errors/skips, **234.922 s** |
+| Empty receive, configured hold 2 s | Passed timing bounds **1.85 <= elapsed < 3 s**, `no_mail`, instruction and poll count assertions |
+| Offline ctl subprocess wakes waiting HTTP receive | **0.250 s** including CLI startup; required **<1 s** |
+| Sequential receive endurance | **205 calls**, configured hold **0.05 s**, exact poll/streak/instrumentation counts |
+| Actual HTTP server process resources, before -> after | Threads **5 -> 5**; connections **2 -> 2**; OS handles **204 -> 204**; asyncio tasks **15 -> 15**; working set **59,297,792 -> 59,383,808 bytes** (growth **86,016 bytes**) |
+| Existing stdio cross-process long poll | **0.110 s**, original assertions retained |
+| Existing stress, Windows Job 1 GiB cap | **2,000 messages x 1,024 bytes**, **8 writers**, **32 waiters**, **22.609 s**, **67,031,040 peak RSS bytes**, **4,128,768 DB bytes**, **26 bounded busy retries** |
+| Compileall | Exit 0 |
+| Dependency consistency | `No broken requirements found.` |
+| PowerShell syntax / lifecycle / previews | All **7** parsed; TEMP start/stop/repeated-start checks and both preview modes passed |
+| Whitespace / scope | `git diff --check` passed; changed/untracked sources confined to `agent-mailbox/` |
+
+The resource check targets the server PID recorded by the watcher, rather than
+the lightweight Windows venv launcher PID. Runtime task/connection counts and
+independent OS thread/handle/working-set counters are all asserted. No test was
+skipped or weakened. A previous full run also passed 72 tests in 229.398 s;
+the final run above includes the completed-call reservation guard and explicit
+restart/streak regression assertions.
+
+The final full-suite transcript is retained locally at ignored
+`.test-results/router-unittest-final.txt`. Normal-token ACL assertions retain
+their existing conditional behavior; this restricted-token run cannot establish
+unrestricted Windows DACL results. Expected SDK cleanup warnings after deliberate
+token revocation/server shutdown are transport cleanup diagnostics. No default
+state, real mailbox traffic, real Codex/Antigravity model run, real configuration,
+VPS or production endpoint was used by tests. Live model-driven consecutive-poll
+endurance remains the operator's measurement; the SDK endurance test measures
+server behavior only.
+
+There are no implementation or test blockers. Normal-token ACL verification
+and live registration/model-driven polling are the explicitly unrun operator
+checks described above. All changes remain in the working tree.
