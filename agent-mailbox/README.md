@@ -236,4 +236,5 @@ RAM 1 GiB, admin CLI, kiểm tra token và long-poll xuyên tiến trình.
 - [Core và nguồn gốc](agent_mailbox/core/README.md)
 - [Tests](tests/README.md), [scripts](scripts/README.md)
 - [API](docs/MAILBOX_API.md), [build report](docs/BUILD_REPORT.md),
-  [review](docs/REVIEW_ANTIGRAVITY.md), [interop report](docs/INTEROP_REPORT.md)
+  [review](docs/REVIEW_ANTIGRAVITY.md), [interop report](docs/INTEROP_REPORT.md),
+  [endurance report](docs/ENDURANCE_REPORT.md)
