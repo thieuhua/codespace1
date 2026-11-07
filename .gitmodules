@@ -1,3 +1,6 @@
 [submodule "combat-analysis"]
 	path = combat-analysis
 	url = git@github.com:thieuhua/combat-analysis.git
+[submodule "int1433-06-20261-grp-int1433-06-0060"]
+	path = int1433-06-20261-grp-int1433-06-0060
+	url = git@github.com:ptit-hungdn-2026/int1433-06-20261-grp-int1433-06-0060.git
