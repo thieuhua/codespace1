@@ -1,4 +1,4 @@
-import { MARKER_IDS } from './calibration.js';
+import { MARKER_IDS, validateMarkerCorners } from './calibration.js';
 import { FREEZE_SAMPLES } from './live.js';
 
 export const MARKER_MAX_AGE_MS = 3000;
@@ -8,7 +8,8 @@ export const STABLE_JITTER_PX = 4;
 export function markerStability(markerStats, maxAgeMs = MARKER_MAX_AGE_MS) {
   return MARKER_IDS.every(id => {
     const stats = markerStats?.[id];
-    return stats && stats.ageMs !== null && stats.ageMs <= maxAgeMs && stats.sampleCount >= STABLE_SAMPLES && stats.jitter <= STABLE_JITTER_PX;
+    return stats && stats.ageMs !== null && stats.ageMs <= maxAgeMs && stats.sampleCount >= STABLE_SAMPLES &&
+      (!stats.cornerSampleCount || stats.cornerSampleCount >= STABLE_SAMPLES) && stats.jitter <= STABLE_JITTER_PX;
   });
 }
 
@@ -28,28 +29,37 @@ export class TemporalMarkers {
         observations.some(p => !p || !MARKER_IDS.includes(p.id) || !Number.isFinite(p.x) || !Number.isFinite(p.y) || p.x < 0 || p.y < 0 || p.x >= imageSize.w || p.y >= imageSize.h)) {
       throw new Error('Điểm marker mới không hợp lệ.');
     }
+    observations.forEach(p => validateMarkerCorners(p.corners, imageSize));
     const reset = this.key !== key || this.imageSize?.w !== imageSize.w || this.imageSize?.h !== imageSize.h;
     if (reset) { this.reset(); this.key = key; this.imageSize = { ...imageSize }; }
     for (const p of observations) {
       const old = this.markers.get(p.id), previous = old && time - old.seenAt <= this.maxAgeMs ? old.samples : [];
-      const samples = [...previous, [p.x, p.y]].slice(-FREEZE_SAMPLES);
-      this.markers.set(p.id, { id: p.id, x: p.x, y: p.y, seenAt: time, samples });
+      const point = { id: p.id, x: p.x, y: p.y, ...(p.corners && { corners: p.corners.map(c => ({ x: c.x, y: c.y })) }) };
+      const samples = [...previous, point].slice(-FREEZE_SAMPLES);
+      this.markers.set(p.id, { ...point, seenAt: time, samples });
     }
     return { ...this.snapshot(time), updatedIds: observations.map(p => p.id), reset };
   }
   snapshot(time = 0) {
-    const points = MARKER_IDS.flatMap(id => { const p = this.markers.get(id); return p ? [{ id, x: p.x, y: p.y }] : []; });
+    const points = MARKER_IDS.flatMap(id => { const p = this.markers.get(id); return p ? [{ id, x: p.x, y: p.y, ...(p.corners && { corners: p.corners.map(c => ({ ...c })) }) }] : []; });
     const sampleCounts = Object.fromEntries(MARKER_IDS.map(id => [id, this.markers.get(id)?.samples.length || 0]));
     const markerStats = Object.fromEntries(MARKER_IDS.map(id => {
       const p = this.markers.get(id);
-      const jitter = p ? Math.max(0, ...p.samples.flatMap(a => p.samples.map(b => Math.hypot(a[0] - b[0], a[1] - b[1])))) : 0;
-      return [id, { ageMs: p ? Math.max(0, time - p.seenAt) : null, sampleCount: sampleCounts[id], jitter }];
+      const cornerSamples = p?.samples.slice(p.samples.findLastIndex(s => !s.corners) + 1) || [];
+      const spread = samples => Math.max(0, ...samples.flatMap(a => samples.map(b => Math.hypot(a.x - b.x, a.y - b.y))));
+      const jitter = p ? Math.max(spread(p.samples), ...[0, 1, 2, 3].map(i => spread(cornerSamples.map(s => s.corners[i])))) : 0;
+      return [id, { ageMs: p ? Math.max(0, time - p.seenAt) : null, sampleCount: sampleCounts[id], cornerSampleCount: cornerSamples.length, jitter }];
     }));
     const staleIds = MARKER_IDS.filter(id => markerStats[id].ageMs === null || markerStats[id].ageMs > this.maxAgeMs);
     const median = values => { const sorted = [...values].sort((a, b) => a - b), mid = Math.floor(sorted.length / 2); return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2; };
-    const freezeQ = points.length === 4 ? MARKER_IDS.map(id => [0, 1].map(axis => median(this.markers.get(id).samples.map(p => p[axis])))) : null;
+    const freezePoints = points.map(p => {
+      const samples = this.markers.get(p.id).samples, cornerSamples = samples.slice(samples.findLastIndex(s => !s.corners) + 1);
+      return { id: p.id, x: median(samples.map(s => s.x)), y: median(samples.map(s => s.y)),
+        ...(cornerSamples.length && { corners: [0, 1, 2, 3].map(i => ({ x: median(cornerSamples.map(s => s.corners[i].x)), y: median(cornerSamples.map(s => s.corners[i].y)) })) }) };
+    });
+    const freezeQ = points.length === 4 ? freezePoints.map(p => [p.x, p.y]) : null;
     return { points, tracked: points.length, sampleCounts, markerStats, staleIds, maxAgeMs: this.maxAgeMs,
       stable: markerStability(markerStats, this.maxAgeMs), fresh: !staleIds.length,
-      samples: Math.min(...Object.values(sampleCounts)), freezeQ, imageSize: this.imageSize && { ...this.imageSize } };
+      samples: Math.min(...Object.values(sampleCounts)), freezeQ, freezePoints, imageSize: this.imageSize && { ...this.imageSize } };
   }
 }

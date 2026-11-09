@@ -37,6 +37,11 @@ test('camera photo → real detection → desktop matrix3d → review → saved 
   await phone.screenshot({ path: testInfo.outputPath('phone-review.png') });
   await phone.locator('#confirm').click(); await expect(phone.locator('#done-section')).toBeVisible();
   await page.keyboard.press('c'); await expect(page.locator('#controls')).toBeVisible();
+  await expect(page.locator('#calibration-quality')).toContainText('px');
+  await expect(page.locator('#optimize-center')).not.toBeChecked();
+  await expect(page.locator('#align-screen')).not.toBeChecked();
+  await page.locator('#optimize-center').check(); await page.locator('#align-screen').check();
+  await expect(page.locator('#calibration-quality')).toContainText('Góc xoay camera');
   await page.locator('#content-toggle').click();
   await page.locator('#text-input').fill('Phối cảnh đúng\nTừ góc nhìn của tôi');
   await page.locator('#content-panel').getByRole('button', { name: 'Áp dụng', exact: true }).click();
@@ -54,6 +59,9 @@ test('camera photo → real detection → desktop matrix3d → review → saved 
   await page.reload(); await expect(page.locator('#connection-text')).toHaveText('Điện thoại đã kết nối');
   await expect(page.locator('body')).toHaveAttribute('data-state', 'display');
   await expect(page.locator('#poster-text')).toHaveText('Phối cảnh đúng\nTừ góc nhìn của tôi');
+  await page.locator('#controls-toggle').click();
+  await expect(page.locator('#optimize-center')).toBeChecked(); await expect(page.locator('#align-screen')).toBeChecked();
+  await page.locator('#controls-close').click();
   await page.screenshot({ path: testInfo.outputPath('desktop-compensated.png') });
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator('body')).toHaveAttribute('data-state', 'live');

@@ -71,3 +71,21 @@ test('freshness window is configurable and excessive motion blocks the stability
   assert.equal(tracker.snapshot(52).fresh, true); assert.equal(tracker.snapshot(53).fresh, false);
   assert.throws(() => new TemporalMarkers({ maxAgeMs: 0 }));
 });
+
+test('corner jitter contributes to stability; invalid corners are atomic and centre-only updates drop old corners', () => {
+  const tracker = new TemporalMarkers();
+  const corners = points.map(p => ({ ...p, corners: [[-8, -8], [8, -8], [8, 8], [-8, 8]].map(([x, y]) => ({ x: p.x + x, y: p.y + y })) }));
+  tracker.update(corners, imageSize, 1, 0); tracker.update(corners, imageSize, 1, 1);
+  const moving = structuredClone(corners); moving[0].corners[0].x += 6;
+  const memory = tracker.update(moving, imageSize, 1, 2);
+  assert.equal(memory.markerStats[17].jitter, 6); assert.equal(memory.stable, false);
+  assert.deepEqual(memory.freezePoints[0].corners, corners[0].corners);
+  const invalid = structuredClone(corners); invalid[2].corners[0].x = NaN;
+  assert.throws(() => tracker.update(invalid, imageSize, 1, 3));
+  assert.deepEqual(tracker.snapshot(3).points, memory.points);
+  const legacy = tracker.update(points, imageSize, 1, 4);
+  assert.ok(legacy.points.every(p => !p.corners)); assert.ok(legacy.freezePoints.every(p => !p.corners));
+  const reacquired = tracker.update(corners, imageSize, 1, 3005);
+  assert.equal(reacquired.markerStats[17].cornerSampleCount, 1);
+  assert.equal(reacquired.stable, false);
+});

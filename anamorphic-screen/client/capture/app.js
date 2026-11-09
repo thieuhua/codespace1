@@ -1,5 +1,5 @@
 import { $, api, json } from '/assets/utils.js';
-import { MARKER_IDS, validateCalibration, computeWarp } from '/shared/calibration.js';
+import { MARKER_IDS, validateCalibration, computeWarp, reprojectionAcceptable, reprojectionWarning } from '/shared/calibration.js';
 import { markerStability } from '/shared/temporal-markers.js';
 import { SessionConnection } from '/assets/connection.js';
 import { Camera } from './camera.js';
@@ -96,6 +96,18 @@ function updateReview() {
   else $('#review-instruction').textContent = 'Đã nhận diện đủ 4 marker và gửi kết quả lên máy tính. Kiểm tra các chấm trên ảnh; chọn “Chạm tay” nếu cần sửa.';
   draw();
   describePointer();
+  let quality;
+  try {
+    if (points.length === 4 && sessionState?.viewport) quality = computeWarp({ viewport: sessionState.viewport, P: sessionState.markers,
+      Q: MARKER_IDS.map(id => { const p = points.find(p => p.id === id); return [p.x, p.y]; }), points, imageSize: photo.imageSize });
+  } catch { /* The point validator gives the actionable error on confirmation. */ }
+  $('#review-reprojection').textContent = quality ? accuracy(quality) : '';
+}
+
+function accuracy(quality) {
+  const text = quality.reprojectionError == null ? `Sai số: —${quality.correspondenceCount === 4 ? ' (4 tâm)' : ''}` : `Sai số: ${quality.reprojectionError.toFixed(2)} px · ${quality.correspondenceCount} góc`;
+  const frozen = quality.freezeReprojectionError;
+  return `${text}${frozen != null && Math.abs(frozen - quality.reprojectionError) > 0.01 ? ` · Sai số chốt: ${frozen.toFixed(2)} px` : ''}${Number.isFinite(quality.roll) ? ` · Góc xoay camera: ${quality.roll.toFixed(1)}°` : ''}${reprojectionWarning(quality) ? ` · ${reprojectionWarning(quality)}` : ''}`;
 }
 
 function describePointer() {
@@ -243,6 +255,7 @@ function resetFrames() {
   serverFrame = null; stable = false;
   camera.resetTracking();
   $('#phone-tracked').textContent = 'Nhớ 0/4';
+  $('#phone-detection').textContent = 'Dò: —'; $('#phone-reprojection').textContent = 'Sai số: —';
   document.querySelectorAll('[data-memory-id]').forEach(node => { node.classList.remove('remembered', 'observed'); node.title = 'Chưa thấy'; });
   if (pendingFrame) { clearTimeout(pendingFrame.timer); pendingFrame.resolve({ ok: false, samples: 0 }); pendingFrame = null; }
   updateFreeze();
@@ -259,7 +272,8 @@ function updateQuality() {
     const item = serverFrame.markerStats?.[id];
     return [id, item && { ...item, ageMs: item.ageMs === null ? null : item.ageMs + elapsed }];
   }));
-  stable = markerStability(stats, serverFrame.maxAgeMs) && elapsed < 2000 && !!latestFrame;
+  stable = markerStability(stats, serverFrame.maxAgeMs) && serverFrame.ready && reprojectionAcceptable(serverFrame.reprojectionError) &&
+    reprojectionAcceptable(serverFrame.freezeReprojectionError) && elapsed < 2000 && !!latestFrame;
   $('#marker-quality').replaceChildren(...MARKER_IDS.map((id, i) => {
     const item = stats[id], node = document.createElement('li');
     node.textContent = item && item.ageMs !== null ? `${i + 1} (ID ${id}): ${(item.ageMs / 1000).toFixed(1)} s · ${item.sampleCount} mẫu · dao động ${item.jitter.toFixed(1)} px` : `${i + 1} (ID ${id}): chưa thấy`;
@@ -286,6 +300,7 @@ function renderApplied() {
   $('#done-heading').textContent = applied?.ok ? 'Góc nhìn đã được áp dụng.' : applied ? 'Máy tính từ chối hiệu chuẩn.' : 'Đang chờ máy tính xác nhận.';
   $('#done-eyebrow').textContent = applied?.ok ? 'ĐIỂM NHÌN ĐÃ KHÓA' : 'CHỜ XÁC NHẬN HIỂN THỊ';
   $('#done-description').textContent = applied?.ok ? 'Nhìn màn hình từ đúng vị trí camera vừa chốt.' : applied ? applied.reason : 'Đã gửi điểm lên server. Giữ trang máy tính mở để nhận xác nhận áp dụng.';
+  if (result) $('#done-description').textContent += ` ${accuracy(result)}`;
   const rejected = displayApplied?.ok === false;
   $('#display-feedback').hidden = !rejected;
   const message = rejected ? `Máy tính từ chối hiệu chuẩn: ${displayApplied.reason || 'Phối cảnh không hợp lệ.'} Hãy hiệu chỉnh lại.` : '';
@@ -332,9 +347,10 @@ async function sendFrame(result) {
   const now = performance.now(); ticks.push(now); ticks = ticks.filter(t => now - t <= 1500);
   const fps = ticks.length > 1 ? (ticks.length - 1) * 1000 / (now - ticks[0]) : 0;
   $('#phone-detected').textContent = `${result.detected}/4 marker`; $('#phone-fps').textContent = `${fps.toFixed(1)} fps`;
+  $('#phone-detection').textContent = `Dò: ${result.detectionMs.toFixed(1)} ms`;
   const nextSeq = ++seq;
   const packet = { type: result.observations.length ? 'live_points' : 'live_status', seq: nextSeq, revision: result.revision,
-    points: result.observations, imageSize: result.imageSize, fps };
+    points: result.observations, imageSize: result.imageSize, fps, detectionMs: result.detectionMs };
   const ack = await new Promise(resolve => {
     const timer = setTimeout(() => { if (pendingFrame?.seq === nextSeq) { pendingFrame = null; latestFrame = null; updateFreeze(); } resolve({ ok: false, reason: 'Mất xác nhận khung hình. Đang chờ kết nối.' }); }, 2000);
     pendingFrame = { seq: nextSeq, resolve, timer };
@@ -345,12 +361,15 @@ async function sendFrame(result) {
   if (ack.points && ack.imageSize) overlay({ ...ack, updatedIds: ack.updatedIds || [] });
   $('#phone-tracked').textContent = `Nhớ ${trackedCount}/4`;
   latestFrame = null;
+  $('#phone-reprojection').textContent = accuracy(ack);
+  $('#phone-reprojection').classList.toggle('error', !reprojectionAcceptable(ack.reprojectionError) || !reprojectionAcceptable(ack.freezeReprojectionError));
   let validationError;
   if (ack.ok && ack.ready && ack.freezeQ) {
     try {
-      const candidate = { Q: ack.freezeQ, imageSize: ack.imageSize };
+      const candidate = { Q: ack.freezeQ, points: ack.freezePoints, imageSize: ack.imageSize };
       validateCalibration(MARKER_IDS.map((id, i) => ({ id, x: candidate.Q[i][0], y: candidate.Q[i][1] })), candidate.imageSize, sessionState.viewport);
       const quality = computeWarp({ viewport: sessionState.viewport, P: sessionState.markers, ...candidate });
+      $('#phone-reprojection').textContent = accuracy(quality);
       $('#phone-compression').textContent = `Nén: ${Math.round(quality.compression * 100)}% · Co giãn nhỏ nhất ${quality.minScale.toFixed(2)} px/px`;
       latestFrame = candidate; lastSeq = ack.lastSeq;
     } catch (error) { validationError = error.message; }

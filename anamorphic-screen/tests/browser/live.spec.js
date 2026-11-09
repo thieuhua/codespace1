@@ -16,7 +16,7 @@ async function pair(page) {
 
 test('real camera track → worker ArUco → live relay → median freeze; both devices reload/reconnect in the same session', async ({ page }, testInfo) => {
   const id = await pair(page), fixture = await syntheticPhoto();
-  const browser = await cameraBrowser(fixture.buffer, testInfo.outputPath('markers.y4m'));
+  const browser = await cameraBrowser(fixture.buffer, testInfo.outputPath('markers.y4m'), { width: 1280, height: 896 });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['camera'] });
   try {
     const phone = await context.newPage(), errors = [], requests = [];
@@ -31,9 +31,13 @@ test('real camera track → worker ArUco → live relay → median freeze; both 
     await expect(phone.locator('#camera-section')).toBeVisible();
     await expect(phone.locator('#phone-detected')).toHaveText('4/4 marker', { timeout: 20_000 });
     await expect(phone.locator('#freeze')).toBeEnabled({ timeout: 20_000 });
+    await expect(phone.locator('#phone-detection')).toContainText('ms');
+    await expect(phone.locator('#phone-reprojection')).toContainText('px');
     await expect(page.locator('body')).toHaveAttribute('data-state', 'live');
     await expect(page.locator('#warp')).toHaveCSS('transform', /^matrix3d/);
     await expect(page.locator('#markers')).toBeVisible();
+    await expect(page.locator('#live-detection')).toContainText('ms');
+    await expect(page.locator('#live-reprojection')).toContainText('px');
     expect(await page.locator('#markers').evaluate(node => Number(getComputedStyle(node).zIndex))).toBeGreaterThan(20);
     await page.screenshot({ path: testInfo.outputPath('desktop-live.png') });
     await phone.screenshot({ path: testInfo.outputPath('phone-live.png') });
@@ -44,6 +48,8 @@ test('real camera track → worker ArUco → live relay → median freeze; both 
     const locked = await (await page.request.get(`/api/session/${id}`)).json();
     expect(locked.result.samples).toBeGreaterThanOrEqual(1); expect(locked.result.samples).toBeLessThanOrEqual(15);
     expect(locked.result.algorithm).toBe('temporal'); expect(locked.result.imageSize.w).toBe(640);
+    expect(locked.result.points.every(p => p.corners.length === 4)).toBe(true);
+    expect(locked.result.correspondenceCount).toBe(16); expect(locked.result.reprojectionError).toBeLessThanOrEqual(2);
     expect(maximumInFlight).toBe(1); expect(requests.filter(url => url.endsWith('/photo'))).toEqual([]);
     // A transient initial HTTP failure must not orphan the remembered pairing.
     await phone.route(`**/api/session/${id}`, route => route.abort(), { times: 1 });

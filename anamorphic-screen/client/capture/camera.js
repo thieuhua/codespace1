@@ -14,6 +14,7 @@ export class Camera {
     Object.assign(this, { video, frame, qr, geometry, ready, error, controls, changing, changed, notice, generation: 0, jobId: 0, pending: new Map(), mode: null, lensEpoch: 0, trackingEpoch: 0 });
     this.deviceId = preference.deviceId || null; this.zooms = preference.zooms || {};
     this.canvas = document.createElement('canvas'); this.context = this.canvas.getContext('2d', { willReadFrequently: true });
+    this.detailCanvas = document.createElement('canvas'); this.detailContext = this.detailCanvas.getContext('2d', { willReadFrequently: true });
   }
   async start(mode, { deviceId } = {}) {
     if (this.mode === mode && this.stream && (!deviceId || deviceId === this.deviceId)) { await this.video.play(); return; }
@@ -78,7 +79,7 @@ export class Camera {
     try { await this.start(mode, { deviceId }); if (this.stream) await this.changed(); }
     finally { this.switching = false; this.changing(false); }
   }
-  runWorker(type, image, geometry) {
+  runWorker(type, image, geometry, detail) {
     if (!this.worker) {
       const worker = new Worker('/capture-assets/vision-worker.js'); this.worker = worker;
       worker.onmessage = ({ data }) => {
@@ -93,7 +94,9 @@ export class Camera {
       const id = ++this.jobId;
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('Dò khung hình quá lâu. Hãy mở lại camera.')); this.worker?.terminate(); this.worker = null; }, 5000);
       this.pending.set(id, { resolve, reject, timer });
-      this.worker.postMessage({ id, type, buffer: image.data.buffer, width: image.width, height: image.height, ...geometry }, [image.data.buffer]);
+      this.worker.postMessage({ id, type, buffer: image.data.buffer, width: image.width, height: image.height, ...geometry,
+        ...(detail && { detailBuffer: detail.data.buffer, detailWidth: detail.width, detailHeight: detail.height }) },
+      [image.data.buffer, ...(detail ? [detail.data.buffer] : [])]);
     });
   }
   async loop(generation) {
@@ -108,7 +111,18 @@ export class Camera {
         const scale = Math.min(1, maxSide / Math.max(this.video.videoWidth, this.video.videoHeight));
         const w = Math.round(this.video.videoWidth * scale), h = Math.round(this.video.videoHeight * scale);
         if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
-        this.context.drawImage(this.video, 0, 0, w, h);
+        let detail;
+        if (this.mode !== 'qr' && this.roiActive) {
+          const detailScale = Math.min(1, 1280 / Math.max(this.video.videoWidth, this.video.videoHeight));
+          const dw = Math.round(this.video.videoWidth * detailScale), dh = Math.round(this.video.videoHeight * detailScale);
+          if (dw > w || dh > h) {
+            if (this.detailCanvas.width !== dw || this.detailCanvas.height !== dh) { this.detailCanvas.width = dw; this.detailCanvas.height = dh; }
+            this.detailContext.drawImage(this.video, 0, 0, dw, dh);
+            this.context.drawImage(this.detailCanvas, 0, 0, w, h);
+            detail = this.detailContext.getImageData(0, 0, dw, dh);
+          }
+        }
+        if (!detail) this.context.drawImage(this.video, 0, 0, w, h);
         if (this.mode === 'qr') {
           let code;
           if (this.barcode) {
@@ -118,19 +132,23 @@ export class Camera {
           if (!this.barcode) code = (await this.runWorker('qr', this.context.getImageData(0, 0, w, h))).code;
           if (code && generation === this.generation && lensEpoch === this.lensEpoch) await this.qr(code);
         } else {
-          const result = await this.runWorker('markers', this.context.getImageData(0, 0, w, h), { ...geometry, trackingKey: `${geometry.revision}:${trackingEpoch}` });
-          if (generation === this.generation && lensEpoch === this.lensEpoch && trackingEpoch === this.trackingEpoch) await this.frame({ ...result, revision: geometry.revision, trackingEpoch });
+          const result = await this.runWorker('markers', this.context.getImageData(0, 0, w, h), { ...geometry, trackingKey: `${geometry.revision}:${trackingEpoch}` }, detail);
+          if (generation === this.generation && lensEpoch === this.lensEpoch && trackingEpoch === this.trackingEpoch) {
+            this.roiActive = result.tracked > 0;
+            await this.frame({ ...result, revision: geometry.revision, trackingEpoch });
+          }
         }
       }
     } catch (error) { if (generation === this.generation) { this.stop(); this.error(error.message); return; } }
     if (generation === this.generation) this.timer = setTimeout(() => this.loop(generation), Math.max(0, (this.mode === 'qr' ? 200 : FRAME_INTERVAL) - (performance.now() - started)));
   }
-  resetTracking() { this.trackingEpoch++; }
+  resetTracking() { this.trackingEpoch++; this.roiActive = false; }
   cancelJobs(error = new Error('Camera đã dừng.')) {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
   }
   stop() {
+    this.roiActive = false;
     this.generation++; this.mode = null; clearTimeout(this.timer);
     this.stream?.getTracks().forEach(track => { track.onended = null; track.stop(); }); this.stream = null;
     this.trackControls?.dispose(); this.trackControls = null; this.controls(null);

@@ -54,6 +54,12 @@ test('real upload detection broadcasts calibrated and reconnect replays its resu
   assert.ok(messages.some(m => m.type === 'photo_received'));
   const event = messages.find(m => m.type === 'calibrated');
   assert.equal(event.Q.length, 4); assert.deepEqual(event.imageSize, fixture.imageSize);
+  assert.ok(event.points.every(p => p.corners.length === 4)); assert.equal(event.correspondenceCount, 16);
+  assert.ok(event.reprojectionError < 0.5); assert.deepEqual(event.points, data.points);
+  const confirmed = await app.request(`/api/session/${app.id}/points`, { photoId: data.photoId, points: data.points });
+  assert.equal(confirmed.status, 200);
+  const confirmation = await confirmed.json();
+  assert.deepEqual(confirmation.points, event.points); assert.equal(confirmation.reprojectionError, event.reprojectionError);
   const preview = await fetch(app.url + data.previewUrl); assert.equal(preview.status, 200); assert.match(preview.headers.get('content-type'), /image\/jpeg/);
   socket.close();
   const second = await subscribe(app.url, app.id); t.after(() => second.socket.terminate());

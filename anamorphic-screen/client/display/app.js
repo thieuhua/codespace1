@@ -1,5 +1,5 @@
 import { $, api, json, toast, copyText } from '/assets/utils.js';
-import { markerLayout, computeWarp, validateCalibration, MARKER_IDS, viewportKey } from '/shared/calibration.js';
+import { markerLayout, markerBlackSide, computeWarp, validateCalibration, reprojectionAcceptable, reprojectionWarning, MARKER_IDS, viewportKey } from '/shared/calibration.js';
 import { emaFrame } from '/shared/live.js';
 import { SessionConnection } from '/assets/connection.js';
 import { ContentPanel } from '/assets/content-panel.js';
@@ -13,7 +13,7 @@ let viewport = readViewport(), P = markerLayout(viewport), calibration = null, s
 let config, resizeTimer, idleTimer, forceRecalibration = false, link, revision = 0, smoothed, pairing = false, syncing = false, needsConfigure = false;
 const sessionKey = 'anamorphic:display-session:v2';
 let mode = 'calibrating', warped = true, warpResult, rasterGeneration = 0, objectURL;
-const tuning = { scale: 0.9, offset: { x: 0, y: 0 }, width: 960, height: 600, font: 76 };
+const tuning = { scale: 0.9, offset: { x: 0, y: 0 }, width: 960, height: 600, font: 76, optimizeCenter: false, alignScreen: false };
 let phonePeers = { capture: 0, streaming: false }, streamTimer, summaryAt = 0;
 const contentKey = 'anamorphic:content:v1';
 let contentConfig = validateContent(SAMPLE_CONFIG), contentFields = contentConfig.config.fields, contentRuntime, controllerToken = '', contentDisplayKey = '', freshSession = false, restoredContent = false, qrObjectURL, lastContentStatus;
@@ -118,7 +118,7 @@ function announceLive(data) {
 
 function renderMarkers() {
   $('#markers').replaceChildren();
-  const side = Math.min(viewport.vw, viewport.vh) * 0.12;
+  const side = markerBlackSide(viewport);
   for (const [index, marker] of P.entries()) {
     const node = document.createElement('div');
     node.className = `marker${index >= 2 ? ' bottom' : ''}`;
@@ -169,6 +169,7 @@ function syncControls() {
   for (const axis of ['x', 'y']) { $(`#offset-${axis}`).value = tuning.offset[axis]; $(`#offset-${axis}-value`).value = `${Math.round(tuning.offset[axis] * 100)}%`; }
   $('#content-width').value = tuning.width; $('#content-height').value = tuning.height;
   $('#font-size').value = tuning.font; $('#font-value').value = `${tuning.font} px`;
+  $('#optimize-center').checked = tuning.optimizeCenter; $('#align-screen').checked = tuning.alignScreen;
 }
 
 function measureLayout() {
@@ -203,6 +204,10 @@ function paintTransform() {
   $('#debug-outline').toggleAttribute('hidden', !($('#debug').checked && warpResult && warped && ['display', 'live'].includes(mode)));
   if (warpResult) $('#debug-outline polygon').setAttribute('points', warpResult.S.map(p => p.join(',')).join(' '));
   $('#live-compression').textContent = warpResult ? `Nén: ${Math.round(warpResult.compression * 100)}%` : 'Nén: —';
+  const accuracy = !warpResult ? 'Sai số: —' : warpResult.reprojectionError == null ? 'Sai số: — (4 tâm)' : `Sai số: ${warpResult.reprojectionError.toFixed(2)} px · ${warpResult.correspondenceCount} góc`;
+  $('#live-reprojection').textContent = accuracy;
+  $('#calibration-quality').textContent = warpResult ? `${accuracy} · Góc xoay camera: ${warpResult.roll.toFixed(1)}°${reprojectionWarning(warpResult) ? ` · ${reprojectionWarning(warpResult)}` : ''}` : 'Chưa có hiệu chuẩn.';
+  $('#calibration-quality').classList.toggle('error', !!warpResult && !reprojectionAcceptable(warpResult.reprojectionError));
   $('#compression-warning').hidden = !warpResult || warpResult.compression >= 0.35;
 }
 
@@ -307,24 +312,26 @@ function receive(data) {
   if (data.type === 'live_points' && !syncing && data.revision === revision) {
     streaming(true); announceLive(data);
     $('#live-detected').textContent = `${data.detected ?? 4}/4 marker`; $('#live-tracked').textContent = `Nhớ ${data.tracked ?? 4}/4`; $('#live-fps').textContent = `${data.fps.toFixed(1)} fps`;
+    $('#live-detection').textContent = data.detectionMs == null ? 'Dò: —' : `Dò: ${data.detectionMs.toFixed(1)} ms`;
     try {
-      const candidate = { viewport, P, Q: data.Q, imageSize: data.imageSize };
+      const candidate = { viewport, P, Q: data.Q, points: data.points, imageSize: data.imageSize };
       validateCalibration(data.Q.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y })), data.imageSize, viewport, P);
       computeWarp({ ...candidate, ...tuning }); // Reject bad raw frames before smoothing.
       // Temporal packets already contain the latest observation of each ID.
       // Render that frame directly so unseen corners never drift via EMA.
-      const next = data.algorithm === 'temporal' ? { Q: data.Q, imageSize: data.imageSize } : emaFrame(smoothed, data);
+      const next = data.algorithm === 'temporal' ? { Q: data.Q, points: data.points, imageSize: data.imageSize } : emaFrame(smoothed, data);
       const nextCalibration = { viewport, P, ...next };
       const nextWarp = computeWarp({ ...nextCalibration, ...tuning });
       smoothed = next; calibration = nextCalibration; warpResult = nextWarp;
       if (mode !== 'live') { setMode('live'); measureLayout(); paintTransform(); } else paintTransform();
-      liveWarning(data.warning || '');
+      liveWarning(reprojectionWarning(nextWarp) || data.warning || '');
       applied(data, true);
     } catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); applied(data, false, error.message); }
   }
   if (data.type === 'live_status' && data.revision === revision) {
     streaming(!!data.imageSize); announceLive(data);
     $('#live-detected').textContent = `${data.detected}/4 marker`; $('#live-tracked').textContent = `Nhớ ${data.tracked || 0}/4`; $('#live-fps').textContent = `${data.fps.toFixed(1)} fps`; liveWarning(data.warning);
+    $('#live-detection').textContent = data.detectionMs == null ? 'Dò: —' : `Dò: ${data.detectionMs.toFixed(1)} ms`;
   }
   if (data.type === 'photo_received') { setMode('waiting'); status('Đã nhận ảnh · Đang nhận diện 4 marker…', true); }
   if (data.type === 'photo_status' && data.revision === revision) status(data.state === 'queued' ? `Ảnh đang xếp hàng · vị trí ${data.position}` : 'Đang nhận diện marker…', true);
@@ -333,7 +340,7 @@ function receive(data) {
 }
 
 function applyCalibration(data) {
-  const candidate = { viewport, P, Q: data.Q, imageSize: data.imageSize };
+  const candidate = { viewport, P, Q: data.Q, points: data.points, imageSize: data.imageSize };
   try {
     validateCalibration(data.Q.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y })), data.imageSize, viewport, P);
     computeWarp({ ...candidate, ...tuning });
@@ -489,6 +496,9 @@ for (const [selector, property] of [['#content-width', 'width'], ['#content-heig
 };
 $('#font-size').oninput = event => { tuning.font = Number(event.target.value); safeRender(); };
 for (const selector of ['#debug', '#raster-mode', '#gpu-mode']) $(selector).onchange = safeRender;
+for (const [selector, property] of [['#optimize-center', 'optimizeCenter'], ['#align-screen', 'alignScreen']]) $(selector).onchange = event => {
+  tuning[property] = event.target.checked; safeRender();
+};
 $('#image-input').onchange = async event => {
   const file = event.target.files[0];
   if (!file) return;
@@ -531,9 +541,10 @@ async function boot() {
     if (record) {
       if (viewportKey(record.viewport) !== viewportKey(viewport)) throw new Error('Viewport không khớp.');
       computeWarp(record);
-      calibration = { viewport: record.viewport, P: record.P, Q: record.Q, imageSize: record.imageSize };
+      calibration = { viewport: record.viewport, P: record.P, Q: record.Q, points: record.points, imageSize: record.imageSize };
       for (const prop of ['scale', 'width', 'height', 'font']) if (Number.isFinite(record[prop])) tuning[prop] = record[prop];
       if (record.offset) tuning.offset = record.offset;
+      for (const prop of ['optimizeCenter', 'alignScreen']) if (typeof record[prop] === 'boolean') tuning[prop] = record[prop];
       showContent();
     }
   } catch { toast('Bản hiệu chuẩn cũ không hợp lệ. Hãy chụp lại.'); }

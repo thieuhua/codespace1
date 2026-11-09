@@ -21,7 +21,7 @@
     <div class="brand"><span class="brand-symbol">a</span>Anamorphic <span class="brand-light">screen</span></div>
     <span class="pill" id="connection"><span class="dot"></span><span id="connection-text">Đang kết nối</span></span>
   </header>
-  <div id="live-hud" class="live-hud" hidden><b>● LIVE</b><span id="live-detected">0/4 marker</span><span id="live-tracked">Nhớ 0/4</span><span id="live-fps">0 fps</span><span id="live-compression">Nén: —</span><span id="live-warning">Đặt camera đúng vị trí mắt và chờ gom đủ marker.</span></div>
+  <div id="live-hud" class="live-hud" hidden><b>● LIVE</b><span id="live-detected">0/4 marker</span><span id="live-tracked">Nhớ 0/4</span><span id="live-fps">0 fps</span><span id="live-detection">Dò: —</span><span id="live-reprojection">Sai số: —</span><span id="live-compression">Nén: —</span><span id="live-warning">Đặt camera đúng vị trí mắt và chờ gom đủ marker.</span></div>
   <section id="calibration-card" class="calibration-card" aria-labelledby="calibration-heading">
     <div class="card-heading"><span class="eyebrow">HIỆU CHUẨN ĐIỂM NHÌN</span><span class="step-counter">GHÉP ĐÔI → GOM ĐIỂM → CHỐT</span></div>
     <div id="viewport-notice" class="notice" hidden role="alert"></div>
@@ -44,6 +44,9 @@
     <label class="range-label"><span>Thu phóng <output id="scale-value">90%</output></span><input id="scale" type="range" min="0.2" max="1" step="0.01" value="0.9"></label>
     <div class="two-cols"><label><span>Dịch ngang <output id="offset-x-value">0%</output></span><input id="offset-x" type="range" min="-1" max="1" step="0.01" value="0"></label><label><span>Dịch dọc <output id="offset-y-value">0%</output></span><input id="offset-y" type="range" min="-1" max="1" step="0.01" value="0"></label></div>
     <button id="reset-position" class="text-button">Đặt lại vị trí và thu phóng</button>
+    <label class="check-label"><input id="optimize-center" type="checkbox"> Tối ưu tâm để tăng diện tích nội dung</label>
+    <label class="check-label"><input id="align-screen" type="checkbox"> Căn nội dung theo cạnh ngang màn hình trong ảnh</label>
+    <p id="calibration-quality" class="control-help" role="status">Chưa có hiệu chuẩn.</p>
     <div id="compression-warning" class="notice" hidden>Nén là tỉ lệ hai hướng co giãn chính (σmin/σmax) của Jacobian, lấy mức thấp nhất ở 4 góc và tâm. Dưới 35% nghĩa là nén lệch hướng mạnh: tăng cỡ chữ hoặc chọn góc ít nghiêng hơn.</div>
     <hr>
     <div class="two-cols"><label><span>Rộng (px)</span><input id="content-width" type="number" min="100" max="4000" step="10" value="960"></label><label><span>Cao (px)</span><input id="content-height" type="number" min="100" max="4000" step="10" value="600"></label></div>

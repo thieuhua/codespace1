@@ -13,9 +13,9 @@
 
    Lấy nét mặc định ưu tiên **Tự động liên tục**. Có nút **Lấy nét lại**, chạm vào ảnh để chọn điểm lấy nét và **Chỉnh tay** khi camera/trình duyệt cung cấp các API tương ứng. Chức năng không hỗ trợ sẽ được ghi rõ; có thể dùng camera hệ thống qua **Chụp ảnh bằng camera hệ thống**. Đổi camera/zoom/lấy nét xóa bộ nhớ marker trong cùng phiên để không trộn hai cấu hình.
 
-3. Điện thoại dò ArUco trong Web Worker ở cạnh dài tối đa 640 px, mục tiêu 12,5 lượt/giây. Mỗi marker có bộ nhớ riêng: thấy ID nào thì thay tọa độ ID đó, không thấy thì giữ điểm từ khung trước. Khung chỉ thấy 1–2 marker vẫn góp điểm; khung trống không xóa bộ nhớ. Mỗi lượt đợi xác nhận server, không xếp hàng video; chỉ các điểm vừa dò được đi qua mạng.
+3. Điện thoại luôn dò toàn khung ở cạnh dài tối đa 640 px. Khi đã thấy marker, worker dò thêm vùng quanh các góc đã nhớ, lấy từ cùng khung camera ở độ phân giải tương đương tối đa 1280 px; kết quả ROI được ưu tiên và gộp theo ID. Mỗi lượt cách nhau ít nhất 80 ms, đợi cả worker và ACK server, không xếp hàng video. Hai trang hiện thời gian dò (ms). Khung chỉ thấy 1–2 marker vẫn góp điểm; khung trống không xóa bộ nhớ hay tạo mẫu mới. Chỉ tọa độ vừa dò được đi qua mạng.
 4. Khi đã nhớ đủ bốn ID, máy tính render ngay tứ giác mới nhất sau mỗi lần có điểm cập nhật. Không chờ một khung có đủ bốn marker hay bộ 15 khung hoàn chỉnh, không dùng EMA để kéo các góc chưa thấy sang vị trí khác. Phối cảnh không hợp lệ giữ bản hiển thị hợp lệ gần nhất. Cả hai trang phân biệt **số marker vừa thấy** và **số marker đã nhớ**; điểm vừa thấy được tô sáng, điểm cũ có viền.
-5. Điện thoại phân biệt **đủ điểm** với **ổn định**: mỗi ID cần ít nhất 3 mẫu, dao động ≤ 4 px và tuổi ≤ 3000 ms để bật **Chốt**. Tuổi, số mẫu và độ dao động (khoảng cách lớn nhất giữa tối đa 15 quan sát thật gần nhất, theo pixel khung dò) hiện riêng từng ID. Server chốt median của chính cửa sổ mẫu trong ACK; khung trống không làm điểm mới hơn hay tăng mẫu. ID được thấy lại sau khi quá hạn bắt đầu cửa sổ mẫu mới. Server vẫn nhận lệnh chốt từ client cũ với ít mẫu nếu cả bốn ID còn mới và phối cảnh hợp lệ; lỗi nêu rõ ID quá cũ. Máy tính gửi xác nhận áp dụng hoặc từ chối về điện thoại; chỉ báo thành công khi đã được máy tính xác nhận.
+5. Điện thoại phân biệt **đủ điểm** với **ổn định**: mỗi ID cần ít nhất 3 mẫu, dao động tâm/góc ≤ 4 px, tuổi ≤ 3000 ms và RMS chiếu lại ≤ 2 px để bật **Chốt**. Tuổi, số mẫu và độ dao động (khoảng cách lớn nhất giữa tối đa 15 quan sát thật gần nhất, theo pixel khung dò) hiện riêng từng ID. Server chốt median riêng từng tọa độ tâm và từng góc của cửa sổ mẫu trong ACK; khung trống không làm điểm mới hơn hay tăng mẫu. ID được thấy lại sau khi quá hạn bắt đầu cửa sổ mẫu mới. Server vẫn nhận lệnh chốt từ client cũ với ít mẫu nếu cả bốn ID còn mới và phối cảnh hợp lệ; lỗi nêu rõ ID quá cũ. Máy tính gửi xác nhận áp dụng hoặc từ chối về điện thoại; chỉ báo thành công khi đã được máy tính xác nhận.
 6. **Hiệu chỉnh lại** trên một trong hai thiết bị đưa màn hình về live trong cùng phiên. Sau khi đã được cấp quyền, điện thoại mở lại camera; không cần đổi QR hay quét lại. Tạm dừng camera cũng giữ ghép đôi.
 
 Nếu đã di chuyển camera khi gom điểm, dùng **Xóa điểm đã nhớ** để gom lại; nút này giữ nguyên phiên/QR. Bộ nhớ điểm không phải optical flow và không ước lượng chuyển động giữa các khung, vì vậy cần giữ camera ổn định khi đang tích lũy marker.
@@ -30,7 +30,7 @@ Góc nhìn được khóa sau lần chụp. Đổi chỗ ngồi hoặc thay đ�
 - Trang máy tính hiển thị marker, QR, nội dung đã biến dạng và điều khiển hiệu chuẩn.
 - Trang điện thoại chụp/gửi ảnh, xem kết quả nhận diện và hỗ trợ chọn marker thủ công.
 - Server quản lý phiên và chuyển tiếp điểm qua WebSocket; chỉ giải mã/dò ảnh khi dùng luồng upload dự phòng.
-- Module toán học tính homography với chuẩn hóa Hartley, khử Gauss chọn trụ, từ chối suy biến và chuyển sang `matrix3d` ở phía trang hiển thị.
+- Homography chuẩn hóa Hartley: DLT bình phương tối thiểu cho tối đa 16 góc, trị riêng Jacobi và loại ngoại lai theo marker; dự phòng khử Gauss bốn tâm cho client cũ/chạm tay. Từ chối suy biến và chuyển sang `matrix3d` ở phía trang hiển thị.
 - Điều chỉnh chữ, ảnh tĩnh, kích thước nội dung, cỡ chữ, thu phóng và dịch tâm; dịch tâm được giới hạn để nội dung không vượt khỏi màn hình.
 - Lưới/đường bao debug, bật/tắt bù góc, tùy chọn `will-change` và render canvas 2× bằng html2canvas khi cần so sánh độ nét.
 - Hai thiết bị nhớ `sessionId` trong localStorage, nối lại cùng phiên khi refresh/mất mạng. Hiệu chuẩn đã chốt vẫn lưu theo `vw × vh × dpr`; resize/đổi DPR/thoát fullscreen cập nhật marker và bắt đầu lượt live mới, giữ nguyên phiên/QR.
@@ -127,12 +127,18 @@ Xem [hướng dẫn kiểm thử](tests/README.md) để hiểu dữ liệu tổ
 - Tối đa 40 phiên; 1 ảnh đang xử lý mỗi phiên; hàng đợi dò toàn server tối đa 4 ảnh chờ, mỗi tác vụ tối đa 30 giây. Client chờ upload tối đa 180 giây, hiện vị trí xếp hàng và đồng bộ snapshot/kết quả qua WebSocket nếu HTTP hết thời gian chờ. Dò ArUco chạy trong worker thread để không chặn HTTP/WebSocket.
 - Upload tối đa **20 MiB**, giải mã tối đa **64 triệu pixel**. JPEG/PNG/WebP được hỗ trợ; HEIF/AVIF/TIFF tùy codec của Sharp. Nếu HEIC không đọc được, chọn JPEG/PNG. Server không giữ ảnh gốc; chỉ giữ preview JPEG tối đa 2000 px cùng tọa độ theo ảnh gốc đã xử lý EXIF.
 - Dùng từ điển ArUco **ARUCO (5×5)**, ID `17, 42, 73, 99`, tương ứng nhãn **1, 2, 3, 4** theo chiều kim đồng hồ từ trên trái. Tâm marker được lấy bằng giao hai đường chéo để tránh sai số phối cảnh của trung bình bốn góc.
-- Hình chữ nhật đích có tâm tại trung bình bốn đỉnh viewport chiếu lên ảnh; tìm kích thước lớn nhất ở tâm đó rồi nhân hệ số mặc định 0,9, đúng phương pháp xấp xỉ trong đặc tả.
+- Mặc định hình chữ nhật đích có tâm tại trung bình bốn đỉnh viewport chiếu lên ảnh; tìm kích thước lớn nhất ở tâm đó rồi nhân hệ số 0,9, giữ hành vi đặc tả. **Tối ưu tâm để tăng diện tích nội dung** trong Tùy chỉnh giải bài toán tuyến tính theo tâm và kích thước, giữ đúng tỉ lệ và nằm trong tứ giác. **Căn nội dung theo cạnh ngang màn hình trong ảnh** xoay hệ trục theo cạnh trên đã chiếu. Chỉ số góc xoay camera lấy từ hướng cạnh này trong ảnh (góc biểu kiến, chưa tách tư thế 3D/đặc tính ống kính).
 - Mỗi lượt có `revision`; đổi viewport/hiệu chỉnh lại tăng revision để bỏ dữ liệu cũ. Một điện thoại giữ quyền gửi luồng tại một thời điểm. Bộ nhớ giữ từng ID qua các lần mất dấu, không tự hết hạn do thiếu marker. Đổi kích thước khung/camera/zoom/focus, xóa điểm, tạm dừng hoặc nối lại luồng sẽ gom lại từ đầu. Khi chốt, camera phải vẫn đang gửi và cả bốn ID được thấy trong cửa sổ tuổi cho phép, không cần cùng khung. Biến môi trường `MARKER_MAX_AGE_MS` (mặc định `3000`) hoặc tùy chọn `createApplication({markerMaxAgeMs})` thay cửa sổ này. FPS thực tế phụ thuộc thiết bị và mạng.
 
 API cốt lõi giữ theo [đặc tả](<Đặc tả Trình hiển thị bù góc nhìn trên trình duyệt.md>): tạo phiên, upload multipart trường `photo`, gửi 4 điểm, WebSocket `/ws?session=:id` với `photo_received`, `detect_failed`, `calibrated`. Nhận diện tự động hợp lệ sẽ áp dụng ngay; nút **Đúng** trên điện thoại xác nhận lại, **Chạm tay** gửi kết quả sửa.
 
 Các endpoint hỗ trợ: `GET /api/config`, `GET /api/markers/:id.svg`, `GET /api/session/:id`, `DELETE /api/session/:id`, `GET /api/session/:id/photo`, `GET /api/session/:id/qr?url=...`. Client gửi điểm dưới dạng `{photoId, points:[{id,x,y}]}` để từ chối xác nhận ảnh đã bị thay; server cũng nhận mảng điểm thuần theo hợp đồng ban đầu. ID phiên là khóa truy cập ngẫu nhiên trong URL; ứng dụng thiết kế cho LAN tin cậy, chưa có tài khoản người dùng.
+
+### Nhận diện và độ chính xác
+
+Worker và server tinh chỉnh bốn góc biên đen bằng giao các đường gradient trên ảnh xám, cửa sổ bán kính tối đa 5 px, tối đa 8 vòng; cửa sổ thu nhỏ theo bề dày viền ở marker nhỏ. Các góc giữ thứ tự trên trái → trên phải → dưới phải → dưới trái **của SVG gốc**, kể cả khi camera xoay. `markerBlackSide`/`markerCorners` dùng cùng kích thước khi vẽ: biên đen rộng `0.12 × min(vw,vh)`, SVG rộng thêm `9/7`; vùng trắng một ô không thuộc cặp điểm hiệu chuẩn.
+
+Khi đủ bộ góc của bốn marker, DLT chuẩn hóa giải ảnh→màn hình từ 16 cặp. Thử cả bộ và từng bộ ba, chọn đồng thuận theo RMS mỗi marker ≤ 2 px rồi giải lại trên các marker được giữ (12 hoặc 16 góc). `reprojectionError` là RMS Euclid màn hình→ảnh trên các góc được giữ; `rejectedIds` nêu ID bị loại. Thiếu bộ góc của bất kỳ marker nào thì dùng bốn tâm, kể cả tâm đặt tay; sai số là `null` vì bốn tâm khớp đúng không cho một thước đo dư độc lập. Live dùng pixel khung 640 px (ROI quy về cùng hệ), ảnh upload dùng pixel ảnh gốc sau EXIF. Hai trang cảnh báo trên 2 px; live không cho chốt, ảnh tự động chuyển sang kiểm tra/chạm tay. `validateCalibration` vẫn kiểm tra tâm, thứ tự, miền ảnh và chân trời; phép chiếu từ góc cũng được kiểm tra chân trời.
 
 WebSocket `/ws?session=:id&role=display|capture` giữ các sự kiện cũ và bổ sung:
 
@@ -140,7 +146,7 @@ WebSocket `/ws?session=:id&role=display|capture` giữ các sự kiện cũ và 
 | --- | --- | --- |
 | Client → server | `configure` (display) | `{viewport, markers, force?, requestId}`; cập nhật cùng phiên |
 | Client → server | `start_live`, `fallback` | `{requestId}`; chuyển lượt live/chụp ảnh |
-| Capture → server | `live_points` | `{revision, seq, points:[{id,x,y}], imageSize:{w,h}, fps}`; 1–4 điểm **vừa thấy**, không gửi điểm nhớ như mẫu mới |
+| Capture → server | `live_points` | `{revision, seq, points:[{id,x,y,corners?:[{x,y}×4]}], imageSize:{w,h}, fps, detectionMs?}`; 1–4 marker **vừa thấy**; tâm luôn được giữ để tương thích |
 | Capture → server | `live_status` | `{revision, seq, points:[], imageSize:{w,h}, fps}`; khung không có điểm mới, giữ nguyên bộ nhớ |
 | Capture → server | `freeze` | `{revision, lastSeq, requestId}`; chốt median server, từ chối từng ID quá cũ |
 | Display → server → capture | `display_applied` | `{revision, calibrationId?, seq?, ok, reason?}`; xác nhận áp dụng/từ chối, `seq` cho live, `calibrationId` cho bản chốt/ảnh |
@@ -148,8 +154,9 @@ WebSocket `/ws?session=:id&role=display|capture` giữ các sự kiện cũ và 
 | Capture → server | `pause` | `{requestId}`; dừng luồng nhưng giữ phiên |
 | Server → client | `connected` | snapshot `{sessionId, viewport, markers, revision, mode, result, peers, photo, busy, displayApplied}` |
 | Server → client | `live_started`, `capture_started` | snapshot của lượt mới |
-| Server → client | `live_points`, `live_status`, `peers` | tứ giác mới nhất đã gom, `detected`, `tracked`, `updatedIds`, `markerStats`, `freezeQ`; `peers` có `display`, `capture`, `streaming` |
-| Server → capture | `frame_ack` | `{seq, revision, ok, tracked, ready, sampleCounts, markerStats, freezeQ, imageSize, maxAgeMs, fresh, stable, lastSeq, samples, warning?, reason?}`; `markerStats[id] = {ageMs, sampleCount, jitter}` (`ageMs:null` nếu chưa thấy), `ready` gồm phối cảnh + tuổi; `samples` là số mẫu tối thiểu giữa các ID |
+| Server → client | `live_points`, `live_status`, `peers` | tứ giác/tâm `Q`, `points` có góc, `detected`, `tracked`, `updatedIds`, `markerStats`, `freezeQ`, `freezePoints`, `detectionMs`, `reprojectionError`, `freezeReprojectionError`, `correspondenceCount`, `rejectedIds`; `peers` có `display`, `capture`, `streaming` |
+| Server → capture | `frame_ack` | `{seq, revision, ok, tracked, ready, sampleCounts, markerStats, freezeQ, freezePoints, imageSize, maxAgeMs, fresh, stable, lastSeq, samples, detectionMs, reprojectionError, freezeReprojectionError, warning?, reason?}`; `markerStats[id] = {ageMs, sampleCount, cornerSampleCount, jitter}` (`ageMs:null` nếu chưa thấy), `ready` gồm phối cảnh + tuổi + RMS; `samples` là số mẫu tối thiểu giữa các ID |
+| Server → client | `calibrated` | Giữ `Q`/`imageSize`/revision cũ; thêm `points` (góc median khi chốt live), `reprojectionError`, `correspondenceCount`, `rejectedIds`. Luồng ảnh/POST points/snapshot dùng cùng dữ liệu góc tùy chọn. |
 | Server → client | `photo_status`, `photo_ready`, `snapshot` | hàng đợi `{revision,state,position}`; metadata ảnh/preview đến muộn; snapshot có kết quả và xác nhận máy tính |
 | Server → client | `command_ack` | `{requestId, revision, ok, reason?}` |
 
@@ -164,7 +171,8 @@ Server xác thực và gom tọa độ theo ID, chuyển tứ giác mới nhất
 - [client/capture/](client/capture/): trang điện thoại; [camera.js](client/capture/camera.js) quản lý camera/backpressure, [vision-worker.js](client/capture/vision-worker.js) dò marker/QR. [client/common/connection.js](client/common/connection.js) nối lại phiên và xác nhận lệnh dùng chung.
 - [client/capture/track-controls.js](client/capture/track-controls.js), [lens-ui.js](client/capture/lens-ui.js): điều khiển camera/zoom/focus theo capabilities; [shared/camera-settings.js](shared/camera-settings.js): dải/bước zoom, chọn camera và ánh xạ điểm lấy nét.
 - [server/index.js](server/index.js): HTTP/WebSocket và hàng đợi ảnh; [protocol.js](server/protocol.js): lệnh live; [public-url.js](server/public-url.js): URL Codespaces; [sessions.js](server/sessions.js): vòng đời phiên.
-- [shared/homography.js](shared/homography.js), [fitRect.js](shared/fitRect.js), [calibration.js](shared/calibration.js): module thuần dùng chung, không phụ thuộc DOM/Node.
+- [shared/homography.js](shared/homography.js), [fitRect.js](shared/fitRect.js), [calibration.js](shared/calibration.js): DLT/Jacobi, đồng thuận marker, hình chữ nhật và kiểm tra hình học dùng chung, không phụ thuộc DOM/Node.
+- [shared/subpix.js](shared/subpix.js), [detection.js](shared/detection.js): tinh chỉnh gradient, ROI đa độ phân giải và gộp theo ID.
 - [shared/live.js](shared/live.js), [markers.js](shared/markers.js): nhịp xử lý, giới hạn quan sát, EMA cho gói cũ và tâm marker dùng chung.
 - [shared/temporal-markers.js](shared/temporal-markers.js): tuổi, cửa sổ mẫu, dao động, tứ giác mới nhất và median theo ID. [shared/photo.js](shared/photo.js): giới hạn hàng đợi và timeout upload dùng chung.
 - [tests/](tests/README.md): kiểm thử toán, ảnh, API và trình duyệt.

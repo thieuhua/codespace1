@@ -1,4 +1,4 @@
-import { MARKER_IDS, markerLayout, validateCalibration, viewportKey } from '../shared/calibration.js';
+import { markerLayout, fitCalibration, reprojectionAcceptable, reprojectionWarning, viewportKey } from '../shared/calibration.js';
 import { TemporalMarkers } from '../shared/temporal-markers.js';
 
 export function geometry(viewport, markers) {
@@ -18,7 +18,7 @@ export function snapshot(session) {
   return { viewport: session.viewport, markers: session.markers, revision: session.revision, mode: session.mode, result: session.result,
     contentConfig: session.contentConfig, contentData: session.contentData, contentStatus: session.contentStatus,
     displayApplied: session.displayApplied, busy: session.busy,
-    photo: photo ? { photoId: photo.id, imageSize: photo.imageSize, points: photo.points, ok: photo.ok, reason: photo.reason,
+    photo: photo ? { photoId: photo.id, imageSize: photo.imageSize, points: photo.points, ok: photo.ok, reason: photo.reason, reprojectionError: photo.reprojectionError,
       previewUrl: `/api/session/${session.id}/photo?photoId=${photo.id}` } : null };
 }
 export function peers(session) {
@@ -32,6 +32,7 @@ export function resetStream(session, mode) {
   session.lastFrame = null; session.frameOwner = null;
   session.displayApplied = null;
   session.liveWarning = '';
+  session.liveQuality = null;
 }
 
 export function handleMessage(session, ws, data, { broadcast, now, markerMaxAgeMs }) {
@@ -39,7 +40,8 @@ export function handleMessage(session, ws, data, { broadcast, now, markerMaxAgeM
   const frame = data?.type === 'live_points' || data?.type === 'live_status';
   const ack = (ok, reason) => {
     const memory = session.tracker?.snapshot(now());
-    reply(frame ? { ...memory, type: 'frame_ack', seq: data.seq, ok, reason, warning: session.liveWarning, samples: memory?.samples || 0,
+    reply(frame ? { ...memory, ...session.liveQuality, stable: !!memory?.stable && !!session.liveReady,
+      type: 'frame_ack', seq: data.seq, ok, reason, warning: session.liveWarning, samples: memory?.samples || 0,
       tracked: memory?.tracked || 0, ready: !!session.liveReady && !!memory?.fresh,
       updatedIds: ok ? session.memory?.updatedIds || [] : [],
       lastSeq: session.lastFrame?.seq || 0, revision: session.revision }
@@ -93,30 +95,40 @@ export function handleMessage(session, ws, data, { broadcast, now, markerMaxAgeM
       if (!wasStreaming) broadcast(session, 'peers', peers(session));
       if (memory.reset) session.lastFrame = null;
       const detected = observations.length, tracked = memory.tracked;
+      const detectionMs = Number.isFinite(data.detectionMs) ? Math.max(0, Math.min(30_000, data.detectionMs)) : null;
+      session.liveQuality = { detectionMs, reprojectionError: null, freezeReprojectionError: null };
       let warning = tracked < 4 ? `Thấy ${detected}/4, đã nhớ ${tracked}/4. Tiếp tục tìm các marker còn thiếu.`
         : detected < 4 ? `Thấy ${detected}/4, đã nhớ 4/4. Giữ điểm chưa thấy từ khung trước.` : '';
       let Q;
       if (tracked === 4) {
         try {
-          Q = validateCalibration(memory.points, size, session.viewport);
-          validateCalibration(memory.freezeQ.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y })), size, session.viewport);
-          session.liveReady = true;
+          const fit = fitCalibration(memory.points, size, session.viewport, session.markers);
+          Q = fit.Q;
+          session.liveQuality = { detectionMs, reprojectionError: fit.reprojectionError, freezeReprojectionError: null, roll: fit.roll,
+            correspondenceCount: fit.correspondenceCount, rejectedIds: fit.rejectedIds };
+          const frozen = fitCalibration(memory.freezePoints, size, session.viewport, session.markers);
+          session.liveQuality.freezeReprojectionError = frozen.reprojectionError;
+          session.liveReady = reprojectionAcceptable(fit.reprojectionError) && reprojectionAcceptable(frozen.reprojectionError);
+          warning = reprojectionWarning(fit) || reprojectionWarning(frozen) || warning;
         } catch (error) { warning = error.message; }
       }
       if (tracked === 4 && !memory.fresh) warning = `Marker ID ${memory.staleIds.join(', ')} đã cũ (quá ${memory.maxAgeMs} ms). Hãy đưa các marker này vào camera lại.`;
       session.liveWarning = warning;
       if (Q && (observations.length || !session.lastFrame)) {
-        const result = { ...memory, Q, imageSize: { ...size }, seq: data.seq, revision: session.revision, detected, tracked, fps,
+        const result = { ...memory, ...session.liveQuality, stable: memory.stable && session.liveReady, Q, imageSize: { ...size }, seq: data.seq, revision: session.revision, detected, tracked, fps,
           ready: session.liveReady && memory.fresh, warning, algorithm: 'temporal' };
         session.lastFrame = result;
         broadcast(session, 'live_points', result);
-      } else broadcast(session, 'live_status', { ...memory, revision: session.revision, detected, tracked, fps, warning: warning && `${warning} Giữ kết quả hợp lệ gần nhất.` });
+      } else broadcast(session, 'live_status', { ...memory, ...session.liveQuality, stable: memory.stable && session.liveReady,
+        revision: session.revision, detected, tracked, fps, warning: warning && `${warning} Giữ kết quả hợp lệ gần nhất.` });
     } else if (data.type === 'freeze') {
       if (ws.role !== 'capture' || session.frameOwner !== ws || session.mode !== 'live' || data.revision !== session.revision) throw new Error('Điện thoại chưa có lượt hiệu chỉnh đang hoạt động.');
       session.memory = session.tracker.snapshot(now());
       if (!session.memory.fresh) throw new Error(`Không thể chốt: marker ID ${session.memory.staleIds.join(', ')} đã cũ hoặc chưa thấy (giới hạn ${session.memory.maxAgeMs} ms). Hãy quan sát lại các ID này.`);
-      const result = { Q: session.memory.freezeQ, imageSize: session.memory.imageSize };
-      validateCalibration(result.Q.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y })), result.imageSize, session.viewport);
+      const result = { Q: session.memory.freezeQ, points: session.memory.freezePoints, imageSize: session.memory.imageSize };
+      const fit = fitCalibration(result.points, result.imageSize, session.viewport, session.markers);
+      if (!reprojectionAcceptable(fit.reprojectionError)) throw new Error(reprojectionWarning(fit));
+      Object.assign(result, { reprojectionError: fit.reprojectionError, correspondenceCount: fit.correspondenceCount, rejectedIds: fit.rejectedIds, roll: fit.roll });
       const latest = session.lastFrame;
       if (!latest || !session.liveReady || data.lastSeq !== latest.seq || now() - session.lastPacketAt > 1000) throw new Error('Chưa có đủ bốn điểm hợp lệ, hoặc camera đã ngừng gửi. Giữ camera mở và thử chốt lại.');
       session.result = { ...result, revision: session.revision, source: 'live', algorithm: 'temporal',

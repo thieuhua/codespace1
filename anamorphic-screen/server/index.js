@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { markerSVG } from './detect.js';
 import { SessionStore } from './sessions.js';
-import { MARKER_IDS, validateCalibration } from '../shared/calibration.js';
+import { MARKER_IDS, fitCalibration, reprojectionAcceptable, reprojectionWarning } from '../shared/calibration.js';
 import { PHOTO_WAITING, PHOTO_JOB_MS } from '../shared/photo.js';
 import { geometry, snapshot, peers, resetStream, handleMessage } from './protocol.js';
 import { publicURL } from './public-url.js';
@@ -166,11 +166,19 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs, contentF
         session.photo = { ...result, id: photoId, revision };
         let Q;
         if (result.ok) {
-          try { Q = validateCalibration(result.points, result.imageSize, session.viewport); }
+          try {
+            const fit = fitCalibration(result.points, result.imageSize, session.viewport, session.markers);
+            Q = fit.Q;
+            Object.assign(result, { reprojectionError: fit.reprojectionError, correspondenceCount: fit.correspondenceCount, rejectedIds: fit.rejectedIds, roll: fit.roll });
+            Object.assign(session.photo, result);
+            if (!reprojectionAcceptable(fit.reprojectionError)) throw new Error(reprojectionWarning(fit));
+          }
           catch (error) { result.ok = false; result.reason = error.message; Object.assign(session.photo, { ok: false, reason: result.reason }); }
         }
         if (result.ok) {
-          session.result = { Q, imageSize: result.imageSize, photoId, revision, source: 'photo', calibrationId: session.calibrationId = (session.calibrationId || 0) + 1 };
+          session.result = { Q, points: result.points, reprojectionError: result.reprojectionError,
+            correspondenceCount: result.correspondenceCount, rejectedIds: result.rejectedIds, roll: result.roll,
+            imageSize: result.imageSize, photoId, revision, source: 'photo', calibrationId: session.calibrationId = (session.calibrationId || 0) + 1 };
           session.displayApplied = null;
           session.mode = 'display';
           broadcast(session, 'calibrated', session.result);
@@ -200,14 +208,22 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs, contentF
     const body = req.body;
     // photoId guards against an old tab confirming points on a newer photo.
     if (!Array.isArray(body) && body?.photoId !== session.photo.id) throw bad('Ảnh đã đổi. Hãy tải lại trang chụp.', 409);
-    let Q;
-    try { Q = validateCalibration(Array.isArray(body) ? body : body?.points, session.photo.imageSize, session.viewport); }
+    const points = Array.isArray(body) ? body : body?.points;
+    let fit;
+    try {
+      fit = fitCalibration(points, session.photo.imageSize, session.viewport, session.markers);
+      if (!reprojectionAcceptable(fit.reprojectionError)) throw new Error(reprojectionWarning(fit));
+    }
     catch (error) { throw bad(error.message); }
-    session.result = { Q, imageSize: session.photo.imageSize, photoId: session.photo.id, revision: session.revision, source: 'photo',
+    const { Q, reprojectionError, correspondenceCount, rejectedIds, roll } = fit;
+    const ordered = MARKER_IDS.map((id, i) => ({ id, x: Q[i][0], y: Q[i][1], ...(points.find(p => p.id === id).corners && { corners: points.find(p => p.id === id).corners }) }));
+    session.result = { Q, points: ordered, reprojectionError, correspondenceCount, rejectedIds, roll,
+      imageSize: session.photo.imageSize, photoId: session.photo.id, revision: session.revision, source: 'photo',
       calibrationId: session.calibrationId = (session.calibrationId || 0) + 1 };
     session.displayApplied = null;
     session.mode = 'display';
-    session.photo.points = MARKER_IDS.map((id, i) => ({ id, x: Q[i][0], y: Q[i][1] }));
+    session.photo.points = ordered;
+    session.photo.reprojectionError = reprojectionError;
     session.photo.ok = true;
     session.photo.reason = undefined;
     broadcast(session, 'calibrated', session.result);

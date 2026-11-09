@@ -21,7 +21,7 @@
         <p id="camera-capability-note" class="file-hint"></p><p id="lens-status" class="lens-status" role="status"></p>
       </details>
       <div id="marker-memory" class="marker-memory" aria-label="Các marker đã nhớ"><span data-memory-id="17">1</span><span data-memory-id="42">2</span><span data-memory-id="73">3</span><span data-memory-id="99">4</span><button id="clear-tracking" class="text-button">Xóa điểm đã nhớ ↻</button></div>
-      <div id="phone-metrics" class="phone-metrics"><span id="phone-detected">0/4 marker</span><span id="phone-tracked">Nhớ 0/4</span><span id="phone-fps">0 fps</span><span id="phone-compression" title="Tỉ lệ hai trị suy biến của Jacobian: càng gần 100% càng ít nén lệch hướng">Nén: —</span><b id="phone-stability">Chưa đủ điểm</b></div>
+      <div id="phone-metrics" class="phone-metrics"><span id="phone-detected">0/4 marker</span><span id="phone-tracked">Nhớ 0/4</span><span id="phone-fps">0 fps</span><span id="phone-detection">Dò: —</span><span id="phone-reprojection">Sai số: —</span><span id="phone-compression" title="Tỉ lệ hai trị suy biến của Jacobian: càng gần 100% càng ít nén lệch hướng">Nén: —</span><b id="phone-stability">Chưa đủ điểm</b></div>
       <ul id="marker-quality" class="marker-quality" aria-label="Tuổi, số mẫu và dao động từng marker"></ul>
       <p id="camera-warning" class="notice">Đang mở camera…</p><p id="camera-summary" class="sr-only" role="status" aria-live="polite"></p>
       <div class="review-buttons camera-actions"><button id="freeze" class="primary" disabled>Chốt · 0/4 điểm</button><button id="camera-stop">Tạm dừng</button></div>
@@ -41,6 +41,7 @@
     <section id="review-section" aria-labelledby="review-heading" hidden>
       <span class="eyebrow">KIỂM TRA TÂM MARKER</span><h1 id="review-heading">Bốn điểm.<br><em>Một góc nhìn chính xác.</em></h1>
       <p id="review-instruction" class="intro">Kiểm tra các chấm có nằm đúng tâm của 4 marker không.</p>
+      <p id="review-reprojection" class="file-hint"></p>
       <div id="point-steps" class="point-steps" hidden><span data-point="0">1</span><span data-point="1">2</span><span data-point="2">3</span><span data-point="3">4</span></div>
       <div class="photo-view"><canvas id="photo-canvas" aria-describedby="point-help point-position" role="img" aria-label="Ảnh hiệu chuẩn với các điểm marker" tabindex="0"></canvas></div>
       <p id="point-help" class="file-hint" hidden>Chạm và giữ để phóng to, kéo để chỉnh, thả để đặt điểm. Bàn phím: mũi tên di chuyển, Enter đặt điểm.</p><p id="point-position" class="file-hint"></p>

@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import aruco from 'js-aruco2';
 import { DICTIONARY, MARKER_IDS, validatePoints } from '../shared/calibration.js';
 import { markerPoints } from '../shared/markers.js';
+import { refineMarkers } from '../shared/subpix.js';
 
 const { AR } = aruco;
 const dictionary = new AR.Dictionary(DICTIONARY);
@@ -25,7 +26,8 @@ export async function detectPhoto(buffer) {
   const { data, info } = await pipeline.clone().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const preview = await pipeline.clone().jpeg({ quality: 94 }).toBuffer();
   const detector = new AR.Detector({ dictionaryName: DICTIONARY, maxHammingDistance: 2 });
-  const found = detector.detect({ data, width: info.width, height: info.height });
+  const image = { data, width: info.width, height: info.height };
+  const found = refineMarkers(image, detector.detect(image));
   const points = markerPoints(found, imageSize, { w: info.width, h: info.height });
   let reason;
   try { validatePoints(points, imageSize); } catch (error) { reason = error.message; }
