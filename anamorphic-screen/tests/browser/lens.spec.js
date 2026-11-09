@@ -41,6 +41,7 @@ test('camera choice, actual zoom, autofocus/tap/manual focus and sample reset wo
   try {
     const phone = await context.newPage(); await installLensHardware(phone);
     await phone.goto(`http://127.0.0.1:3177/capture/${id}`);
+    await phone.locator('#lens-controls summary').click();
     await expect(phone.locator('#camera-device')).toHaveValue('wide');
     await expect(phone.locator('#camera-zoom-value')).toHaveText('2.2×');
     await expect(phone.locator('#camera-focus-mode')).toHaveValue('continuous');
@@ -92,6 +93,7 @@ test('unsupported lens APIs are explained without fake zoom/focus controls or br
   try {
     const phone = await context.newPage(); await installLensHardware(phone, true);
     await phone.goto(`http://127.0.0.1:3177/capture/${id}`);
+    await phone.locator('#lens-controls summary').click();
     await expect(phone.locator('#camera-capability-note')).toContainText('không cung cấp điều khiển zoom');
     await expect(phone.locator('#camera-zoom-controls')).toBeHidden();
     await expect(phone.locator('#camera-focus-controls')).toBeHidden();

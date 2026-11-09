@@ -1,5 +1,5 @@
 import { $, api, json, toast, copyText } from '/assets/utils.js';
-import { markerLayout, computeWarp, viewportKey } from '/shared/calibration.js';
+import { markerLayout, computeWarp, validateCalibration, MARKER_IDS, viewportKey } from '/shared/calibration.js';
 import { emaFrame } from '/shared/live.js';
 import { SessionConnection } from '/assets/connection.js';
 
@@ -10,6 +10,7 @@ let config, resizeTimer, idleTimer, forceRecalibration = false, link, revision =
 const sessionKey = 'anamorphic:display-session:v2';
 let mode = 'calibrating', warped = true, warpResult, rasterGeneration = 0, objectURL;
 const tuning = { scale: 0.9, offset: { x: 0, y: 0 }, width: 960, height: 600, font: 76 };
+let phonePeers = { capture: 0, streaming: false }, streamTimer, summaryAt = 0;
 
 function storedGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function storedSet(key, value) { try { localStorage.setItem(key, value); } catch { toast('Không lưu được trong trình duyệt. Phiên hiện tại vẫn dùng được.'); } }
@@ -22,6 +23,27 @@ function status(text, busy = false, error = false) {
 function connection(text, connected = false) {
   $('#connection-text').textContent = text;
   $('#connection .dot').style.background = connected ? '#8cab52' : '#c99845';
+}
+function pairingState(peers = phonePeers) {
+  phonePeers = peers;
+  connection(!peers.capture ? 'Chưa có điện thoại' : peers.streaming ? 'Camera đang gửi' : 'Điện thoại đã kết nối', !!peers.capture);
+}
+function streaming(active) {
+  clearTimeout(streamTimer);
+  pairingState({ ...phonePeers, streaming: active });
+  if (active) streamTimer = setTimeout(() => pairingState({ ...phonePeers, streaming: false }), 2000);
+}
+function applied(data, ok, reason = '') {
+  link?.send({ type: 'display_applied', revision: data.revision, seq: data.seq, calibrationId: data.calibrationId, ok, reason });
+  $('#calibration-error').hidden = ok;
+  const message = `Không áp dụng được hiệu chuẩn: ${reason} Giữ kết quả hợp lệ gần nhất.`;
+  if (!ok && $('#calibration-error').textContent !== message) $('#calibration-error').textContent = message;
+}
+function announceLive(data) {
+  const summary = `Vừa thấy ${data.detected}/4 marker, đã nhớ ${data.tracked || 0}/4. ${data.stable ? 'Điểm ổn định.' : 'Giữ camera cố định.'}`;
+  if (performance.now() - summaryAt >= 2000 && $('#live-summary').textContent !== summary) {
+    $('#live-summary').textContent = summary; summaryAt = performance.now();
+  }
 }
 
 function renderMarkers() {
@@ -157,6 +179,8 @@ function captureURL() {
 function updateQR() {
   if (!sessionId) return;
   const url = captureURL();
+  const target = new URL(url), local = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
+  $('#camera-security').hidden = target.protocol !== 'http:' || local;
   const image = $('#qr');
   image.onload = () => { image.hidden = false; $('#qr-loading').hidden = true; };
   image.onerror = () => { image.hidden = true; $('#qr-loading').hidden = true; status('Không tạo được QR. Hãy thử lại phiên.', false, true); };
@@ -172,7 +196,9 @@ function updateQR() {
 function liveWarning(text = '') { $('#live-warning').textContent = text; $('#live-warning').classList.toggle('error', !!text); }
 
 function receive(data) {
+  if (data.type === 'peers') { phonePeers = data; streaming(data.streaming); }
   if (data.type === 'connected') {
+    phonePeers = data.peers; streaming(data.peers.streaming);
     if ($('#qr').hidden) updateQR();
     if (needsConfigure || viewportKey(data.viewport) !== viewportKey(viewport)) { configure(true); return; }
     revision = data.revision;
@@ -188,9 +214,11 @@ function receive(data) {
     revision = data.revision; smoothed = null; setMode('calibrating'); status('Chụp ảnh hoặc chọn điểm trên điện thoại.');
   }
   if (data.type === 'live_points' && !syncing && data.revision === revision) {
+    streaming(true); announceLive(data);
     $('#live-detected').textContent = `${data.detected ?? 4}/4 marker`; $('#live-tracked').textContent = `Nhớ ${data.tracked ?? 4}/4`; $('#live-fps').textContent = `${data.fps.toFixed(1)} fps`;
     try {
       const candidate = { viewport, P, Q: data.Q, imageSize: data.imageSize };
+      validateCalibration(data.Q.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y })), data.imageSize, viewport, P);
       computeWarp({ ...candidate, ...tuning }); // Reject bad raw frames before smoothing.
       // Temporal packets already contain the latest observation of each ID.
       // Render that frame directly so unseen corners never drift via EMA.
@@ -200,23 +228,30 @@ function receive(data) {
       smoothed = next; calibration = nextCalibration; warpResult = nextWarp;
       if (mode !== 'live') { setMode('live'); renderWarp(); } else paintTransform();
       liveWarning(data.warning || '');
-    } catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); }
+      applied(data, true);
+    } catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); applied(data, false, error.message); }
   }
   if (data.type === 'live_status' && data.revision === revision) {
+    streaming(!!data.imageSize); announceLive(data);
     $('#live-detected').textContent = `${data.detected}/4 marker`; $('#live-tracked').textContent = `Nhớ ${data.tracked || 0}/4`; $('#live-fps').textContent = `${data.fps.toFixed(1)} fps`; liveWarning(data.warning);
   }
   if (data.type === 'photo_received') { setMode('waiting'); status('Đã nhận ảnh · Đang nhận diện 4 marker…', true); }
+  if (data.type === 'photo_status' && data.revision === revision) status(data.state === 'queued' ? `Ảnh đang xếp hàng · vị trí ${data.position}` : 'Đang nhận diện marker…', true);
   if (data.type === 'detect_failed' && (!data.revision || data.revision === revision)) { setMode('calibrating'); status(data.reason || 'Hãy chọn điểm thủ công trên điện thoại.'); }
   if (data.type === 'calibrated' && !syncing && data.revision === revision) applyCalibration(data);
 }
 
 function applyCalibration(data) {
   const candidate = { viewport, P, Q: data.Q, imageSize: data.imageSize };
-  try { computeWarp({ ...candidate, ...tuning }); }
-  catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); return; }
+  try {
+    validateCalibration(data.Q.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y })), data.imageSize, viewport, P);
+    computeWarp({ ...candidate, ...tuning });
+  }
+  catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); applied(data, false, error.message); return; }
   calibration = candidate; smoothed = null; warped = true;
   $('#viewport-notice').hidden = true;
   showContent();
+  streaming(false); applied(data, true);
 }
 function enterLive(data) {
   smoothed = null;
@@ -263,7 +298,7 @@ async function pair() {
     $('#session-label').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
     updateQR(); link?.stop();
     link = new SessionConnection(sessionId, 'display', { message: receive,
-      state: state => connection(state === 'open' ? 'Đã kết nối' : 'Đang kết nối lại', state === 'open'),
+      state: state => { if (state === 'open') pairingState(); else { clearTimeout(streamTimer); connection('Đang kết nối lại'); } },
       expired: () => { sessionId = null; storedSet(sessionKey, ''); status('Phiên đã hết hạn sau khi cả hai thiết bị rời đi. Đang tạo phiên mới…'); pair(); }
     });
     status('Sẵn sàng · Ghép đôi một lần, hiệu chỉnh nhiều lần');
@@ -323,8 +358,12 @@ addEventListener('keydown', event => {
   if (key === 'w' && ['display', 'live'].includes(mode)) { warped = !warped; safeRender(); }
   if (key === 'd' && ['display', 'live'].includes(mode)) { $('#debug').checked = !$('#debug').checked; safeRender(); }
   if (key === 'escape') toggleControls(false);
+  if (key === '?') $('#shortcut-help').click();
 });
 $('#fullscreen').onclick = fullscreen;
+$('#shortcut-help').onclick = () => { const dialog = $('#shortcut-dialog'); if (dialog.open) dialog.close(); else dialog.showModal(); };
+$('#shortcut-close').onclick = () => $('#shortcut-dialog').close();
+$('#image-picker').onclick = () => $('#image-input').click();
 $('#controls-toggle').onclick = () => toggleControls(); $('#controls-close').onclick = () => toggleControls(false);
 $('#preview').onclick = () => { showContent(); toggleControls(true); };
 $('#recalibrate').onclick = () => { $('#viewport-notice').hidden = true; beginCalibration(); };

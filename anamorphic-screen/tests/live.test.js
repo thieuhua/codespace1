@@ -130,7 +130,7 @@ test('partial frames assemble all IDs, update the latest quad, survive empty fra
   const app = await setup(t), phone = await app.connect('capture'), display = await app.connect('display');
   const { revision } = await phone.command('start_live');
   for (let i = 0; i < 4; i++) {
-    app.advance(3000);
+    app.advance(300);
     const ack = await phone.frame(i + 1, revision, { points: [points()[i]] });
     assert.equal(ack.tracked, i + 1); assert.equal(ack.ready, i === 3);
   }
@@ -139,7 +139,7 @@ test('partial frames assemble all IDs, update the latest quad, survive empty fra
   const changed = await phone.frame(5, revision, { points: [points(20)[0]] }); assert.equal(changed.ready, true);
   const second = await display.wait(m => m.type === 'live_points' && m.seq === 5);
   assert.equal(second.Q[0][0], 72); assert.equal(second.Q[1][0], 588); assert.deepEqual(second.updatedIds, [17]);
-  app.advance(5000);
+  app.advance(500);
   const empty = await phone.frame(6, revision, { type: 'live_status', points: [] });
   assert.equal(empty.tracked, 4); assert.equal(empty.ready, true); assert.equal(empty.lastSeq, 5);
   assert.equal(empty.sampleCounts[17], 2); assert.equal(empty.sampleCounts[42], 1);

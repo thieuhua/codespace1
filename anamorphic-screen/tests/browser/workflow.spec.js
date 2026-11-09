@@ -5,7 +5,7 @@ import { MARKER_IDS } from '../../shared/calibration.js';
 async function displaySession(page) {
   await page.goto('/');
   await expect(page.locator('#qr')).toBeVisible();
-  await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
+  await expect(page.locator('#connection-text')).toHaveText('Chưa có điện thoại');
   await page.locator('.marker img').evaluateAll(images => Promise.all(images.map(img => img.decode())));
   return page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
 }
@@ -48,7 +48,7 @@ test('camera photo → real detection → desktop matrix3d → review → saved 
   await page.locator('#controls-close').click();
   await page.keyboard.press('w'); await expect(page.locator('#warp')).toHaveCSS('transform', /^matrix\(/);
   await page.keyboard.press('w'); await expect(page.locator('#warp')).toHaveCSS('transform', /^matrix3d/);
-  await page.reload(); await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
+  await page.reload(); await expect(page.locator('#connection-text')).toHaveText('Điện thoại đã kết nối');
   await expect(page.locator('body')).toHaveAttribute('data-state', 'display');
   await expect(page.locator('#poster-text')).toHaveText('Phối cảnh đúng\nTừ góc nhìn của tôi');
   await page.screenshot({ path: testInfo.outputPath('desktop-compensated.png') });
@@ -91,10 +91,38 @@ test('missing markers → manual touch with magnifier, undo, invalid point rejec
   await context.close();
 });
 
+test('keyboard photo picker preserves three detected markers and asks only for the missing ID', async ({ page, browser }, testInfo) => {
+  const id = await displaySession(page);
+  const missing = page.locator('.marker[data-id="42"]');
+  await missing.evaluate(node => { node.style.visibility = 'hidden'; });
+  const photo = await page.screenshot();
+  await missing.evaluate(node => { node.style.visibility = ''; });
+  const { phone, context } = await openPhone(browser, id, testInfo);
+  try {
+    await expect(page.locator('#connection-text')).toHaveText('Điện thoại đã kết nối');
+    await phone.locator('#photo-label').focus();
+    const chooser = phone.waitForEvent('filechooser');
+    await phone.keyboard.press('Enter');
+    await (await chooser).setFiles({ name: 'three-markers.png', mimeType: 'image/png', buffer: photo });
+    await expect(phone.locator('#point-steps .placed')).toHaveCount(3);
+    await expect(phone.locator('[data-point="1"]')).toHaveClass(/current/);
+    await expect(phone.locator('#review-instruction')).toContainText('2 · trên phải');
+    await phone.locator('#photo-canvas').scrollIntoViewIfNeeded();
+    const rect = await phone.locator('#photo-canvas').boundingBox();
+    await phone.touchscreen.tap(rect.x + rect.width * 0.92, rect.y + rect.height * 0.08);
+    await expect(phone.locator('#point-steps .placed')).toHaveCount(4);
+    await phone.locator('#confirm').click();
+    await expect(phone.locator('#done-heading')).toHaveText('Góc nhìn đã được áp dụng.');
+  } finally { await context.close(); }
+});
+
 test('preview, local image, QR host editing and invalid session have usable controls', async ({ page, browser }, testInfo) => {
   await displaySession(page);
   await page.locator('.network-settings summary').click();
   await page.locator('#server-url').fill('http://192.168.20.5:3000'); await page.locator('#apply-url').click();
+  await expect(page.locator('#camera-security')).toContainText('cần HTTPS');
+  await page.locator('#shortcut-help').click(); await expect(page.locator('#shortcut-dialog')).toBeVisible();
+  await page.keyboard.press('Escape'); await expect(page.locator('#shortcut-dialog')).toBeHidden();
   await expect(page.locator('#copy-link')).toHaveAttribute('title', /^http:\/\/192.168.20.5:3000\/capture\//);
   await page.locator('#preview').click(); await expect(page.locator('#uncalibrated')).toBeVisible();
   const image = await sharp({ create: { width: 600, height: 400, channels: 3, background: '#d16f42' } }).png().toBuffer();
@@ -121,7 +149,7 @@ test('display reconnects WebSocket and recovers calibration missed while disconn
   const id = await displaySession(page);
   // Disconnect through the browser's network state without changing the server.
   await page.context().setOffline(true);
-  await expect(page.locator('#connection-text')).not.toHaveText('Đã kết nối');
+  await expect(page.locator('#connection-text')).toHaveText('Đang kết nối lại');
   const photo = await sharp({ create: { width: 1000, height: 700, channels: 3, background: '#fff' } }).png().toBuffer();
   const uploaded = await request.post(`/api/session/${id}/photo`, { multipart: { photo: { name: 'blank.png', mimeType: 'image/png', buffer: photo } } });
   const data = await uploaded.json();
@@ -129,7 +157,7 @@ test('display reconnects WebSocket and recovers calibration missed while disconn
   expect(result.ok()).toBeTruthy();
   await page.context().setOffline(false);
   await expect(page.locator('body')).toHaveAttribute('data-state', 'display', { timeout: 20_000 });
-  await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
+  await expect(page.locator('#connection-text')).toHaveText('Chưa có điện thoại');
 });
 
 test('DPR changes and exiting fullscreen restart live in the same paired session', async ({ page }) => {

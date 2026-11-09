@@ -1,5 +1,6 @@
-import { $, api, json, toast } from '/assets/utils.js';
-import { MARKER_IDS, validatePoints, computeWarp } from '/shared/calibration.js';
+import { $, api, json } from '/assets/utils.js';
+import { MARKER_IDS, validateCalibration, computeWarp } from '/shared/calibration.js';
+import { markerStability } from '/shared/temporal-markers.js';
 import { SessionConnection } from '/assets/connection.js';
 import { Camera } from './camera.js';
 import { LensUI } from './lens-ui.js';
@@ -11,6 +12,7 @@ let link, sessionState, attemptedCamera = false, cameraAllowed = false, starting
 let photo, image, points = [], manual = false, busy = false, activePointer = null, pointerPoint;
 let keyboardPoint = [0, 0];
 let lensChanging = false, cameraDirty = false;
+let serverFrame, stable = false, displayApplied, announcementAt = 0, recoveringPhoto = false;
 const canvas = $('#photo-canvas'), context = canvas.getContext('2d');
 const labels = ['1 · trên trái', '2 · trên phải', '3 · dưới phải', '4 · dưới trái'];
 
@@ -28,7 +30,7 @@ function show(section) {
 }
 function setBusy(value) {
   busy = value; $('#photo-input').disabled = value;
-  $('#photo-label').setAttribute('aria-disabled', String(value));
+  $('#photo-label').disabled = value;
   for (const id of ['confirm', 'manual', 'undo', 'retake']) $(`#${id}`).disabled = value;
   if (!value) updateReview();
 }
@@ -39,12 +41,12 @@ function draw() {
   context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(image, 0, 0);
   const ratio = canvas.width / photo.imageSize.w;
   const dotRadius = Math.max(9, canvas.width / 85);
-  points.forEach((p, i) => {
+  points.forEach(p => {
     const x = p.x * ratio, y = p.y * canvas.height / photo.imageSize.h;
     context.beginPath(); context.arc(x, y, dotRadius, 0, Math.PI * 2);
     context.fillStyle = '#d4f879'; context.fill(); context.lineWidth = dotRadius / 5; context.strokeStyle = '#233019'; context.stroke();
     context.fillStyle = '#233019'; context.font = `bold ${dotRadius * 1.2}px monospace`; context.textAlign = 'center'; context.textBaseline = 'middle';
-    context.fillText(String(i + 1), x, y + dotRadius / 20);
+    context.fillText(String(MARKER_IDS.indexOf(p.id) + 1), x, y + dotRadius / 20);
   });
   if (manual && document.activeElement === canvas && points.length < 4) {
     const x = keyboardPoint[0] * ratio, y = keyboardPoint[1] * canvas.height / photo.imageSize.h;
@@ -54,18 +56,25 @@ function draw() {
 }
 
 function updateReview() {
+  const missing = MARKER_IDS.findIndex(id => !points.some(p => p.id === id));
   canvas.classList.toggle('manual', manual);
   $('#point-steps').hidden = !manual; $('#point-help').hidden = !manual;
   $('#manual').hidden = manual; $('#undo').hidden = !manual; $('#undo').disabled = busy || !points.length;
   $('#confirm').disabled = busy || points.length !== 4;
   document.querySelectorAll('[data-point]').forEach((node, i) => {
-    node.classList.toggle('placed', i < points.length); node.classList.toggle('current', i === points.length);
+    node.classList.toggle('placed', points.some(p => p.id === MARKER_IDS[i])); node.classList.toggle('current', i === missing);
   });
   if (manual) $('#review-instruction').textContent = points.length < 4
-    ? `Chạm tâm marker ${labels[points.length]} theo nhãn trên ảnh (không theo vị trí ảnh nếu ảnh bị xoay).`
+    ? `Đã giữ ${points.length}/4 điểm. Chỉ cần chạm tâm marker còn thiếu: ${labels[missing]} theo nhãn trên ảnh.`
     : 'Đã chọn 4 tâm marker. Kiểm tra rồi nhấn “Đúng” để áp dụng.';
   else $('#review-instruction').textContent = 'Đã nhận diện đủ 4 marker và gửi kết quả lên máy tính. Kiểm tra các chấm trên ảnh; chọn “Chạm tay” nếu cần sửa.';
   draw();
+  describePointer();
+}
+
+function describePointer() {
+  $('#point-position').textContent = manual && points.length < 4
+    ? `Con trỏ: x ${Math.round(keyboardPoint[0])}, y ${Math.round(keyboardPoint[1])} pixel trong ảnh. ${$('#review-instruction').textContent}` : '';
 }
 
 async function loadPhoto(data, source) {
@@ -73,14 +82,15 @@ async function loadPhoto(data, source) {
   const nextImage = new Image(); nextImage.src = source;
   await nextImage.decode();
   image = nextImage; canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
-  points = data.ok ? MARKER_IDS.map(id => data.points.find(p => p.id === id)).filter(Boolean) : [];
+  points = MARKER_IDS.map(id => data.points?.find(p => p.id === id)).filter(Boolean);
   keyboardPoint = [photo.imageSize.w / 2, photo.imageSize.h / 2];
   show('review');
-  if (!data.ok) { manual = true; points = []; }
+  if (!data.ok) manual = true;
   updateReview();
-  if (!data.ok) status(data.reason || 'Không tìm đủ marker. Hãy chạm lần lượt vào 4 tâm trên ảnh.');
+  if (!data.ok) status(`${data.reason || 'Không tìm đủ marker.'} Đã giữ ${points.length}/4 điểm; chỉ đặt các điểm còn thiếu.`);
 }
 
+$('#photo-label').onclick = () => $('#photo-input').click();
 $('#photo-input').onchange = async event => {
   const file = event.target.files[0]; event.target.value = '';
   if (!file || busy) return;
@@ -90,11 +100,16 @@ $('#photo-input').onchange = async event => {
   const form = new FormData(); form.append('photo', file);
   try {
     const data = await api(`${base}/photo`, { method: 'POST', body: form });
+    recoveringPhoto = false;
     await loadPhoto(data, data.previewUrl);
     $('#session-badge').textContent = 'ẢNH ĐÃ NHẬN';
   } catch (error) {
     if (error.status === 404) expired();
-    else status(`${error.message} Bạn có thể chụp hoặc chọn ảnh khác.`, true);
+    else if (error.name === 'TimeoutError' || error.name === 'AbortError' || !error.status) {
+      recoveringPhoto = true;
+      status('Chưa nhận được phản hồi upload. Đang đồng bộ với server; kết quả đến muộn sẽ hiện tại đây.', true);
+      link?.command('sync').catch(() => {});
+    } else status(`${error.message} Bạn có thể chụp hoặc chọn ảnh khác.`, true);
   } finally { setBusy(false); }
 };
 
@@ -102,11 +117,12 @@ $('#manual').onclick = () => { manual = true; points = []; status(); updateRevie
 $('#undo').onclick = () => { if (!busy) { points.pop(); status(); updateReview(); } };
 $('#confirm').onclick = async () => {
   if (busy || points.length !== 4) return;
-  try { validatePoints(points, photo.imageSize); } catch (error) { status(error.message, true); return; }
+  try { validateCalibration(points, photo.imageSize, sessionState?.viewport); } catch (error) { status(error.message, true); return; }
   setBusy(true); status('Đang áp dụng góc nhìn…');
   try {
-    await api(`${base}/points`, json({ points, photoId: photo.photoId }));
-    show('done'); $('#session-badge').textContent = 'ĐÃ HIỆU CHUẨN';
+    const result = await api(`${base}/points`, json({ points, photoId: photo.photoId }));
+    sessionState.result = result;
+    showDone();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (error) {
     if (error.status === 404) expired();
@@ -138,7 +154,7 @@ function magnify(point, clientX, clientY) {
 }
 function place(point) {
   if (!manual || busy || points.length >= 4) return;
-  points.push({ id: MARKER_IDS[points.length], x: point[0], y: point[1] });
+  points.push({ id: MARKER_IDS.find(id => !points.some(p => p.id === id)), x: point[0], y: point[1] });
   status(); updateReview();
 }
 canvas.onpointerdown = event => {
@@ -165,7 +181,7 @@ canvas.onkeydown = event => {
     event.preventDefault();
     const delta = directions[event.key], step = event.shiftKey ? 10 : 1;
     keyboardPoint = keyboardPoint.map((v, i) => Math.max(0, Math.min((i ? photo.imageSize.h : photo.imageSize.w) - 1, v + delta[i] * step)));
-    draw();
+    draw(); describePointer();
   }
 };
 canvas.onfocus = draw; canvas.onblur = draw;
@@ -198,6 +214,7 @@ async function resetCameraCalibration() {
 
 function resetFrames() {
   latestFrame = null; trackedCount = 0; ticks = []; freezing = false; lastSeq = 0;
+  serverFrame = null; stable = false;
   camera.resetTracking();
   $('#phone-tracked').textContent = 'Nhớ 0/4';
   document.querySelectorAll('[data-memory-id]').forEach(node => { node.classList.remove('remembered', 'observed'); node.title = 'Chưa thấy'; });
@@ -205,8 +222,48 @@ function resetFrames() {
   updateFreeze();
 }
 function updateFreeze() {
-  $('#freeze').disabled = freezing || lensChanging || cameraDirty || !link?.open || !latestFrame || trackedCount < 4;
-  $('#freeze').textContent = freezing ? 'Đang chốt…' : `Chốt · ${trackedCount}/4 điểm`;
+  $('#freeze').disabled = freezing || lensChanging || cameraDirty || !link?.open || !latestFrame || !stable;
+  $('#freeze').textContent = freezing ? 'Đang chốt…' : stable ? 'Chốt · Ổn định' : trackedCount === 4 ? 'Đủ điểm · Chờ ổn định' : `Chốt · ${trackedCount}/4 điểm`;
+}
+
+function updateQuality() {
+  if (!serverFrame || sessionState?.mode !== 'live') return;
+  const elapsed = performance.now() - serverFrame.receivedAt;
+  const stats = Object.fromEntries(MARKER_IDS.map(id => {
+    const item = serverFrame.markerStats?.[id];
+    return [id, item && { ...item, ageMs: item.ageMs === null ? null : item.ageMs + elapsed }];
+  }));
+  stable = markerStability(stats, serverFrame.maxAgeMs) && elapsed < 2000 && !!latestFrame;
+  $('#marker-quality').replaceChildren(...MARKER_IDS.map((id, i) => {
+    const item = stats[id], node = document.createElement('li');
+    node.textContent = item && item.ageMs !== null ? `${i + 1} (ID ${id}): ${(item.ageMs / 1000).toFixed(1)} s · ${item.sampleCount} mẫu · dao động ${item.jitter.toFixed(1)} px` : `${i + 1} (ID ${id}): chưa thấy`;
+    node.classList.toggle('error', !!item && item.ageMs > serverFrame.maxAgeMs);
+    return node;
+  }));
+  const stale = MARKER_IDS.filter(id => stats[id]?.ageMs === null || stats[id]?.ageMs > serverFrame.maxAgeMs);
+  const summary = trackedCount < 4 ? `Đã nhớ ${trackedCount}/4 điểm. Tìm các marker còn thiếu.` : stale.length
+    ? `Đủ điểm nhưng ID ${stale.join(', ')} đã cũ. Hướng camera vào các marker này lại.`
+    : stable ? 'Đủ điểm và ổn định. Có thể Chốt.' : 'Đủ điểm, chưa ổn định. Giữ camera cố định, cần ít nhất 3 mẫu/ID và dao động không quá 4 px.';
+  $('#phone-stability').textContent = stable ? 'Ổn định' : trackedCount === 4 ? 'Đủ điểm · Chưa ổn định' : 'Chưa đủ điểm';
+  $('#camera-warning').textContent = serverFrame.reason || serverFrame.validationError || (serverFrame.ready ? summary : serverFrame.warning || summary);
+  if (performance.now() - announcementAt >= 2000 && $('#camera-summary').textContent !== summary) {
+    $('#camera-summary').textContent = summary; announcementAt = performance.now();
+  }
+  updateFreeze();
+}
+setInterval(updateQuality, 250);
+
+function showDone() { show('done'); $('#review-again').hidden = !photo; renderApplied(); }
+function renderApplied() {
+  const result = sessionState?.result;
+  const applied = displayApplied?.calibrationId === result?.calibrationId && displayApplied?.seq === undefined ? displayApplied : null;
+  $('#done-heading').textContent = applied?.ok ? 'Góc nhìn đã được áp dụng.' : applied ? 'Máy tính từ chối hiệu chuẩn.' : 'Đang chờ máy tính xác nhận.';
+  $('#done-eyebrow').textContent = applied?.ok ? 'ĐIỂM NHÌN ĐÃ KHÓA' : 'CHỜ XÁC NHẬN HIỂN THỊ';
+  $('#done-description').textContent = applied?.ok ? 'Nhìn màn hình từ đúng vị trí camera vừa chốt.' : applied ? applied.reason : 'Đã gửi điểm lên server. Giữ trang máy tính mở để nhận xác nhận áp dụng.';
+  const rejected = displayApplied?.ok === false;
+  $('#display-feedback').hidden = !rejected;
+  const message = rejected ? `Máy tính từ chối hiệu chuẩn: ${displayApplied.reason || 'Phối cảnh không hợp lệ.'} Hãy hiệu chỉnh lại.` : '';
+  if ($('#display-feedback').textContent !== message) $('#display-feedback').textContent = message;
 }
 async function startLive() {
   if (document.hidden) { resumeOnVisible = true; return; }
@@ -246,13 +303,9 @@ function overlay(result) {
 }
 async function sendFrame(result) {
   if (!link?.open || freezing || lensChanging || cameraDirty || result.revision !== sessionState?.revision || result.trackingEpoch !== camera.trackingEpoch || sessionState.mode !== 'live') return;
-  overlay(result);
   const now = performance.now(); ticks.push(now); ticks = ticks.filter(t => now - t <= 1500);
   const fps = ticks.length > 1 ? (ticks.length - 1) * 1000 / (now - ticks[0]) : 0;
   $('#phone-detected').textContent = `${result.detected}/4 marker`; $('#phone-fps').textContent = `${fps.toFixed(1)} fps`;
-  $('#phone-tracked').textContent = `Nhớ ${result.tracked}/4`;
-  $('#phone-compression').textContent = result.valid ? `Nén: ${Math.round(result.compression * 100)}%` : 'Nén: —';
-  $('#camera-warning').textContent = result.warning || 'Góc nhìn hợp lệ. Giữ ổn định rồi nhấn Chốt.';
   const nextSeq = ++seq;
   const packet = { type: result.observations.length ? 'live_points' : 'live_status', seq: nextSeq, revision: result.revision,
     points: result.observations, imageSize: result.imageSize, fps };
@@ -263,41 +316,80 @@ async function sendFrame(result) {
   });
   if (result.revision !== sessionState?.revision || result.trackingEpoch !== camera.trackingEpoch) return;
   trackedCount = ack.tracked || 0;
-  if (ack.ok && ack.ready && result.freezeValid) {
-    latestFrame = { Q: result.freezeQ, imageSize: result.imageSize }; lastSeq = ack.lastSeq;
-  } else { latestFrame = null; if (ack.reason) $('#camera-warning').textContent = ack.reason; }
-  updateFreeze();
+  if (ack.points && ack.imageSize) overlay({ ...ack, updatedIds: ack.updatedIds || [] });
+  $('#phone-tracked').textContent = `Nhớ ${trackedCount}/4`;
+  latestFrame = null;
+  let validationError;
+  if (ack.ok && ack.ready && ack.freezeQ) {
+    try {
+      const candidate = { Q: ack.freezeQ, imageSize: ack.imageSize };
+      validateCalibration(MARKER_IDS.map((id, i) => ({ id, x: candidate.Q[i][0], y: candidate.Q[i][1] })), candidate.imageSize, sessionState.viewport);
+      const quality = computeWarp({ viewport: sessionState.viewport, P: sessionState.markers, ...candidate });
+      $('#phone-compression').textContent = `Nén: ${Math.round(quality.compression * 100)}% · Co giãn nhỏ nhất ${quality.minScale.toFixed(2)} px/px`;
+      latestFrame = candidate; lastSeq = ack.lastSeq;
+    } catch (error) { validationError = error.message; }
+  }
+  if (!latestFrame) $('#phone-compression').textContent = 'Nén: —';
+  serverFrame = { ...ack, validationError, receivedAt: performance.now() };
+  updateQuality();
 }
 
 function receive(data) {
-  if (['connected', 'live_started', 'capture_started'].includes(data.type)) {
+  if (['connected', 'snapshot', 'live_started', 'capture_started'].includes(data.type)) {
     const changed = sessionState?.revision !== data.revision;
     sessionState = data;
+    displayApplied = data.displayApplied;
+    renderApplied();
     if (changed || data.type === 'connected') resetFrames();
     if (data.type === 'live_started') cameraDirty = false;
     if (data.type === 'connected' && cameraDirty && camera.mode === 'live') resetCameraCalibration().catch(error => lens.notice(error.message));
     $('#session-badge').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
-    if (data.mode === 'display' && data.result) { camera.stop(); show('done'); $('#review-again').hidden = !photo; }
+    if (data.busy && data.mode === 'calibrating') { attemptedCamera = true; status('Server đang xử lý ảnh. Đang chờ đồng bộ kết quả…'); }
+    else if (data.mode === 'display' && data.result) { camera.stop(); showDone(); }
     else if (data.type === 'live_started' && cameraAllowed && camera.mode !== 'live') startLive();
     else if (data.type === 'connected' && data.mode === 'live' && cameraAllowed && resumeOnVisible) startLive();
     else if (data.type === 'connected' && photo && data.mode === 'calibrating') { attemptedCamera = true; }
     else if (data.type === 'connected' && !attemptedCamera) startLive();
     else if (data.type === 'capture_started') { camera.stop(); show('capture'); }
+    if (data.photo && !data.busy && (recoveringPhoto || data.type === 'snapshot')) {
+      recoveringPhoto = false;
+      loadPhoto(data.photo, data.photo.previewUrl).catch(error => status(error.message, true));
+    }
   }
   if (data.type === 'frame_ack' && pendingFrame?.seq === data.seq) {
     const pending = pendingFrame; pendingFrame = null; clearTimeout(pending.timer); pending.resolve(data);
   }
-  if (data.type === 'calibrated' && data.source === 'live' && data.revision === sessionState?.revision) {
-    sessionState.mode = 'display'; camera.stop(); resetFrames(); show('done'); $('#review-again').hidden = !photo;
+  if (data.type === 'calibrated' && data.revision === sessionState?.revision) {
+    if (data.calibrationId !== sessionState.result?.calibrationId) displayApplied = null;
+    sessionState.mode = 'display'; sessionState.result = data;
+    camera.stop(); resetFrames();
+    if (data.source === 'live' || (!busy && !photo)) showDone();
+    renderApplied();
+  }
+  if (data.type === 'display_applied' && data.revision === sessionState?.revision) {
+    if (data.seq === undefined && data.calibrationId !== sessionState.result?.calibrationId) return;
+    displayApplied = data; renderApplied();
+  }
+  if (data.type === 'photo_status' && data.revision === sessionState?.revision) {
+    status(data.state === 'queued' ? `Ảnh đang xếp hàng · vị trí ${data.position}. Giữ trang này mở (tối đa khoảng 3 phút).` : 'Đang nhận diện marker trên server…');
+  }
+  if (data.type === 'photo_ready' && data.revision === sessionState?.revision && !busy) {
+    recoveringPhoto = false;
+    loadPhoto(data, data.previewUrl).catch(error => status(error.message, true));
+  }
+  if (data.type === 'detect_failed' && data.revision === sessionState?.revision && !busy) {
+    status(data.reason || 'Không đọc được ảnh. Hãy thử lại.', true);
   }
 }
 
 $('#freeze').onclick = async () => {
-  if (freezing || lensChanging || cameraDirty || !latestFrame || trackedCount < 4) return;
+  updateQuality();
+  if (freezing || lensChanging || cameraDirty || !latestFrame || !stable) return;
   freezing = true; updateFreeze();
   try {
     if (pendingFrame) await new Promise(resolve => { const check = () => pendingFrame ? setTimeout(check, 10) : resolve(); check(); });
-    if (!latestFrame) throw new Error('Chưa gom đủ bốn điểm hợp lệ.');
+    updateQuality();
+    if (!latestFrame || !stable) throw new Error('Điểm chưa ổn định hoặc đã cũ. Giữ camera mở và quan sát lại.');
     computeWarp({ viewport: sessionState.viewport, P: sessionState.markers, ...latestFrame });
     await link.command('freeze', { revision: sessionState.revision, lastSeq });
   } catch (error) { $('#camera-warning').textContent = error.message; }

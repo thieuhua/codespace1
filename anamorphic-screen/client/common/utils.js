@@ -1,6 +1,9 @@
+import { PHOTO_UPLOAD_MS } from '/shared/photo.js';
+
 export const $ = selector => document.querySelector(selector);
 export async function api(url, options = {}) {
-  const response = await fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(45_000) });
+  const timeout = options.method === 'POST' && /\/photo$/.test(url) ? PHOTO_UPLOAD_MS : 45_000;
+  const response = await fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(timeout) });
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({ reason: `Server trả mã ${response.status}.` }));
   if (!response.ok) throw Object.assign(new Error(data.reason || 'Không kết nối được server.'), { status: response.status });

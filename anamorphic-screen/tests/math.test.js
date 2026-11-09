@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { homography, apply, invert, multiply, matrix3d, solve8 } from '../shared/homography.js';
 import { contains, fitRect, isConvex } from '../shared/fitRect.js';
-import { computeWarp, validatePoints, markerLayout, MARKER_IDS } from '../shared/calibration.js';
+import { computeWarp, validatePoints, validateCalibration, jacobianScales, warpQuality, markerLayout, MARKER_IDS } from '../shared/calibration.js';
 
 const source = [[0, 0], [3840, 0], [3840, 2160], [0, 2160]];
 const target = [[1460.7, 703.2], [3500.3, 870.6], [3150.9, 2940.2], [650.2, 3210.8]];
@@ -78,5 +78,53 @@ test('complete exact point pipeline projects compensated content to an axis-alig
     observed.forEach((p, i) => p.forEach((v, axis) => near(v, warp.R.corners[i][axis])));
     near(observed[0][1], observed[1][1]); near(observed[1][0], observed[2][0]);
     assert.ok(warp.S.every(p => contains([[0, 0], [1920, 0], [1920, 1080], [0, 1080]], p)));
+  }
+});
+
+test('shared calibration validation rejects a horizon outside the marker quad but inside the viewport', () => {
+  const viewport = { vw: 1440, vh: 900, dpr: 1 }, P = markerLayout(viewport), imageSize = { w: 640, h: 400 };
+  const H = [0.02, 0, 0, 0, 0.02, 0, -1 / 1400, 0, 1];
+  const Q = P.map(p => apply(H, [p.x, p.y]));
+  const points = Q.map(([x, y], i) => ({ id: MARKER_IDS[i], x, y }));
+  assert.equal(validateCalibration(points, imageSize).length, 4);
+  assert.throws(() => validateCalibration(points, imageSize, viewport), /chân trời/);
+  assert.throws(() => computeWarp({ viewport, P, Q, imageSize }), /chân trời/);
+  assert.throws(() => validateCalibration(points, imageSize, { ...viewport, vw: NaN }), /Viewport/);
+});
+
+test('Jacobian compression detects shear with equal edge lengths, uniform scale and rotation', () => {
+  const angle = 5 * Math.PI / 180;
+  const shear = [1, Math.cos(angle), 0, 0, Math.sin(angle), 0, 0, 0, 1];
+  const quality = warpQuality(shear, 960, 600);
+  near(quality.compression, Math.tan(angle / 2));
+  near(quality.minScale, Math.sqrt(1 - Math.cos(angle)));
+  near(warpQuality([0, -2, 0, 2, 0, 0, 0, 0, 1], 960, 600).compression, 1);
+  near(warpQuality([0, -2, 0, 2, 0, 0, 0, 0, 1], 960, 600).minScale, 2);
+  near(warpQuality([3, 0, 0, 0, 0.5, 0, 0, 0, 1], 960, 600).compression, 1 / 6);
+});
+
+test('computeWarp reports severe five-degree shear even though its edge-length scales are equal', () => {
+  const viewport = { vw: 1440, vh: 900, dpr: 1 }, P = markerLayout(viewport), angle = 5 * Math.PI / 180;
+  const H = [0.05, -0.05 / Math.tan(angle), 550, 0, 0.05 / Math.sin(angle), 10, 0, 0, 1];
+  const Q = P.map(p => apply(H, [p.x, p.y]));
+  const warp = computeWarp({ viewport, P, Q, imageSize: { w: 700, h: 600 } });
+  const edges = warp.S.map((p, i) => Math.hypot(p[0] - warp.S[(i + 1) % 4][0], p[1] - warp.S[(i + 1) % 4][1]) / (i % 2 ? 600 : 960));
+  near(Math.min(...edges) / Math.max(...edges), 1);
+  near(warp.compression, Math.tan(angle / 2));
+  near(warp.minScale, warp.R.width / 960 / 0.05 * Math.sqrt(1 - Math.cos(angle)));
+});
+
+test('projective quality uses all four corners and centre; Jacobian matches finite differences', () => {
+  const G = [2, 0.4, 20, 0.2, 1.5, 10, 0.001, 0.0005, 1], width = 960, height = 600;
+  const samples = [[0, 0], [width, 0], [width, height], [0, height], [width / 2, height / 2]];
+  const scales = samples.map(p => jacobianScales(G, p));
+  const quality = warpQuality(G, width, height);
+  near(quality.compression, Math.min(...scales.map(s => s.min / s.max)));
+  near(quality.minScale, Math.min(...scales.map(s => s.min)));
+  for (const p of samples) {
+    const v = apply(G, p), e = 1e-4, dx = apply(G, [p[0] + e, p[1]]), dy = apply(G, [p[0], p[1] + e]);
+    const det = ((dx[0] - v[0]) * (dy[1] - v[1]) - (dy[0] - v[0]) * (dx[1] - v[1])) / (e * e);
+    const s = jacobianScales(G, p);
+    near(s.min * s.max, Math.abs(det), 1e-6);
   }
 });

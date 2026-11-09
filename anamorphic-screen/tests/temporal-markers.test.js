@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TemporalMarkers } from '../shared/temporal-markers.js';
+import { TemporalMarkers, markerStability } from '../shared/temporal-markers.js';
 import { MARKER_IDS, validatePoints } from '../shared/calibration.js';
 
 const imageSize = { w: 640, h: 400 };
@@ -43,4 +43,31 @@ test('invalid observations leave memory intact; a bad aggregate can recover with
   assert.throws(() => validatePoints(wrong.points, imageSize));
   const recovered = tracker.update([points[0]], imageSize, 1);
   assert.equal(validatePoints(recovered.points, imageSize).length, 4);
+});
+
+test('ages come from actual sightings; jitter is the spread of real samples and full does not mean stable', () => {
+  const tracker = new TemporalMarkers();
+  let memory = tracker.update(points, imageSize, 1, 100);
+  assert.equal(memory.fresh, true); assert.equal(memory.stable, false);
+  tracker.update(points, imageSize, 1, 200);
+  memory = tracker.update(points.map(p => ({ ...p, x: p.x + 1, y: p.y + 2 })), imageSize, 1, 300);
+  assert.equal(memory.stable, true);
+  assert.equal(memory.markerStats[17].jitter, Math.sqrt(5));
+  memory = tracker.update([], imageSize, 1, 3301);
+  assert.equal(memory.markerStats[17].ageMs, 3001); assert.equal(memory.markerStats[17].sampleCount, 3);
+  assert.equal(memory.fresh, false); assert.equal(memory.stable, false);
+  assert.deepEqual(memory.staleIds, MARKER_IDS);
+  memory = tracker.update([points[0]], imageSize, 1, 3302);
+  assert.equal(memory.sampleCounts[17], 1); // Reacquisition starts a new observation window.
+  assert.deepEqual(memory.staleIds, [42, 73, 99]);
+  assert.equal(tracker.markers.get(42).seenAt, 300);
+});
+
+test('freshness window is configurable and excessive motion blocks the stability hint', () => {
+  const tracker = new TemporalMarkers({ maxAgeMs: 50 });
+  tracker.update(points, imageSize, 1, 0); tracker.update(points, imageSize, 1, 1);
+  const memory = tracker.update(points.map(p => ({ ...p, x: p.x + 5 })), imageSize, 1, 2);
+  assert.equal(memory.markerStats[17].jitter, 5); assert.equal(markerStability(memory.markerStats, 50), false);
+  assert.equal(tracker.snapshot(52).fresh, true); assert.equal(tracker.snapshot(53).fresh, false);
+  assert.throws(() => new TemporalMarkers({ maxAgeMs: 0 }));
 });

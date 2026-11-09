@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { markerSVG } from './detect.js';
 import { SessionStore } from './sessions.js';
-import { MARKER_IDS, validatePoints } from '../shared/calibration.js';
+import { MARKER_IDS, validateCalibration } from '../shared/calibration.js';
+import { PHOTO_WAITING, PHOTO_JOB_MS } from '../shared/photo.js';
 import { geometry, snapshot, peers, resetStream, handleMessage } from './protocol.js';
 import { publicURL } from './public-url.js';
 
@@ -31,6 +32,7 @@ function detectorQueue() {
   let worker, active;
   let stopped = false;
   const queue = [];
+  const positions = () => queue.forEach((job, i) => job.status({ state: 'queued', position: i + 1 }));
   const start = () => {
     if (stopped || active || !queue.length) return;
     if (!worker) {
@@ -53,18 +55,19 @@ function detectorQueue() {
       instance.on('exit', code => failed(`Worker dừng với mã ${code}.`));
     }
     active = queue.shift();
+    active.status({ state: 'processing', position: 0 }); positions();
     active.timeout = setTimeout(() => {
       const job = active; active = null;
       worker.terminate(); worker = null;
       job.reject(bad('Ảnh xử lý quá lâu. Hãy thử ảnh nhỏ hơn.', 422));
       start();
-    }, 30_000);
+    }, PHOTO_JOB_MS);
     worker.postMessage({ id: active.id, buffer: active.buffer });
   };
   return {
-    run(buffer) {
-      if (stopped || queue.length >= 4) return Promise.reject(bad('Server đang xử lý nhiều ảnh. Hãy thử lại sau.', 503));
-      return new Promise((resolve, reject) => { queue.push({ id: randomUUID(), buffer, resolve, reject }); start(); });
+    run(buffer, status = () => {}) {
+      if (stopped || queue.length >= PHOTO_WAITING) return Promise.reject(bad('Server đang xử lý nhiều ảnh. Hãy thử lại sau.', 503));
+      return new Promise((resolve, reject) => { queue.push({ id: randomUUID(), buffer, resolve, reject, status }); positions(); start(); });
     },
     async close() {
       stopped = true;
@@ -75,7 +78,7 @@ function detectorQueue() {
   };
 }
 
-export function createApplication({ ttl, now, detector } = {}) {
+export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
   const app = express();
   const server = createServer(app);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
@@ -115,8 +118,7 @@ export function createApplication({ ttl, now, detector } = {}) {
     res.status(201).json({ sessionId: session.id, expiresIn: store.ttl });
   });
   app.get('/api/session/:id', sessionRequired, (req, res) => {
-    const { photo, busy } = req.session;
-    res.json({ ...snapshot(req.session), busy, peers: peers(req.session), photo: photo ? { photoId: photo.id, imageSize: photo.imageSize, points: photo.points, ok: photo.ok, reason: photo.reason } : null });
+    res.json({ ...snapshot(req.session), peers: peers(req.session) });
   });
   app.delete('/api/session/:id', sessionRequired, (req, res) => { store.delete(req.session.id); res.sendStatus(204); });
   app.get('/api/session/:id/qr', sessionRequired, async (req, res) => {
@@ -140,23 +142,34 @@ export function createApplication({ ttl, now, detector } = {}) {
       try {
         if (error) throw error;
         if (!req.file) throw bad('Chưa nhận được ảnh (trường multipart: photo).');
+        session.photo = null; session.result = null; session.displayApplied = null;
         broadcast(session, 'photo_received');
-        const result = await (detector || processing.run)(req.file.buffer);
+        const result = await (detector || processing.run)(req.file.buffer, progress => {
+          if (session.revision === revision) broadcast(session, 'photo_status', { ...progress, revision });
+        });
         if (store.get(session.id, false) !== session) throw bad('Phiên đã hết hạn khi xử lý ảnh.', 404);
         if (session.revision !== revision) throw bad('Viewport hoặc lượt hiệu chỉnh đã đổi. Hãy chụp lại.', 409);
         const photoId = randomUUID();
         session.photo = { ...result, id: photoId, revision };
+        let Q;
         if (result.ok) {
-          const Q = validatePoints(result.points, result.imageSize);
-          session.result = { Q, imageSize: result.imageSize, photoId, revision, source: 'photo' };
+          try { Q = validateCalibration(result.points, result.imageSize, session.viewport); }
+          catch (error) { result.ok = false; result.reason = error.message; Object.assign(session.photo, { ok: false, reason: result.reason }); }
+        }
+        if (result.ok) {
+          session.result = { Q, imageSize: result.imageSize, photoId, revision, source: 'photo', calibrationId: session.calibrationId = (session.calibrationId || 0) + 1 };
+          session.displayApplied = null;
           session.mode = 'display';
           broadcast(session, 'calibrated', session.result);
         } else broadcast(session, 'detect_failed', { reason: result.reason, revision });
         session.touched = store.now();
+        session.busy = false;
+        broadcast(session, 'photo_ready', { ...snapshot(session).photo, revision });
         const { preview: _preview, ...response } = result;
         res.json({ ...response, photoId, previewUrl: `/api/session/${session.id}/photo?photoId=${photoId}` });
       } catch (err) {
-        if (session.revision === revision) broadcast(session, 'detect_failed', { reason: err.message, revision });
+        session.busy = false;
+        if (session.revision === revision) broadcast(session, 'detect_failed', { reason: err.message, revision, busy: false });
         next(err);
       } finally { session.busy = false; }
     });
@@ -175,9 +188,11 @@ export function createApplication({ ttl, now, detector } = {}) {
     // photoId guards against an old tab confirming points on a newer photo.
     if (!Array.isArray(body) && body?.photoId !== session.photo.id) throw bad('Ảnh đã đổi. Hãy tải lại trang chụp.', 409);
     let Q;
-    try { Q = validatePoints(Array.isArray(body) ? body : body?.points, session.photo.imageSize); }
+    try { Q = validateCalibration(Array.isArray(body) ? body : body?.points, session.photo.imageSize, session.viewport); }
     catch (error) { throw bad(error.message); }
-    session.result = { Q, imageSize: session.photo.imageSize, photoId: session.photo.id, revision: session.revision, source: 'photo' };
+    session.result = { Q, imageSize: session.photo.imageSize, photoId: session.photo.id, revision: session.revision, source: 'photo',
+      calibrationId: session.calibrationId = (session.calibrationId || 0) + 1 };
+    session.displayApplied = null;
     session.mode = 'display';
     session.photo.points = MARKER_IDS.map((id, i) => ({ id, x: Q[i][0], y: Q[i][1] }));
     session.photo.ok = true;
@@ -227,7 +242,7 @@ export function createApplication({ ttl, now, detector } = {}) {
         let data;
         try { if (isBinary) throw new Error(); data = JSON.parse(buffer); }
         catch { ws.send(JSON.stringify({ type: 'command_ack', ok: false, reason: 'Cần thông điệp JSON hợp lệ.' })); return; }
-        handleMessage(session, ws, data, { broadcast, now: store.now });
+        handleMessage(session, ws, data, { broadcast, now: store.now, markerMaxAgeMs });
       });
       ws.send(JSON.stringify({ type: 'connected', sessionId: session.id, ...snapshot(session), peers: peers(session) }));
       broadcast(session, 'peers', peers(session));
@@ -258,7 +273,7 @@ export function createApplication({ ttl, now, detector } = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || '0.0.0.0';
-  const runtime = createApplication();
+  const runtime = createApplication({ markerMaxAgeMs: Number(process.env.MARKER_MAX_AGE_MS || 3000) });
   runtime.server.listen(port, host, () => {
     const actual = runtime.server.address().port;
     console.log(`\nAnamorphic Screen\n  Máy tính: http://localhost:${actual}`);

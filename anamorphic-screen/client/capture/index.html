@@ -14,15 +14,16 @@
       <span class="eyebrow" id="camera-eyebrow">HIỆU CHỈNH TRỰC TIẾP</span><h1 id="camera-heading">Giữ đúng góc.<br><em>Chốt khi đã ổn định.</em></h1>
       <p id="camera-instruction" class="intro">Giữ camera tại vị trí mắt, dùng ống kính chính 1×. Mỗi marker được nhớ từ lần thấy gần nhất, không cần cùng xuất hiện trong một khung.</p>
       <div class="camera-view"><video id="camera-video" autoplay playsinline muted aria-label="Camera sau"></video><canvas id="camera-overlay" aria-hidden="true"></canvas><span id="focus-target" hidden aria-hidden="true"></span></div>
-      <div id="lens-controls" class="lens-controls" hidden>
+      <details id="lens-controls" class="lens-controls" hidden><summary>Camera, zoom và lấy nét · Nâng cao</summary>
         <label><span>Camera đang dùng</span><select id="camera-device" aria-label="Chọn camera"></select></label>
         <div id="camera-zoom-controls" hidden><label><span>Zoom camera <output id="camera-zoom-value">—</output></span><input id="camera-zoom" aria-label="Zoom camera" type="range" min="0" max="1000" step="1"></label><div id="camera-zoom-presets" class="zoom-presets"></div></div>
         <div id="camera-focus-controls" hidden><div class="focus-row"><label><span>Lấy nét</span><select id="camera-focus-mode" aria-label="Chế độ lấy nét"></select></label><button id="camera-refocus">Lấy nét lại</button></div><label id="camera-focus-distance-controls" hidden><span>Lấy nét tay <output id="camera-focus-distance-value">—</output></span><input id="camera-focus-distance" aria-label="Khoảng lấy nét tay" type="range"></label></div>
         <p id="camera-capability-note" class="file-hint"></p><p id="lens-status" class="lens-status" role="status"></p>
-      </div>
+      </details>
       <div id="marker-memory" class="marker-memory" aria-label="Các marker đã nhớ"><span data-memory-id="17">1</span><span data-memory-id="42">2</span><span data-memory-id="73">3</span><span data-memory-id="99">4</span><button id="clear-tracking" class="text-button">Xóa điểm đã nhớ ↻</button></div>
-      <div id="phone-metrics" class="phone-metrics" role="status"><span id="phone-detected">0/4 marker</span><span id="phone-tracked">Nhớ 0/4</span><span id="phone-fps">0 fps</span><span id="phone-compression">Nén: —</span></div>
-      <p id="camera-warning" class="notice" role="status">Đang mở camera…</p>
+      <div id="phone-metrics" class="phone-metrics"><span id="phone-detected">0/4 marker</span><span id="phone-tracked">Nhớ 0/4</span><span id="phone-fps">0 fps</span><span id="phone-compression" title="Tỉ lệ hai trị suy biến của Jacobian: càng gần 100% càng ít nén lệch hướng">Nén: —</span><b id="phone-stability">Chưa đủ điểm</b></div>
+      <ul id="marker-quality" class="marker-quality" aria-label="Tuổi, số mẫu và dao động từng marker"></ul>
+      <p id="camera-warning" class="notice">Đang mở camera…</p><p id="camera-summary" class="sr-only" role="status" aria-live="polite"></p>
       <div class="review-buttons camera-actions"><button id="freeze" class="primary" disabled>Chốt · 0/4 điểm</button><button id="camera-stop">Tạm dừng</button></div>
       <button id="use-photo" class="text-button">Dùng chụp ảnh / chạm tay</button>
     </section>
@@ -32,7 +33,7 @@
       <div class="viewfinder" aria-hidden="true"><span class="view-corner c1"></span><span class="view-corner c2"></span><span class="view-corner c3"></span><span class="view-corner c4"></span><div class="screen-sketch"><span>1</span><span>2</span><span>3</span><span>4</span><b>a</b></div><span class="lens-label">ỐNG KÍNH CHÍNH <b>1×</b></span></div>
       <div class="capture-tips"><span><b>1×</b> Tránh góc siêu rộng</span><span><b>⊞</b> Thấy đủ 4 marker</span><span><b>◎</b> Camera sát vị trí mắt</span></div>
       <button id="start-camera" class="primary capture-button">◎ Mở camera hiệu chỉnh trực tiếp ↗</button>
-      <label class="button capture-button" id="photo-label" for="photo-input"><span>◎</span> Chụp ảnh màn hình <span>↗</span></label>
+      <button class="capture-button" id="photo-label" type="button"><span>◎</span> Chụp ảnh bằng camera hệ thống <span>↗</span></button>
       <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
       <p class="file-hint">Chụp ảnh hoặc chọn từ thư viện · Tối đa 20 MB</p>
       <a class="button" href="/capture?scan=1" id="scan-entry">Quét QR trong web · Ghép phiên khác</a>
@@ -41,16 +42,17 @@
       <span class="eyebrow">KIỂM TRA TÂM MARKER</span><h1 id="review-heading">Bốn điểm.<br><em>Một góc nhìn chính xác.</em></h1>
       <p id="review-instruction" class="intro">Kiểm tra các chấm có nằm đúng tâm của 4 marker không.</p>
       <div id="point-steps" class="point-steps" hidden><span data-point="0">1</span><span data-point="1">2</span><span data-point="2">3</span><span data-point="3">4</span></div>
-      <div class="photo-view"><canvas id="photo-canvas" role="img" aria-label="Ảnh hiệu chuẩn với các điểm marker" tabindex="0"></canvas></div>
-      <p id="point-help" class="file-hint" hidden>Chạm và giữ để phóng to, kéo để chỉnh, thả để đặt điểm. Bàn phím: mũi tên di chuyển, Enter đặt điểm.</p>
+      <div class="photo-view"><canvas id="photo-canvas" aria-describedby="point-help point-position" role="img" aria-label="Ảnh hiệu chuẩn với các điểm marker" tabindex="0"></canvas></div>
+      <p id="point-help" class="file-hint" hidden>Chạm và giữ để phóng to, kéo để chỉnh, thả để đặt điểm. Bàn phím: mũi tên di chuyển, Enter đặt điểm.</p><p id="point-position" class="file-hint"></p>
       <div class="review-buttons"><button id="confirm" class="primary">Đúng · Áp dụng góc nhìn ↗</button><button id="manual">Chạm tay</button><button id="undo" hidden>↶ Lùi một điểm</button></div>
       <button id="retake" class="text-button">Chụp ảnh khác ↻</button>
     </section>
     <section id="done-section" class="done-section" hidden aria-labelledby="done-heading">
-      <span class="success-symbol">↗</span><span class="eyebrow">ĐIỂM NHÌN ĐÃ KHÓA</span><h1 id="done-heading">Mọi thứ đã<br><em>vào đúng góc.</em></h1><p>Nhìn màn hình từ đúng vị trí vừa chụp.<br>Nội dung đã được bù phối cảnh trên máy tính.</p><div class="notice">Hiệu chỉnh lại từ đây hoặc trên máy tính. Không cần tạo phiên hay quét QR mới.</div><button id="reopen-live" class="primary">Hiệu chỉnh lại · Mở camera</button><button id="review-again">Kiểm tra lại ảnh</button><a class="button" href="/capture?scan=1">Ghép phiên khác</a>
+      <span class="success-symbol">↗</span><span id="done-eyebrow" class="eyebrow">CHỜ XÁC NHẬN HIỂN THỊ</span><h1 id="done-heading">Mọi thứ đã<br><em>vào đúng góc.</em></h1><p id="done-description">Đang chờ máy tính xác nhận áp dụng.</p><div class="notice">Hiệu chỉnh lại từ đây hoặc trên máy tính. Không cần tạo phiên hay quét QR mới.</div><button id="reopen-live" class="primary">Hiệu chỉnh lại · Mở camera</button><button id="review-again">Kiểm tra lại ảnh</button><a class="button" href="/capture?scan=1">Ghép phiên khác</a>
     </section>
     <section id="expired-section" hidden><span class="eyebrow">CẦN GHÉP ĐÔI</span><h1>Quét QR<br><em>trên máy tính.</em></h1><p class="intro">Phiên đã hết hạn hoặc server vừa khởi động lại. Mở phần ghép đôi trên máy tính để lấy mã.</p><a href="/capture?scan=1" class="button primary">Mở camera quét QR</a><button id="reload">Thử kết nối lại ↻</button></section>
     <form id="pair-form" hidden><label><span>Hoặc dán đường dẫn từ mã QR</span><input id="pair-url" type="url" placeholder="https://…/capture/…" required></label><button type="submit">Ghép đôi ↗</button></form>
+    <div id="display-feedback" class="notice error" role="alert" hidden></div>
     <div id="status" class="notice" role="status" hidden></div>
   </main>
   <canvas id="magnifier" width="280" height="280" hidden aria-hidden="true"></canvas>

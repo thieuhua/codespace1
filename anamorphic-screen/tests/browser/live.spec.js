@@ -10,7 +10,7 @@ import { apply } from '../../shared/homography.js';
 
 async function pair(page) {
   await page.goto('/'); await expect(page.locator('#qr')).toBeVisible();
-  await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
+  await expect(page.locator('#connection-text')).toHaveText('Chưa có điện thoại');
   return page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
 }
 
@@ -50,7 +50,7 @@ test('real camera track → worker ArUco → live relay → median freeze; both 
     await phone.reload(); await expect(phone.locator('#done-section')).toBeVisible();
     await page.route(`**/api/session/${id}`, route => route.abort(), { times: 1 });
     await page.reload(); await expect(page.locator('body')).toHaveAttribute('data-state', 'display');
-    await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
+    await expect(page.locator('#connection-text')).toHaveText('Điện thoại đã kết nối');
     expect(await page.evaluate(() => localStorage.getItem('anamorphic:display-session:v2'))).toBe(id);
     expect(await phone.evaluate(() => localStorage.getItem('anamorphic:capture-session:v2'))).toBe(id);
     await phone.locator('#reopen-live').click(); await expect(phone.locator('#freeze')).toBeEnabled({ timeout: 20_000 });
@@ -85,7 +85,7 @@ test('single-marker video frames accumulate, update the desktop immediately and 
     expect(packets.every(packet => packet.points.length === 1)).toBe(true);
     const first = await page.locator('#warp').evaluate(node => node.style.transform);
     // Wait for the completely blank segment. All remembered coordinates and
-    // the enabled freeze action must survive it, with no invented observations.
+    // the freeze action survives only while every ID remains fresh.
     await expect(phone.locator('#phone-detected')).toHaveText('0/4 marker', { timeout: 10_000 });
     await expect(phone.locator('#phone-tracked')).toHaveText('Nhớ 4/4');
     await expect(phone.locator('#freeze')).toBeEnabled();

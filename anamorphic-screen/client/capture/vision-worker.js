@@ -11,7 +11,7 @@ self.onmessage = async ({ data: job }) => {
       self.postMessage({ id: job.id, code: result?.data || null });
       return;
     }
-    const [{ markerPoints }, { computeWarp, validatePoints }, { TemporalMarkers }] = await modules;
+    const [{ markerPoints }, { computeWarp, validateCalibration }, { TemporalMarkers }] = await modules;
     tracker ||= new TemporalMarkers();
     const found = detector.detect({ data: pixels, width: job.width, height: job.height });
     const imageSize = { w: job.width, h: job.height };
@@ -20,7 +20,7 @@ self.onmessage = async ({ data: job }) => {
     const { points } = memory;
     let warning = '', compression, valid = false, freezeValid = false;
     try {
-      const Q = validatePoints(points, imageSize);
+      const Q = validateCalibration(points, imageSize, job.viewport, job.markers);
       compression = computeWarp({ viewport: job.viewport, P: job.markers, Q, imageSize }).compression;
       valid = true;
       computeWarp({ viewport: job.viewport, P: job.markers, Q: memory.freezeQ, imageSize });

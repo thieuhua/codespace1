@@ -7,6 +7,7 @@ import { createApplication } from '../server/index.js';
 import { SessionStore } from '../server/sessions.js';
 import { markerLayout, MARKER_IDS } from '../shared/calibration.js';
 import { syntheticPhoto } from './fixtures.js';
+import { apply } from '../shared/homography.js';
 
 async function setup(t, options) {
   const runtime = createApplication(options);
@@ -74,6 +75,10 @@ test('manual fallback validates IDs, coordinate bounds, winding and stale photos
   assert.equal((await app.request(route, { photoId: data.photoId, points: points.map(p => ({ ...p, x: -1 })) })).status, 400);
   const reversed = points.map((p, i) => ({ ...p, id: MARKER_IDS[(4 - i) % 4] }));
   assert.equal((await app.request(route, { photoId: data.photoId, points: reversed })).status, 400);
+  const H = [0.02, 0, 0, 0, 0.02, 0, -1 / 1400, 0, 1];
+  const horizon = app.markers.map(p => { const [x, y] = apply(H, [p.x, p.y]); return { id: p.id, x, y }; });
+  const rejected = await app.request(route, { photoId: data.photoId, points: horizon });
+  assert.equal(rejected.status, 400); assert.match((await rejected.json()).reason, /chân trời/);
   const response = await app.request(route, { photoId: data.photoId, points });
   assert.equal(response.status, 200); assert.equal((await response.json()).ok, true);
   const refreshed = await (await fetch(`${app.url}/api/session/${app.id}`)).json(); assert.equal(refreshed.photo.ok, true);
