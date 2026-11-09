@@ -1,0 +1,24 @@
+{
+  "name": "anamorphic-screen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hiển thị bù góc nhìn bằng hiệu chuẩn ảnh điện thoại trong LAN",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test tests/*.test.js",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "express": "5.3.0",
+    "html2canvas": "1.4.1",
+    "js-aruco2": "2.0.0",
+    "multer": "2.5.0",
+    "qrcode": "1.5.4",
+    "sharp": "0.35.5",
+    "ws": "8.22.2"
+  },
+  "devDependencies": { "@playwright/test": "1.61.1" }
+}

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5f5ef"><title>Hiệu chuẩn · Anamorphic Screen</title>
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="/assets/base.css"><link rel="stylesheet" href="/capture-assets/style.css">
+  <script type="module" src="/capture-assets/app.js"></script>
+</head>
+<body>
+  <header><a href="/" class="brand"><span class="brand-symbol">a</span>Anamorphic <span class="muted">screen</span></a><span id="session-badge" class="pill">Đang kết nối</span></header>
+  <main>
+    <nav class="progress" aria-label="Tiến trình hiệu chuẩn"><span class="active" id="step-photo"><b>01</b> Chụp ảnh</span><i></i><span id="step-review"><b>02</b> Kiểm tra</span><i></i><span id="step-done"><b>03</b> Hoàn tất</span></nav>
+    <section id="capture-section" aria-labelledby="capture-heading">
+      <span class="eyebrow">ĐẶT CAMERA TẠI VỊ TRÍ MẮT</span><h1 id="capture-heading">Góc nhìn của bạn.<br><em>Phần còn lại để chúng tôi.</em></h1>
+      <p class="intro">Giữ điện thoại ở đúng nơi bạn sẽ nhìn màn hình. Một tấm ảnh là đủ để khóa phối cảnh.</p>
+      <div class="viewfinder" aria-hidden="true"><span class="view-corner c1"></span><span class="view-corner c2"></span><span class="view-corner c3"></span><span class="view-corner c4"></span><div class="screen-sketch"><span>1</span><span>2</span><span>3</span><span>4</span><b>a</b></div><span class="lens-label">ỐNG KÍNH CHÍNH <b>1×</b></span></div>
+      <div class="capture-tips"><span><b>1×</b> Tránh góc siêu rộng</span><span><b>⊞</b> Thấy đủ 4 marker</span><span><b>◎</b> Camera sát vị trí mắt</span></div>
+      <label class="button primary capture-button" id="photo-label" for="photo-input"><span>◎</span> Chụp ảnh màn hình <span>↗</span></label>
+      <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
+      <p class="file-hint">Chụp ảnh hoặc chọn từ thư viện · Tối đa 20 MB</p>
+    </section>
+    <section id="review-section" aria-labelledby="review-heading" hidden>
+      <span class="eyebrow">KIỂM TRA TÂM MARKER</span><h1 id="review-heading">Bốn điểm.<br><em>Một góc nhìn chính xác.</em></h1>
+      <p id="review-instruction" class="intro">Kiểm tra các chấm có nằm đúng tâm của 4 marker không.</p>
+      <div id="point-steps" class="point-steps" hidden><span data-point="0">1</span><span data-point="1">2</span><span data-point="2">3</span><span data-point="3">4</span></div>
+      <div class="photo-view"><canvas id="photo-canvas" role="img" aria-label="Ảnh hiệu chuẩn với các điểm marker" tabindex="0"></canvas></div>
+      <p id="point-help" class="file-hint" hidden>Chạm và giữ để phóng to, kéo để chỉnh, thả để đặt điểm. Bàn phím: mũi tên di chuyển, Enter đặt điểm.</p>
+      <div class="review-buttons"><button id="confirm" class="primary">Đúng · Áp dụng góc nhìn ↗</button><button id="manual">Chạm tay</button><button id="undo" hidden>↶ Lùi một điểm</button></div>
+      <button id="retake" class="text-button">Chụp ảnh khác ↻</button>
+    </section>
+    <section id="done-section" class="done-section" hidden aria-labelledby="done-heading">
+      <span class="success-symbol">↗</span><span class="eyebrow">ĐIỂM NHÌN ĐÃ KHÓA</span><h1 id="done-heading">Mọi thứ đã<br><em>vào đúng góc.</em></h1><p>Nhìn màn hình từ đúng vị trí vừa chụp.<br>Nội dung đã được bù phối cảnh trên máy tính.</p><div class="notice">Nếu bạn đổi chỗ ngồi, bật toàn màn hình hoặc thay đổi kích thước cửa sổ, hãy hiệu chuẩn lại trên máy tính.</div><button id="review-again">Kiểm tra lại ảnh</button>
+    </section>
+    <section id="expired-section" hidden><span class="eyebrow">CẦN PHIÊN MỚI</span><h1>Quét lại QR<br><em>trên máy tính.</em></h1><p class="intro">Phiên không còn hoạt động. Mở phần hiệu chuẩn trên máy tính và quét mã QR mới.</p><button id="reload" class="primary">Thử kết nối lại ↻</button></section>
+    <div id="status" class="notice" role="status" hidden></div>
+  </main>
+  <canvas id="magnifier" width="280" height="280" hidden aria-hidden="true"></canvas>
+  <footer><span>ANAMORPHIC SCREEN</span><span>Ảnh chỉ xử lý trong server của bạn.</span></footer>
+</body>
+</html>

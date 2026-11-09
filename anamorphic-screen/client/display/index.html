@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Anamorphic Screen · Bù góc nhìn</title>
+  <meta name="description" content="Hiệu chuẩn bằng ảnh điện thoại để nhìn nội dung đúng phối cảnh từ một góc nghiêng cố định.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='9' fill='%2320251f'/%3E%3Ctext x='10' y='29' fill='%23d4f879' font-size='29' font-family='Georgia' font-style='italic'%3Ea%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/base.css"><link rel="stylesheet" href="/display/style.css">
+  <script src="/vendor/html2canvas.js" defer></script><script type="module" src="/display/app.js"></script>
+</head>
+<body data-state="calibrating">
+  <main id="stage" aria-label="Màn hình hiệu chuẩn và nội dung">
+    <div id="markers" aria-label="Bốn marker hiệu chuẩn"></div>
+    <div id="warp" hidden>
+      <article id="content">
+        <div class="poster-top"><span>THỬ NGHIỆM THỊ GIÁC / 001</span><span>ANAMORPHIC SCREEN ↗</span></div>
+        <div class="poster-layout"><div class="poster-copy"><div class="poster-kicker">MỘT ĐIỂM NHÌN. MỘT PHỐI CẢNH.</div><h1 id="poster-text">Đổi góc nhìn.<br>Giữ nguyên<br>hình dáng.</h1><p id="poster-description">Một màn hình phẳng. Một góc nhìn mới.<br>Để phối cảnh làm phần còn lại.</p></div><div id="poster-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><span>↗</span><small>45°</small></div></div>
+        <img id="custom-image" alt="Ảnh tĩnh do bạn chọn" hidden>
+        <div class="poster-bottom"><span>GÓC NHÌN THAY ĐỔI — HÌNH DÁNG VẸN NGUYÊN</span><span>01 — ∞</span></div>
+        <div id="debug-grid" aria-hidden="true" hidden></div>
+      </article>
+      <canvas id="raster" hidden aria-label="Nội dung render ở độ phân giải gấp đôi"></canvas>
+    </div>
+    <svg id="debug-outline" aria-hidden="true" hidden><polygon fill="none" stroke="#ff553d" stroke-width="2" stroke-dasharray="8 6"/></svg>
+  </main>
+  <header class="display-header chrome">
+    <div class="brand"><span class="brand-symbol">a</span>Anamorphic <span class="brand-light">screen</span></div>
+    <span class="pill" id="connection"><span class="dot"></span><span id="connection-text">Đang kết nối</span></span>
+  </header>
+  <section id="calibration-card" class="calibration-card" aria-labelledby="calibration-heading">
+    <div class="card-heading"><span class="eyebrow">HIỆU CHUẨN ĐIỂM NHÌN</span><span class="step-counter">01 <span>/ 02</span></span></div>
+    <div id="viewport-notice" class="notice" hidden role="alert"></div>
+    <div class="setup-layout">
+      <div class="setup-copy"><h1 id="calibration-heading">Một góc nhìn.<br><em>Đúng phối cảnh.</em></h1><p class="intro">Chụp màn hình từ vị trí mắt của bạn.<br>Chúng tôi sẽ bù phần biến dạng còn lại.</p>
+        <ol class="instructions"><li><b>Toàn màn hình</b><span>Giữ nguyên kích thước khi hiệu chuẩn.</span></li><li><b>Quét QR bằng điện thoại</b><span>Kết nối cùng mạng Wi-Fi với máy tính.</span></li><li><b>Chụp từ vị trí mắt, ống kính 1×</b><span>Đưa đủ 4 marker vào trong ảnh.</span></li></ol>
+      </div>
+      <div class="qr-panel"><div class="qr-frame"><img id="qr" alt="QR mở trang chụp ảnh của phiên" width="168" height="168" hidden><span id="qr-loading" class="spinner" aria-label="Đang tạo mã QR"></span></div><b>QUÉT ĐỂ HIỆU CHUẨN</b><span id="session-label">Đang tạo phiên…</span><button id="copy-link" class="text-button" disabled>Sao chép đường dẫn ↗</button></div>
+    </div>
+    <div class="card-status" role="status"><span id="status-icon" class="dot"></span><span id="status-text">Đang chuẩn bị các marker…</span><button id="retry" class="text-button" hidden>Thử lại ↻</button></div>
+    <details class="network-settings"><summary>Địa chỉ kết nối điện thoại</summary><div class="network-fields"><label><span>URL server mà điện thoại truy cập được</span><input id="server-url" type="url" placeholder="http://192.168.1.10:3000"></label><button id="apply-url">Đổi QR</button></div><p id="network-hint">Trong Codespaces, dùng URL cổng được chuyển tiếp mà điện thoại có thể mở.</p><div id="lan-options"></div></details>
+  </section>
+  <footer class="display-footer chrome"><span id="footer-note">4 marker · 1 điểm nhìn · Không cần cài ứng dụng</span><div class="footer-actions"><button id="preview">Xem nội dung mẫu ↗</button><button id="fullscreen" class="primary">⛶ Toàn màn hình</button><button id="controls-toggle" aria-controls="controls" aria-expanded="false" hidden>Tùy chỉnh <kbd>C</kbd></button></div></footer>
+  <aside id="controls" class="controls chrome" aria-label="Tùy chỉnh nội dung và phép bù" hidden>
+    <div class="controls-heading"><div><span class="eyebrow">KHÔNG GIAN HIỂN THỊ</span><h2>Tùy chỉnh góc nhìn</h2></div><button id="controls-close" class="icon-button" aria-label="Đóng tùy chỉnh">×</button></div>
+    <div class="control-row"><button id="warp-toggle" aria-pressed="true">Bù góc: Bật <kbd>W</kbd></button><button id="recalibrate">Hiệu chuẩn lại</button></div>
+    <div id="uncalibrated" class="notice" hidden>Đây là bản xem trước. Hiệu chuẩn bằng ảnh để bù đúng vị trí mắt.</div>
+    <label class="range-label"><span>Thu phóng <output id="scale-value">90%</output></span><input id="scale" type="range" min="0.2" max="1" step="0.01" value="0.9"></label>
+    <div class="two-cols"><label><span>Dịch ngang <output id="offset-x-value">0%</output></span><input id="offset-x" type="range" min="-1" max="1" step="0.01" value="0"></label><label><span>Dịch dọc <output id="offset-y-value">0%</output></span><input id="offset-y" type="range" min="-1" max="1" step="0.01" value="0"></label></div>
+    <button id="reset-position" class="text-button">Đặt lại vị trí và thu phóng</button>
+    <div id="compression-warning" class="notice" hidden>Góc nhìn nén mạnh một phần nội dung. Hãy tăng cỡ chữ hoặc chọn góc ít nghiêng hơn.</div>
+    <hr><label><span>Nội dung chữ</span><textarea id="text-input" rows="3" maxlength="2000">Đổi góc nhìn.
+Giữ nguyên
+hình dáng.</textarea></label>
+    <div class="two-cols"><label><span>Rộng (px)</span><input id="content-width" type="number" min="100" max="4000" step="10" value="960"></label><label><span>Cao (px)</span><input id="content-height" type="number" min="100" max="4000" step="10" value="600"></label></div>
+    <label class="range-label"><span>Cỡ chữ chính <output id="font-value">76 px</output></span><input id="font-size" type="range" min="24" max="140" value="76"></label>
+    <div class="control-row"><label class="button image-button" for="image-input">＋ Chọn ảnh tĩnh</label><input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/avif" hidden><button id="remove-image" hidden>Bỏ ảnh</button></div>
+    <label class="check-label"><input id="debug" type="checkbox"> Lưới kiểm tra và đường bao <kbd>D</kbd></label>
+    <label class="check-label"><input id="raster-mode" type="checkbox"> Render canvas 2× khi chữ bị nhòe</label>
+    <label class="check-label"><input id="gpu-mode" type="checkbox"> Thử tăng tốc lớp hiển thị (will-change)</label>
+    <p class="control-help">Rê chuột để hiện điều khiển · <kbd>C</kbd> tùy chỉnh · <kbd>W</kbd> so sánh · <kbd>F</kbd> toàn màn hình · <kbd>D</kbd> lưới. Đổi vị trí mắt cần chụp lại.</p>
+  </aside>
+</body>
+</html>

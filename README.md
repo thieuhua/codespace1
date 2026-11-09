@@ -9,6 +9,7 @@ Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm tro
 | [Agent Mailbox](agent-mailbox/) | Session và mailbox MCP cục bộ trên Windows cho Codex/Antigravity | [README](agent-mailbox/README.md) |
 | [VPS MCP Gateway](vps-mcp/) | MCP Server chạy trên VPS Debian 12; Codespace chỉ sửa mã nguồn | [README](vps-mcp/README.md) |
 | [Focus Monitor](focus-monitor/) | Demo nhận diện mất focus, trang bị ẩn, rời trang và dấu hiệu cần xem xét | [README](focus-monitor/README.md) |
+| [Anamorphic Screen](anamorphic-screen/) | Ứng dụng LAN bù góc nhìn bằng ảnh điện thoại, marker ArUco và CSS homography | [README](anamorphic-screen/README.md) |
 | [INT1433 nhóm 0060](int1433-06-20261-grp-int1433-06-0060/) | Bài tập lớn Lập trình mạng (INT1433, PTIT) — submodule từ `ptit-hungdn-2026` | [README](int1433-06-20261-grp-int1433-06-0060/README.md) |
 
 Khi thêm dự án, cập nhật bảng này và đặt liên kết đến `README.md` của dự án.
