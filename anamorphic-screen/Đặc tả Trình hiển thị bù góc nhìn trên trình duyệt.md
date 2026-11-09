@@ -4,6 +4,10 @@ Nov 9, 2026 · @Hứa Xuân Thiệu
 
 > Đã có triển khai phiên bản đầu. Xem [README](README.md) để cài đặt/chạy và [kiểm thử](tests/README.md) để phân biệt kiểm chứng tự động với nghiệm thu phần cứng. Tâm marker dùng giao hai đường chéo thay cho trung bình bốn góc để giảm sai số phối cảnh; giao thức có thêm `photoId` chống xác nhận ảnh cũ.
 
+> Cập nhật: đã bổ sung ghép đôi bền vững, quét QR trong web và camera/worker live. [README](README.md#phiên-ảnh-và-api) mô tả giao thức/vòng đời phiên hiện tại; các phần HTTP upload và TTL không có kết nối bên dưới là thiết kế phiên bản đầu.
+
+> Live hiện dùng bộ nhớ từng marker qua nhiều khung: cập nhật ID nào vừa thấy và giữ các điểm còn lại, render tứ giác mới nhất khi đã gom đủ bốn ID. Không còn yêu cầu 4 marker cùng khung/15 khung đầy đủ liên tiếp; khi chốt lấy median riêng từ tối đa 15 quan sát thật của mỗi marker. Xem [README](README.md) và [kiểm thử](tests/README.md).
+
 ## Mục tiêu và phạm vi
 
 Xây một ứng dụng web hiển thị text và hình ảnh đơn giản trên màn hình máy tính, được biến dạng trước (pre-warp) sao cho khi nhìn từ một vị trí nghiêng cố định, người xem thấy nội dung như đang nhìn chính diện. Vị trí nhìn được xác định một lần bằng cách dùng camera điện thoại chụp màn hình từ đúng chỗ mắt người xem.

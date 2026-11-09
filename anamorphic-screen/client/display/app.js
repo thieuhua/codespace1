@@ -1,10 +1,13 @@
 import { $, api, json, toast, copyText } from '/assets/utils.js';
 import { markerLayout, computeWarp, viewportKey } from '/shared/calibration.js';
+import { emaFrame } from '/shared/live.js';
+import { SessionConnection } from '/assets/connection.js';
 
 const readViewport = () => ({ vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio || 1 });
 const storagePrefix = 'anamorphic:calibration:v1:';
 let viewport = readViewport(), P = markerLayout(viewport), calibration = null, sessionId = null;
-let generation = 0, socket, reconnectTimer, retryCount = 0, config, resizeTimer, idleTimer, forceRecalibration = false;
+let config, resizeTimer, idleTimer, forceRecalibration = false, link, revision = 0, smoothed, pairing = false, syncing = false, needsConfigure = false;
+const sessionKey = 'anamorphic:display-session:v2';
 let mode = 'calibrating', warped = true, warpResult, rasterGeneration = 0, objectURL;
 const tuning = { scale: 0.9, offset: { x: 0, y: 0 }, width: 960, height: 600, font: 76 };
 
@@ -40,21 +43,24 @@ function renderMarkers() {
 
 function setMode(next) {
   mode = next;
-  document.body.dataset.state = next === 'display' ? 'display' : next;
-  $('#calibration-card').hidden = next === 'display';
+  const visible = next === 'display' || next === 'live';
+  document.body.dataset.state = next;
+  $('#calibration-card').hidden = visible;
   $('#markers').hidden = next === 'display';
-  $('#warp').hidden = next !== 'display';
-  $('#preview').hidden = next === 'display';
-  $('#controls-toggle').hidden = next !== 'display';
+  $('#warp').hidden = !visible;
+  $('#live-hud').hidden = next !== 'live';
+  $('#pair-button').hidden = !visible;
+  $('#preview').hidden = visible;
+  $('#controls-toggle').hidden = !visible;
   $('#uncalibrated').hidden = !!calibration;
-  if (next !== 'display') { $('#controls').hidden = true; $('#controls-toggle').setAttribute('aria-expanded', 'false'); }
-  $('#footer-note').textContent = next === 'display' ? (calibration ? 'Điểm nhìn đã khóa · Di chuyển mắt cần hiệu chuẩn lại' : 'Nội dung mẫu · Chưa hiệu chuẩn') : '4 marker · 1 điểm nhìn · Không cần cài ứng dụng';
-  if (next !== 'display') $('#debug-outline').setAttribute('hidden', '');
+  if (!visible) { $('#controls').hidden = true; $('#controls-toggle').setAttribute('aria-expanded', 'false'); }
+  $('#footer-note').textContent = next === 'live' ? 'Giữ camera tại vị trí mắt · Chốt trên điện thoại' : next === 'display' ? (calibration ? 'Điểm nhìn đã khóa · Hiệu chỉnh lại không cần quét QR' : 'Nội dung mẫu · Chưa hiệu chuẩn') : 'Quét QR một lần · Giữ phiên để hiệu chỉnh lại';
+  if (!visible) $('#debug-outline').setAttribute('hidden', '');
   revealChrome();
 }
 
 function remember() {
-  if (!calibration) return;
+  if (!calibration || mode !== 'display') return;
   const key = viewportKey(viewport);
   storedSet(storagePrefix + key, JSON.stringify({ ...calibration, ...tuning, text: $('#text-input').value, savedAt: Date.now() }));
   storedSet('anamorphic:last-viewport', key);
@@ -86,6 +92,13 @@ function renderWarp() {
     warpResult = computeWarp({ ...calibration, ...tuning });
     $('#compression-warning').hidden = warpResult.compression >= 0.35;
   } else { warpResult = null; $('#compression-warning').hidden = true; }
+  paintTransform();
+  syncControls(); remember();
+  scheduleRaster();
+}
+
+function paintTransform() {
+  const wrap = $('#warp');
   if (warped && warpResult) wrap.style.transform = warpResult.css;
   else {
     const scale = Math.min(viewport.vw * 0.84 / tuning.width, viewport.vh * 0.74 / tuning.height) * tuning.scale;
@@ -95,10 +108,10 @@ function renderWarp() {
   $('#warp-toggle').setAttribute('aria-pressed', String(warped));
   $('#warp-toggle').replaceChildren(document.createTextNode(`Bù góc: ${warped ? 'Bật' : 'Tắt'} `));
   const kbd = document.createElement('kbd'); kbd.textContent = 'W'; $('#warp-toggle').append(kbd);
-  $('#debug-outline').toggleAttribute('hidden', !($('#debug').checked && warpResult && warped && mode === 'display'));
+  $('#debug-outline').toggleAttribute('hidden', !($('#debug').checked && warpResult && warped && ['display', 'live'].includes(mode)));
   if (warpResult) $('#debug-outline polygon').setAttribute('points', warpResult.S.map(p => p.join(',')).join(' '));
-  syncControls(); remember();
-  scheduleRaster();
+  $('#live-compression').textContent = warpResult ? `Nén: ${Math.round(warpResult.compression * 100)}%` : 'Nén: —';
+  $('#compression-warning').hidden = !warpResult || warpResult.compression >= 0.35;
 }
 
 function safeRender() { try { renderWarp(); } catch (error) { toast(error.message); } }
@@ -156,75 +169,106 @@ function updateQR() {
     : location.hostname.endsWith('.app.github.dev') ? 'Trong Codespaces, điện thoại phải truy cập được cổng chuyển tiếp này (đăng nhập GitHub nếu cổng để riêng tư).' : 'Điện thoại cần cùng LAN/Wi-Fi và truy cập được cổng server này.';
 }
 
-function connect(id, currentGeneration) {
-  if (currentGeneration !== generation) return;
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}/ws?session=${encodeURIComponent(id)}`);
-  socket = ws;
-  ws.onopen = () => { if (currentGeneration !== generation) return ws.close(); retryCount = 0; connection('Đã kết nối', true); };
-  ws.onmessage = event => {
-    if (currentGeneration !== generation) return;
-    const data = JSON.parse(event.data);
-    if (data.type === 'photo_received') { if (mode !== 'display') setMode('waiting'); status('Đã nhận ảnh · Đang nhận diện 4 marker…', true); }
-    if (data.type === 'detect_failed') { if (mode !== 'display') setMode('calibrating'); status(data.reason || 'Hãy chọn điểm thủ công trên điện thoại.'); }
-    if (data.type === 'calibrated') {
+function liveWarning(text = '') { $('#live-warning').textContent = text; $('#live-warning').classList.toggle('error', !!text); }
+
+function receive(data) {
+  if (data.type === 'connected') {
+    if ($('#qr').hidden) updateQR();
+    if (needsConfigure || viewportKey(data.viewport) !== viewportKey(viewport)) { configure(true); return; }
+    revision = data.revision;
+    if (data.mode === 'live') enterLive(data);
+    else if (data.mode === 'display' && data.result) applyCalibration(data.result);
+    else if (!calibration || data.revision > 1) setMode('calibrating');
+  }
+  if (data.type === 'live_started') {
+    if (viewportKey(data.viewport) !== viewportKey(viewport)) return;
+    revision = data.revision; enterLive(data);
+  }
+  if (data.type === 'capture_started') {
+    revision = data.revision; smoothed = null; setMode('calibrating'); status('Chụp ảnh hoặc chọn điểm trên điện thoại.');
+  }
+  if (data.type === 'live_points' && !syncing && data.revision === revision) {
+    $('#live-detected').textContent = `${data.detected ?? 4}/4 marker`; $('#live-tracked').textContent = `Nhớ ${data.tracked ?? 4}/4`; $('#live-fps').textContent = `${data.fps.toFixed(1)} fps`;
+    try {
       const candidate = { viewport, P, Q: data.Q, imageSize: data.imageSize };
-      try { computeWarp({ ...candidate, ...tuning }); } catch (error) { setMode('calibrating'); status(error.message, false, true); return; }
-      calibration = candidate; warped = true;
-      $('#viewport-notice').hidden = true;
-      showContent(); toast('Đã khóa góc nhìn. Nhìn từ đúng vị trí vừa chụp để kiểm tra.');
-    }
-    if (data.type === 'session_expired') connection('Phiên đã hết hạn');
-  };
-  ws.onerror = () => connection('Mất kết nối');
-  ws.onclose = async event => {
-    if (currentGeneration !== generation) return;
-    if (event.code === 4001) {
-      sessionId = null;
-      if (mode !== 'display') { status('Phiên đã hết hạn. Đang tạo QR mới…', true); beginCalibration(); }
-      else connection('Đã lưu góc nhìn', true);
-      return;
-    }
-    connection('Đang kết nối lại');
-    reconnectTimer = setTimeout(async () => {
-      if (currentGeneration !== generation) return;
-      try { await api(`/api/session/${id}`); connect(id, currentGeneration); }
-      catch (error) {
-        if (currentGeneration !== generation) return;
-        if (error.status === 404) {
-          if (mode !== 'display') beginCalibration(); else connection('Đã lưu góc nhìn', true);
-        } else { connect(id, currentGeneration); }
-      }
-    }, Math.min(8000, 500 * 2 ** retryCount++));
-  };
+      computeWarp({ ...candidate, ...tuning }); // Reject bad raw frames before smoothing.
+      // Temporal packets already contain the latest observation of each ID.
+      // Render that frame directly so unseen corners never drift via EMA.
+      const next = data.algorithm === 'temporal' ? { Q: data.Q, imageSize: data.imageSize } : emaFrame(smoothed, data);
+      const nextCalibration = { viewport, P, ...next };
+      const nextWarp = computeWarp({ ...nextCalibration, ...tuning });
+      smoothed = next; calibration = nextCalibration; warpResult = nextWarp;
+      if (mode !== 'live') { setMode('live'); renderWarp(); } else paintTransform();
+      liveWarning(data.warning || '');
+    } catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); }
+  }
+  if (data.type === 'live_status' && data.revision === revision) {
+    $('#live-detected').textContent = `${data.detected}/4 marker`; $('#live-tracked').textContent = `Nhớ ${data.tracked || 0}/4`; $('#live-fps').textContent = `${data.fps.toFixed(1)} fps`; liveWarning(data.warning);
+  }
+  if (data.type === 'photo_received') { setMode('waiting'); status('Đã nhận ảnh · Đang nhận diện 4 marker…', true); }
+  if (data.type === 'detect_failed' && (!data.revision || data.revision === revision)) { setMode('calibrating'); status(data.reason || 'Hãy chọn điểm thủ công trên điện thoại.'); }
+  if (data.type === 'calibrated' && !syncing && data.revision === revision) applyCalibration(data);
 }
 
-// Browsers can retain a half-open WebSocket when the network disappears. Close
-// it on the offline signal so reconnect/replay does not wait for a TCP timeout.
-addEventListener('offline', () => { socket?.close(); connection('Mất mạng'); });
-
-async function beginCalibration(message = '') {
-  const currentGeneration = ++generation;
-  clearTimeout(reconnectTimer); socket?.close();
-  const previous = sessionId; sessionId = null;
-  if (previous) api(`/api/session/${previous}`, { method: 'DELETE' }).catch(() => {});
-  calibration = null; viewport = readViewport(); P = markerLayout(viewport);
-  renderMarkers(); setMode('calibrating');
-  $('#qr').hidden = true; $('#qr-loading').hidden = false; $('#copy-link').disabled = true;
-  $('#session-label').textContent = 'Đang tạo phiên…';
-  status(message || 'Đang tạo phiên hiệu chuẩn…', true); connection('Đang kết nối');
-  try {
-    const data = await api('/api/session', json({ viewport, markers: P }));
-    if (currentGeneration !== generation) { api(`/api/session/${data.sessionId}`, { method: 'DELETE' }).catch(() => {}); return; }
-    sessionId = data.sessionId;
-    $('#session-label').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
-    updateQR(); connect(sessionId, currentGeneration);
-    status(message || 'Sẵn sàng · Chờ ảnh từ điện thoại');
-  } catch (error) {
-    if (currentGeneration !== generation) return;
-    $('#qr-loading').hidden = true; connection('Chưa kết nối');
-    status(`Không tạo được phiên: ${error.message}`, false, true);
+function applyCalibration(data) {
+  const candidate = { viewport, P, Q: data.Q, imageSize: data.imageSize };
+  try { computeWarp({ ...candidate, ...tuning }); }
+  catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); return; }
+  calibration = candidate; smoothed = null; warped = true;
+  $('#viewport-notice').hidden = true;
+  showContent();
+}
+function enterLive(data) {
+  smoothed = null;
+  if (data.result && !calibration) {
+    try { const candidate = { viewport, P, ...data.result }; computeWarp({ ...candidate, ...tuning }); calibration = candidate; } catch { /* Wait for the first good frame. */ }
   }
+  setMode('live'); safeRender();
+  $('#live-detected').textContent = '0/4 marker'; $('#live-tracked').textContent = 'Nhớ 0/4'; $('#live-fps').textContent = '0 fps';
+  liveWarning(data.reason === 'viewport_changed' ? 'Viewport đã đổi. Giữ camera mở để hiệu chỉnh lại trong cùng phiên.' : 'Mở camera trên điện thoại đã ghép đôi. Không cần quét lại QR.');
+}
+async function configure(force = false) {
+  needsConfigure ||= force;
+  if (!link?.open) return;
+  const requestedViewport = viewport;
+  syncing = true;
+  try {
+    const ack = await link.command('configure', { viewport: requestedViewport, markers: P, force: needsConfigure });
+    if (viewportKey(requestedViewport) === viewportKey(viewport)) { revision = ack.revision; needsConfigure = false; }
+  }
+  catch (error) { status(error.message, false, true); }
+  finally { syncing = false; }
+}
+async function beginCalibration() {
+  if (!sessionId) { await pair(); return; }
+  try { await link.command('start_live'); }
+  catch (error) { toast(error.message); }
+}
+async function pair() {
+  if (pairing) return;
+  pairing = true;
+  try {
+    const saved = storedGet(sessionKey);
+    let data;
+    if (saved) {
+      sessionId = saved;
+      try { data = await api(`/api/session/${saved}`); }
+      catch (error) {
+        if (error.status === 404) sessionId = null;
+        else data = {}; // Reconnect the remembered session even if reload began offline.
+      }
+    }
+    if (!data) { const created = await api('/api/session', json({ viewport, markers: P })); sessionId = created.sessionId; }
+    storedSet(sessionKey, sessionId);
+    $('#session-label').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
+    updateQR(); link?.stop();
+    link = new SessionConnection(sessionId, 'display', { message: receive,
+      state: state => connection(state === 'open' ? 'Đã kết nối' : 'Đang kết nối lại', state === 'open'),
+      expired: () => { sessionId = null; storedSet(sessionKey, ''); status('Phiên đã hết hạn sau khi cả hai thiết bị rời đi. Đang tạo phiên mới…'); pair(); }
+    });
+    status('Sẵn sàng · Ghép đôi một lần, hiệu chỉnh nhiều lần');
+  } catch (error) { connection('Chưa kết nối'); status(error.message, false, true); }
+  finally { pairing = false; }
 }
 
 function invalidate(force = false) {
@@ -235,7 +279,8 @@ function invalidate(force = false) {
     if (!forced && viewportKey(readViewport()) === viewportKey(viewport)) return;
     $('#viewport-notice').textContent = 'Kích thước hiển thị hoặc chế độ toàn màn hình đã đổi. Hãy chụp lại để hiệu chuẩn.';
     $('#viewport-notice').hidden = false;
-    beginCalibration('Viewport đã đổi · Quét QR mới và chụp lại');
+    viewport = readViewport(); P = markerLayout(viewport); calibration = null; smoothed = null; renderMarkers();
+    setMode('live'); safeRender(); configure(true);
   }, 250);
 }
 addEventListener('resize', () => invalidate());
@@ -274,16 +319,18 @@ addEventListener('keydown', event => {
   revealChrome();
   const key = event.key.toLowerCase();
   if (key === 'f') fullscreen();
-  if (key === 'c' && mode === 'display') toggleControls();
-  if (key === 'w' && mode === 'display') { warped = !warped; safeRender(); }
-  if (key === 'd' && mode === 'display') { $('#debug').checked = !$('#debug').checked; safeRender(); }
+  if (key === 'c' && ['display', 'live'].includes(mode)) toggleControls();
+  if (key === 'w' && ['display', 'live'].includes(mode)) { warped = !warped; safeRender(); }
+  if (key === 'd' && ['display', 'live'].includes(mode)) { $('#debug').checked = !$('#debug').checked; safeRender(); }
   if (key === 'escape') toggleControls(false);
 });
 $('#fullscreen').onclick = fullscreen;
 $('#controls-toggle').onclick = () => toggleControls(); $('#controls-close').onclick = () => toggleControls(false);
 $('#preview').onclick = () => { showContent(); toggleControls(true); };
 $('#recalibrate').onclick = () => { $('#viewport-notice').hidden = true; beginCalibration(); };
-$('#retry').onclick = () => beginCalibration();
+$('#start-live').onclick = () => beginCalibration();
+$('#pair-button').onclick = () => { $('#calibration-card').hidden = !$('#calibration-card').hidden; };
+$('#retry').onclick = () => { if (link?.open) configure(); else pair(); };
 $('#warp-toggle').onclick = () => { warped = !warped; safeRender(); };
 $('#reset-position').onclick = () => { tuning.scale = 0.9; tuning.offset = { x: 0, y: 0 }; safeRender(); };
 $('#scale').oninput = event => { tuning.scale = Number(event.target.value); safeRender(); };
@@ -340,8 +387,7 @@ async function boot() {
       for (const prop of ['scale', 'width', 'height', 'font']) if (Number.isFinite(record[prop])) tuning[prop] = record[prop];
       if (record.offset) tuning.offset = record.offset;
       if (typeof record.text === 'string') $('#text-input').value = record.text;
-      showContent(); connection('Đã khôi phục', true);
-      toast('Đã khôi phục góc nhìn. Nếu vị trí mắt hoặc màn hình đã đổi, hãy hiệu chuẩn lại.'); return;
+      showContent();
     }
   } catch { toast('Bản hiệu chuẩn cũ không hợp lệ. Hãy chụp lại.'); }
   const previous = storedGet('anamorphic:last-viewport');
@@ -349,6 +395,6 @@ async function boot() {
     $('#viewport-notice').textContent = 'Bản lưu dùng kích thước màn hình khác. Cần hiệu chuẩn cho viewport hiện tại.';
     $('#viewport-notice').hidden = false;
   }
-  beginCalibration();
+  pair();
 }
 boot();

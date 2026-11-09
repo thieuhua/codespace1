@@ -5,11 +5,11 @@ import { homography, invert } from '../shared/homography.js';
 
 // A real raster image with real ArUco markers, resampled through a known projective
 // camera. Detection tests never substitute precomputed marker coordinates.
-export async function syntheticPhoto({ vw = 1440, vh = 900, w = 2000, h = 1400, quad, blank = false } = {}) {
+export async function syntheticPhoto({ vw = 1440, vh = 900, w = 2000, h = 1400, quad, blank = false, markerIds } = {}) {
   const viewport = { vw, vh, dpr: 1 };
   const P = markerLayout(viewport);
   const side = Math.round(Math.min(vw, vh) * 0.12 / 7) * 9; // SVG includes one quiet cell on each side.
-  const layers = blank ? [] : await Promise.all(P.map(async p => ({
+  const layers = blank ? [] : await Promise.all(P.filter(p => !markerIds || markerIds.includes(p.id)).map(async p => ({
     input: await sharp(Buffer.from(markerSVG(p.id))).resize(side, side, { kernel: 'nearest' }).png().toBuffer(),
     left: Math.round(p.x - side / 2), top: Math.round(p.y - side / 2)
   })));

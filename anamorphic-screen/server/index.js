@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { markerSVG } from './detect.js';
 import { SessionStore } from './sessions.js';
-import { MARKER_IDS, markerLayout, validatePoints } from '../shared/calibration.js';
+import { MARKER_IDS, validatePoints } from '../shared/calibration.js';
+import { geometry, snapshot, peers, resetStream, handleMessage } from './protocol.js';
+import { publicURL } from './public-url.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const PHOTO_LIMIT = 20 * 1024 * 1024;
@@ -76,7 +78,7 @@ function detectorQueue() {
 export function createApplication({ ttl, now, detector } = {}) {
   const app = express();
   const server = createServer(app);
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
   const processing = detectorQueue();
   const store = new SessionStore({ ttl, now, onExpire: session => {
     broadcast(session, 'session_expired');
@@ -98,7 +100,7 @@ export function createApplication({ ttl, now, detector } = {}) {
   }
   app.get('/api/config', (req, res) => {
     const port = server.address()?.port || 3000;
-    res.json({ lanUrls: lanAddresses(port), publicUrl: process.env.PUBLIC_URL || null, photoLimit: PHOTO_LIMIT });
+    res.json({ lanUrls: lanAddresses(port), publicUrl: publicURL(port), photoLimit: PHOTO_LIMIT });
   });
   app.get('/api/markers/:id.svg', (req, res, next) => {
     const id = Number(req.params.id);
@@ -107,20 +109,14 @@ export function createApplication({ ttl, now, detector } = {}) {
   });
   app.post('/api/session', (req, res) => {
     const { viewport, markers } = req.body || {};
-    if (!viewport || !Number.isInteger(viewport.vw) || !Number.isInteger(viewport.vh) ||
-        viewport.vw < 200 || viewport.vh < 200 || viewport.vw > 16_384 || viewport.vh > 16_384 ||
-        !Number.isFinite(viewport.dpr) || viewport.dpr < 0.25 || viewport.dpr > 8) throw bad('Viewport không hợp lệ.');
-    const expected = markerLayout(viewport);
-    if (!Array.isArray(markers) || markers.length !== 4 || new Set(markers.map(p => p?.id)).size !== 4 ||
-        expected.some(p => !markers.some(m => m?.id === p.id && Number.isFinite(m.x) && Number.isFinite(m.y) && Math.abs(m.x - p.x) < 0.5 && Math.abs(m.y - p.y) < 0.5))) {
-      throw bad('Vị trí marker không khớp viewport.');
-    }
-    const session = store.create({ viewport, markers: expected });
+    let config;
+    try { config = geometry(viewport, markers); } catch (error) { throw bad(error.message); }
+    const session = store.create(config);
     res.status(201).json({ sessionId: session.id, expiresIn: store.ttl });
   });
   app.get('/api/session/:id', sessionRequired, (req, res) => {
-    const { viewport, markers, photo, result, busy } = req.session;
-    res.json({ viewport, markers, busy, result, photo: photo ? { photoId: photo.id, imageSize: photo.imageSize, points: photo.points, ok: photo.ok, reason: photo.reason } : null });
+    const { photo, busy } = req.session;
+    res.json({ ...snapshot(req.session), busy, peers: peers(req.session), photo: photo ? { photoId: photo.id, imageSize: photo.imageSize, points: photo.points, ok: photo.ok, reason: photo.reason } : null });
   });
   app.delete('/api/session/:id', sessionRequired, (req, res) => { store.delete(req.session.id); res.sendStatus(204); });
   app.get('/api/session/:id/qr', sessionRequired, async (req, res) => {
@@ -136,25 +132,31 @@ export function createApplication({ ttl, now, detector } = {}) {
     // Reserve before reading the multipart body, including concurrent uploads.
     upload.single('photo')(req, res, async error => {
       const session = req.session;
+      if (session.mode !== 'calibrating') {
+        resetStream(session, 'calibrating');
+        broadcast(session, 'capture_started', snapshot(session));
+      }
+      const revision = session.revision;
       try {
         if (error) throw error;
         if (!req.file) throw bad('Chưa nhận được ảnh (trường multipart: photo).');
         broadcast(session, 'photo_received');
         const result = await (detector || processing.run)(req.file.buffer);
         if (store.get(session.id, false) !== session) throw bad('Phiên đã hết hạn khi xử lý ảnh.', 404);
+        if (session.revision !== revision) throw bad('Viewport hoặc lượt hiệu chỉnh đã đổi. Hãy chụp lại.', 409);
         const photoId = randomUUID();
-        session.photo = { ...result, id: photoId };
-        session.result = null;
+        session.photo = { ...result, id: photoId, revision };
         if (result.ok) {
           const Q = validatePoints(result.points, result.imageSize);
-          session.result = { Q, imageSize: result.imageSize, photoId };
+          session.result = { Q, imageSize: result.imageSize, photoId, revision, source: 'photo' };
+          session.mode = 'display';
           broadcast(session, 'calibrated', session.result);
-        } else broadcast(session, 'detect_failed', { reason: result.reason });
+        } else broadcast(session, 'detect_failed', { reason: result.reason, revision });
         session.touched = store.now();
         const { preview: _preview, ...response } = result;
         res.json({ ...response, photoId, previewUrl: `/api/session/${session.id}/photo?photoId=${photoId}` });
       } catch (err) {
-        broadcast(session, 'detect_failed', { reason: err.message });
+        if (session.revision === revision) broadcast(session, 'detect_failed', { reason: err.message, revision });
         next(err);
       } finally { session.busy = false; }
     });
@@ -168,13 +170,15 @@ export function createApplication({ ttl, now, detector } = {}) {
     const session = req.session;
     if (session.busy) throw bad('Đang xử lý ảnh mới. Hãy đợi.', 409);
     if (!session.photo) throw bad('Hãy gửi ảnh trước khi chọn điểm.');
+    if (session.photo.revision !== session.revision) throw bad('Lượt hiệu chỉnh đã đổi. Hãy chụp ảnh mới.', 409);
     const body = req.body;
     // photoId guards against an old tab confirming points on a newer photo.
     if (!Array.isArray(body) && body?.photoId !== session.photo.id) throw bad('Ảnh đã đổi. Hãy tải lại trang chụp.', 409);
     let Q;
     try { Q = validatePoints(Array.isArray(body) ? body : body?.points, session.photo.imageSize); }
     catch (error) { throw bad(error.message); }
-    session.result = { Q, imageSize: session.photo.imageSize, photoId: session.photo.id };
+    session.result = { Q, imageSize: session.photo.imageSize, photoId: session.photo.id, revision: session.revision, source: 'photo' };
+    session.mode = 'display';
     session.photo.points = MARKER_IDS.map((id, i) => ({ id, x: Q[i][0], y: Q[i][1] }));
     session.photo.ok = true;
     session.photo.reason = undefined;
@@ -184,10 +188,13 @@ export function createApplication({ ttl, now, detector } = {}) {
   app.use('/shared', express.static(path.join(root, 'shared')));
   app.use('/assets', express.static(path.join(root, 'client/common')));
   app.get('/vendor/html2canvas.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/html2canvas/dist/html2canvas.min.js')));
+  app.get('/vendor/cv.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/js-aruco2/src/cv.js')));
+  app.get('/vendor/aruco.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/js-aruco2/src/aruco.js')));
+  app.get('/vendor/jsQR.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/jsqr/dist/jsQR.js')));
   app.use('/display', express.static(path.join(root, 'client/display')));
   app.use('/capture-assets', express.static(path.join(root, 'client/capture')));
   app.get('/', (_req, res) => res.sendFile(path.join(root, 'client/display/index.html')));
-  app.get('/capture/:id', (req, res) => {
+  app.get(['/capture', '/capture/:id'], (req, res) => {
     // Send the UI even for expired sessions so the phone receives a useful explanation.
     res.sendFile(path.join(root, 'client/capture/index.html'));
   });
@@ -201,16 +208,32 @@ export function createApplication({ ttl, now, detector } = {}) {
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
     const session = url.pathname === '/ws' && store.get(url.searchParams.get('session'));
-    if (!session || session.clients.size >= 4) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); return; }
+    const role = url.searchParams.get('role') || 'display';
+    if (!session || !['display', 'capture'].includes(role) || session.clients.size >= 8) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); return; }
     wss.handleUpgrade(req, socket, head, ws => {
-      ws.alive = true;
+      ws.alive = true; ws.role = role;
       ws.on('pong', () => { ws.alive = true; });
       ws.on('error', () => {});
       session.clients.add(ws);
-      ws.on('close', () => session.clients.delete(ws));
-      ws.send(JSON.stringify({ type: 'connected' }));
+      ws.on('close', () => {
+        session.clients.delete(ws); session.touched = store.now();
+        if (session.frameOwner === ws) {
+          session.frameOwner = null; session.tracker = null; session.memory = null; session.liveReady = false; session.lastFrame = null;
+          if (session.mode === 'live') broadcast(session, 'live_status', { revision: session.revision, detected: 0, tracked: 0, fps: 0, warning: 'Điện thoại mất kết nối. Giữ kết quả hợp lệ gần nhất.' });
+        }
+        broadcast(session, 'peers', peers(session));
+      });
+      ws.on('message', (buffer, isBinary) => {
+        let data;
+        try { if (isBinary) throw new Error(); data = JSON.parse(buffer); }
+        catch { ws.send(JSON.stringify({ type: 'command_ack', ok: false, reason: 'Cần thông điệp JSON hợp lệ.' })); return; }
+        handleMessage(session, ws, data, { broadcast, now: store.now });
+      });
+      ws.send(JSON.stringify({ type: 'connected', sessionId: session.id, ...snapshot(session), peers: peers(session) }));
+      broadcast(session, 'peers', peers(session));
       // Recover results missed while a display was disconnected.
-      if (session.result) ws.send(JSON.stringify({ type: 'calibrated', ...session.result }));
+      if (session.mode === 'live' && session.lastFrame) ws.send(JSON.stringify({ type: 'live_points', ...session.lastFrame }));
+      else if (session.mode === 'display' && session.result) ws.send(JSON.stringify({ type: 'calibrated', ...session.result }));
       else if (session.busy) ws.send(JSON.stringify({ type: 'photo_received' }));
       else if (session.photo && !session.photo.ok) ws.send(JSON.stringify({ type: 'detect_failed', reason: session.photo.reason }));
     });
@@ -240,7 +263,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const actual = runtime.server.address().port;
     console.log(`\nAnamorphic Screen\n  Máy tính: http://localhost:${actual}`);
     for (const url of lanAddresses(actual)) console.log(`  LAN:      ${url}`);
-    if (process.env.PUBLIC_URL) console.log(`  URL:      ${process.env.PUBLIC_URL}`);
+    if (publicURL(actual)) console.log(`  URL:      ${publicURL(actual)}`);
     console.log('  Mở trên máy tính, bật toàn màn hình, rồi quét QR bằng điện thoại cùng mạng.\n');
   });
   runtime.server.on('error', error => { console.error(error.message); process.exitCode = 1; });

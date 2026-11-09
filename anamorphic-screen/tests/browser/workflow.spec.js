@@ -12,8 +12,12 @@ async function displaySession(page) {
 async function openPhone(browser, id, testInfo) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
   const phone = await context.newPage();
+  await phone.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Camera denied for fallback coverage', 'NotAllowedError'); };
+  });
   await phone.goto(`http://127.0.0.1:3177/capture/${id}`);
   await expect(phone.locator('#session-badge')).toContainText('PHIÊN');
+  await expect(phone.locator('#status')).toContainText('camera');
   return { phone, context };
 }
 
@@ -44,13 +48,14 @@ test('camera photo → real detection → desktop matrix3d → review → saved 
   await page.locator('#controls-close').click();
   await page.keyboard.press('w'); await expect(page.locator('#warp')).toHaveCSS('transform', /^matrix\(/);
   await page.keyboard.press('w'); await expect(page.locator('#warp')).toHaveCSS('transform', /^matrix3d/);
-  await page.reload(); await expect(page.locator('#connection-text')).toHaveText('Đã khôi phục');
+  await page.reload(); await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
   await expect(page.locator('body')).toHaveAttribute('data-state', 'display');
   await expect(page.locator('#poster-text')).toHaveText('Phối cảnh đúng\nTừ góc nhìn của tôi');
   await page.screenshot({ path: testInfo.outputPath('desktop-compensated.png') });
   await page.setViewportSize({ width: 1280, height: 800 });
-  await expect(page.locator('body')).toHaveAttribute('data-state', 'calibrating');
-  await expect(page.locator('#viewport-notice')).toBeVisible(); await expect(page.locator('#qr')).toBeVisible();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#live-warning')).toContainText('Viewport');
+  await expect(page.locator('#qr')).toHaveAttribute('src', new RegExp(id));
   expect(errors).toEqual([]);
   await context.close();
 });
@@ -96,10 +101,12 @@ test('preview, local image, QR host editing and invalid session have usable cont
   await page.locator('#image-input').setInputFiles({ name: 'art.png', mimeType: 'image/png', buffer: image });
   await expect(page.locator('#custom-image')).toBeVisible();
   await page.locator('#remove-image').click(); await expect(page.locator('#custom-image')).toBeHidden();
-  await page.locator('#recalibrate').click(); await expect(page.locator('#calibration-card')).toBeVisible();
+  await page.locator('#recalibrate').click(); await expect(page.locator('body')).toHaveAttribute('data-state', 'live');
   const previous = await page.locator('#qr').getAttribute('src');
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.locator('#qr')).not.toHaveAttribute('src', previous);
+  await expect.poll(() => page.evaluate(() => document.querySelectorAll('.marker')[1].style.left)).toBe(`${390 * 0.92}px`);
+  await page.locator('#pair-button').click();
+  await expect(page.locator('#qr')).toHaveAttribute('src', previous);
   await expect(page.locator('#qr')).toBeVisible();
   await expect(page.locator('.marker')).toHaveCount(4);
   const markerCenters = await page.locator('.marker').evaluateAll(nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }));
@@ -125,22 +132,26 @@ test('display reconnects WebSocket and recovers calibration missed while disconn
   await expect(page.locator('#connection-text')).toHaveText('Đã kết nối');
 });
 
-test('DPR changes and exiting fullscreen invalidate the session even when CSS dimensions stay equal', async ({ page }) => {
+test('DPR changes and exiting fullscreen restart live in the same paired session', async ({ page }) => {
   const firstId = await displaySession(page);
   const devtools = await page.context().newCDPSession(page);
   await devtools.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
   await expect.poll(() => page.evaluate(() => devicePixelRatio)).toBe(2);
-  await expect(page.locator('#qr')).not.toHaveAttribute('src', new RegExp(firstId));
-  await expect(page.locator('#qr')).toBeVisible();
+  await expect(page.locator('body')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#qr')).toHaveAttribute('src', new RegExp(firstId));
   const secondId = await page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
   const session = await (await page.request.get(`/api/session/${secondId}`)).json();
   expect(session.viewport.dpr).toBe(2);
   await page.locator('#fullscreen').click();
   await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(true);
   const beforeExit = await page.locator('#qr').getAttribute('src');
+  const before = await (await page.request.get(`/api/session/${secondId}`)).json();
+  await page.context().setOffline(true);
+  await expect(page.locator('#connection-text')).toHaveText('Đang kết nối lại');
   await page.locator('#fullscreen').click();
   await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(false);
-  await expect(page.locator('#qr')).not.toHaveAttribute('src', beforeExit);
-  await expect(page.locator('#viewport-notice')).toBeVisible();
+  await expect(page.locator('#qr')).toHaveAttribute('src', beforeExit);
+  await page.context().setOffline(false);
+  await expect.poll(async () => (await (await page.request.get(`/api/session/${secondId}`)).json()).revision).toBeGreaterThan(before.revision);
   await devtools.detach();
 });

@@ -7,17 +7,35 @@
   <script type="module" src="/capture-assets/app.js"></script>
 </head>
 <body>
-  <header><a href="/" class="brand"><span class="brand-symbol">a</span>Anamorphic <span class="muted">screen</span></a><span id="session-badge" class="pill">Đang kết nối</span></header>
+  <header><a href="/capture" class="brand"><span class="brand-symbol">a</span>Anamorphic <span class="muted">screen</span></a><span id="session-badge" class="pill">Đang kết nối</span></header>
   <main>
     <nav class="progress" aria-label="Tiến trình hiệu chuẩn"><span class="active" id="step-photo"><b>01</b> Chụp ảnh</span><i></i><span id="step-review"><b>02</b> Kiểm tra</span><i></i><span id="step-done"><b>03</b> Hoàn tất</span></nav>
+    <section id="camera-section" hidden aria-labelledby="camera-heading">
+      <span class="eyebrow" id="camera-eyebrow">HIỆU CHỈNH TRỰC TIẾP</span><h1 id="camera-heading">Giữ đúng góc.<br><em>Chốt khi đã ổn định.</em></h1>
+      <p id="camera-instruction" class="intro">Giữ camera tại vị trí mắt, dùng ống kính chính 1×. Mỗi marker được nhớ từ lần thấy gần nhất, không cần cùng xuất hiện trong một khung.</p>
+      <div class="camera-view"><video id="camera-video" autoplay playsinline muted aria-label="Camera sau"></video><canvas id="camera-overlay" aria-hidden="true"></canvas><span id="focus-target" hidden aria-hidden="true"></span></div>
+      <div id="lens-controls" class="lens-controls" hidden>
+        <label><span>Camera đang dùng</span><select id="camera-device" aria-label="Chọn camera"></select></label>
+        <div id="camera-zoom-controls" hidden><label><span>Zoom camera <output id="camera-zoom-value">—</output></span><input id="camera-zoom" aria-label="Zoom camera" type="range" min="0" max="1000" step="1"></label><div id="camera-zoom-presets" class="zoom-presets"></div></div>
+        <div id="camera-focus-controls" hidden><div class="focus-row"><label><span>Lấy nét</span><select id="camera-focus-mode" aria-label="Chế độ lấy nét"></select></label><button id="camera-refocus">Lấy nét lại</button></div><label id="camera-focus-distance-controls" hidden><span>Lấy nét tay <output id="camera-focus-distance-value">—</output></span><input id="camera-focus-distance" aria-label="Khoảng lấy nét tay" type="range"></label></div>
+        <p id="camera-capability-note" class="file-hint"></p><p id="lens-status" class="lens-status" role="status"></p>
+      </div>
+      <div id="marker-memory" class="marker-memory" aria-label="Các marker đã nhớ"><span data-memory-id="17">1</span><span data-memory-id="42">2</span><span data-memory-id="73">3</span><span data-memory-id="99">4</span><button id="clear-tracking" class="text-button">Xóa điểm đã nhớ ↻</button></div>
+      <div id="phone-metrics" class="phone-metrics" role="status"><span id="phone-detected">0/4 marker</span><span id="phone-tracked">Nhớ 0/4</span><span id="phone-fps">0 fps</span><span id="phone-compression">Nén: —</span></div>
+      <p id="camera-warning" class="notice" role="status">Đang mở camera…</p>
+      <div class="review-buttons camera-actions"><button id="freeze" class="primary" disabled>Chốt · 0/4 điểm</button><button id="camera-stop">Tạm dừng</button></div>
+      <button id="use-photo" class="text-button">Dùng chụp ảnh / chạm tay</button>
+    </section>
     <section id="capture-section" aria-labelledby="capture-heading">
       <span class="eyebrow">ĐẶT CAMERA TẠI VỊ TRÍ MẮT</span><h1 id="capture-heading">Góc nhìn của bạn.<br><em>Phần còn lại để chúng tôi.</em></h1>
-      <p class="intro">Giữ điện thoại ở đúng nơi bạn sẽ nhìn màn hình. Một tấm ảnh là đủ để khóa phối cảnh.</p>
+      <p class="intro">Mở camera để hiệu chỉnh liên tục, hoặc chụp ảnh làm phương án dự phòng. Phiên ghép đôi được giữ khi tải lại trang.</p>
       <div class="viewfinder" aria-hidden="true"><span class="view-corner c1"></span><span class="view-corner c2"></span><span class="view-corner c3"></span><span class="view-corner c4"></span><div class="screen-sketch"><span>1</span><span>2</span><span>3</span><span>4</span><b>a</b></div><span class="lens-label">ỐNG KÍNH CHÍNH <b>1×</b></span></div>
       <div class="capture-tips"><span><b>1×</b> Tránh góc siêu rộng</span><span><b>⊞</b> Thấy đủ 4 marker</span><span><b>◎</b> Camera sát vị trí mắt</span></div>
-      <label class="button primary capture-button" id="photo-label" for="photo-input"><span>◎</span> Chụp ảnh màn hình <span>↗</span></label>
+      <button id="start-camera" class="primary capture-button">◎ Mở camera hiệu chỉnh trực tiếp ↗</button>
+      <label class="button capture-button" id="photo-label" for="photo-input"><span>◎</span> Chụp ảnh màn hình <span>↗</span></label>
       <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
       <p class="file-hint">Chụp ảnh hoặc chọn từ thư viện · Tối đa 20 MB</p>
+      <a class="button" href="/capture?scan=1" id="scan-entry">Quét QR trong web · Ghép phiên khác</a>
     </section>
     <section id="review-section" aria-labelledby="review-heading" hidden>
       <span class="eyebrow">KIỂM TRA TÂM MARKER</span><h1 id="review-heading">Bốn điểm.<br><em>Một góc nhìn chính xác.</em></h1>
@@ -29,12 +47,13 @@
       <button id="retake" class="text-button">Chụp ảnh khác ↻</button>
     </section>
     <section id="done-section" class="done-section" hidden aria-labelledby="done-heading">
-      <span class="success-symbol">↗</span><span class="eyebrow">ĐIỂM NHÌN ĐÃ KHÓA</span><h1 id="done-heading">Mọi thứ đã<br><em>vào đúng góc.</em></h1><p>Nhìn màn hình từ đúng vị trí vừa chụp.<br>Nội dung đã được bù phối cảnh trên máy tính.</p><div class="notice">Nếu bạn đổi chỗ ngồi, bật toàn màn hình hoặc thay đổi kích thước cửa sổ, hãy hiệu chuẩn lại trên máy tính.</div><button id="review-again">Kiểm tra lại ảnh</button>
+      <span class="success-symbol">↗</span><span class="eyebrow">ĐIỂM NHÌN ĐÃ KHÓA</span><h1 id="done-heading">Mọi thứ đã<br><em>vào đúng góc.</em></h1><p>Nhìn màn hình từ đúng vị trí vừa chụp.<br>Nội dung đã được bù phối cảnh trên máy tính.</p><div class="notice">Hiệu chỉnh lại từ đây hoặc trên máy tính. Không cần tạo phiên hay quét QR mới.</div><button id="reopen-live" class="primary">Hiệu chỉnh lại · Mở camera</button><button id="review-again">Kiểm tra lại ảnh</button><a class="button" href="/capture?scan=1">Ghép phiên khác</a>
     </section>
-    <section id="expired-section" hidden><span class="eyebrow">CẦN PHIÊN MỚI</span><h1>Quét lại QR<br><em>trên máy tính.</em></h1><p class="intro">Phiên không còn hoạt động. Mở phần hiệu chuẩn trên máy tính và quét mã QR mới.</p><button id="reload" class="primary">Thử kết nối lại ↻</button></section>
+    <section id="expired-section" hidden><span class="eyebrow">CẦN GHÉP ĐÔI</span><h1>Quét QR<br><em>trên máy tính.</em></h1><p class="intro">Phiên đã hết hạn hoặc server vừa khởi động lại. Mở phần ghép đôi trên máy tính để lấy mã.</p><a href="/capture?scan=1" class="button primary">Mở camera quét QR</a><button id="reload">Thử kết nối lại ↻</button></section>
+    <form id="pair-form" hidden><label><span>Hoặc dán đường dẫn từ mã QR</span><input id="pair-url" type="url" placeholder="https://…/capture/…" required></label><button type="submit">Ghép đôi ↗</button></form>
     <div id="status" class="notice" role="status" hidden></div>
   </main>
   <canvas id="magnifier" width="280" height="280" hidden aria-hidden="true"></canvas>
-  <footer><span>ANAMORPHIC SCREEN</span><span>Ảnh chỉ xử lý trong server của bạn.</span></footer>
+  <footer><span>ANAMORPHIC SCREEN</span><span>Camera trực tiếp chỉ gửi tọa độ marker.</span></footer>
 </body>
 </html>

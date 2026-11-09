@@ -97,11 +97,14 @@ test('HTTP rejects malformed inputs, unsupported files and uploads above 20 MB; 
   assert.equal((await fetch(`${app.url}/api/session/${app.id}`)).status, 404);
 });
 
-test('expired sessions notify the display and remove image data', async t => {
+test('open WebSockets keep sessions alive; the full idle grace starts after disconnection', async t => {
   let time = Date.now();
   const app = await setup(t, { ttl: 100, now: () => time });
   const { socket, messages } = await subscribe(app.url, app.id); t.after(() => socket.terminate());
+  time += 100_000; app.store.sweep();
+  assert.equal((await fetch(`${app.url}/api/session/${app.id}`)).status, 200);
+  socket.close(); await once(socket, 'close');
+  await until(() => app.store.sessions.get(app.id).clients.size === 0);
   time += 101; app.store.sweep();
-  await until(() => messages.some(m => m.type === 'session_expired'));
   assert.equal((await fetch(`${app.url}/api/session/${app.id}`)).status, 404);
 });

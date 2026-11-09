@@ -11,17 +11,19 @@ export class SessionStore {
   create(data) {
     this.sweep();
     if (this.sessions.size >= this.capacity) throw Object.assign(new Error('Server đang có quá nhiều phiên. Hãy thử lại sau.'), { status: 503 });
-    const session = { ...data, id: randomUUID(), touched: this.now(), clients: new Set(), photo: null, result: null, busy: false };
+    const session = { ...data, id: randomUUID(), touched: this.now(), clients: new Set(), photo: null, result: null, busy: false,
+      revision: 1, mode: 'calibrating', tracker: null, lastPacketAt: null, lastFrame: null, frameOwner: null };
     this.sessions.set(session.id, session);
     return session;
   }
   get(id, touch = true) {
     const session = this.sessions.get(id);
     if (!session) return null;
-    if (this.now() - session.touched >= this.ttl) { this.delete(id); return null; }
+    if (!this.connected(session) && this.now() - session.touched >= this.ttl) { this.delete(id); return null; }
     if (touch) session.touched = this.now();
     return session;
   }
+  connected(session) { return [...session.clients].some(client => client.readyState === 1); }
   delete(id) {
     const session = this.sessions.get(id);
     if (session) {
@@ -30,6 +32,6 @@ export class SessionStore {
     }
   }
   sweep() {
-    for (const [id, session] of this.sessions) if (this.now() - session.touched >= this.ttl) this.delete(id);
+    for (const [id, session] of this.sessions) if (!this.connected(session) && this.now() - session.touched >= this.ttl) this.delete(id);
   }
 }

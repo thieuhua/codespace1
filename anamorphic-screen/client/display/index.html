@@ -27,6 +27,7 @@
     <div class="brand"><span class="brand-symbol">a</span>Anamorphic <span class="brand-light">screen</span></div>
     <span class="pill" id="connection"><span class="dot"></span><span id="connection-text">Đang kết nối</span></span>
   </header>
+  <div id="live-hud" class="live-hud" hidden role="status"><b>● LIVE</b><span id="live-detected">0/4 marker</span><span id="live-tracked">Nhớ 0/4</span><span id="live-fps">0 fps</span><span id="live-compression">Nén: —</span><span id="live-warning">Đặt camera đúng vị trí mắt và chờ gom đủ marker.</span></div>
   <section id="calibration-card" class="calibration-card" aria-labelledby="calibration-heading">
     <div class="card-heading"><span class="eyebrow">HIỆU CHUẨN ĐIỂM NHÌN</span><span class="step-counter">01 <span>/ 02</span></span></div>
     <div id="viewport-notice" class="notice" hidden role="alert"></div>
@@ -39,7 +40,7 @@
     <div class="card-status" role="status"><span id="status-icon" class="dot"></span><span id="status-text">Đang chuẩn bị các marker…</span><button id="retry" class="text-button" hidden>Thử lại ↻</button></div>
     <details class="network-settings"><summary>Địa chỉ kết nối điện thoại</summary><div class="network-fields"><label><span>URL server mà điện thoại truy cập được</span><input id="server-url" type="url" placeholder="http://192.168.1.10:3000"></label><button id="apply-url">Đổi QR</button></div><p id="network-hint">Trong Codespaces, dùng URL cổng được chuyển tiếp mà điện thoại có thể mở.</p><div id="lan-options"></div></details>
   </section>
-  <footer class="display-footer chrome"><span id="footer-note">4 marker · 1 điểm nhìn · Không cần cài ứng dụng</span><div class="footer-actions"><button id="preview">Xem nội dung mẫu ↗</button><button id="fullscreen" class="primary">⛶ Toàn màn hình</button><button id="controls-toggle" aria-controls="controls" aria-expanded="false" hidden>Tùy chỉnh <kbd>C</kbd></button></div></footer>
+  <footer class="display-footer chrome"><span id="footer-note">4 marker · 1 điểm nhìn · Không cần cài ứng dụng</span><div class="footer-actions"><button id="preview">Xem nội dung mẫu ↗</button><button id="start-live">Hiệu chỉnh trực tiếp</button><button id="pair-button" hidden>Ghép đôi / QR</button><button id="fullscreen" class="primary">⛶ Toàn màn hình</button><button id="controls-toggle" aria-controls="controls" aria-expanded="false" hidden>Tùy chỉnh <kbd>C</kbd></button></div></footer>
   <aside id="controls" class="controls chrome" aria-label="Tùy chỉnh nội dung và phép bù" hidden>
     <div class="controls-heading"><div><span class="eyebrow">KHÔNG GIAN HIỂN THỊ</span><h2>Tùy chỉnh góc nhìn</h2></div><button id="controls-close" class="icon-button" aria-label="Đóng tùy chỉnh">×</button></div>
     <div class="control-row"><button id="warp-toggle" aria-pressed="true">Bù góc: Bật <kbd>W</kbd></button><button id="recalibrate">Hiệu chuẩn lại</button></div>

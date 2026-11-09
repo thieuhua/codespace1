@@ -1,10 +1,16 @@
 import { $, api, json, toast } from '/assets/utils.js';
-import { MARKER_IDS, validatePoints } from '/shared/calibration.js';
+import { MARKER_IDS, validatePoints, computeWarp } from '/shared/calibration.js';
+import { SessionConnection } from '/assets/connection.js';
+import { Camera } from './camera.js';
+import { LensUI } from './lens-ui.js';
 
-const sessionId = decodeURIComponent(location.pathname.split('/').filter(Boolean).at(-1));
+const sessionId = location.pathname.split('/').filter(Boolean)[1] || null;
 const base = `/api/session/${encodeURIComponent(sessionId)}`;
+const sessionKey = 'anamorphic:capture-session:v2';
+let link, sessionState, attemptedCamera = false, cameraAllowed = false, startingLive = false, resumeOnVisible = false, freezing = false, seq = 0, pendingFrame, latestFrame = null, trackedCount = 0, lastSeq = 0, ticks = [];
 let photo, image, points = [], manual = false, busy = false, activePointer = null, pointerPoint;
 let keyboardPoint = [0, 0];
+let lensChanging = false, cameraDirty = false;
 const canvas = $('#photo-canvas'), context = canvas.getContext('2d');
 const labels = ['1 · trên trái', '2 · trên phải', '3 · dưới phải', '4 · dưới trái'];
 
@@ -14,8 +20,10 @@ function status(text = '', error = false) {
   $('#status').classList.toggle('error', error);
 }
 function show(section) {
-  for (const id of ['capture', 'review', 'done', 'expired']) $(`#${id}-section`).hidden = id !== section;
-  for (const [index, step] of ['photo', 'review', 'done'].entries()) $(`#step-${step}`).classList.toggle('active', index <= ['capture', 'review', 'done'].indexOf(section));
+  document.body.classList.toggle('camera-active', section === 'camera');
+  for (const id of ['capture', 'camera', 'review', 'done', 'expired']) $(`#${id}-section`).hidden = id !== section;
+  const progress = section === 'camera' ? 0 : ['capture', 'review', 'done'].indexOf(section);
+  for (const [index, step] of ['photo', 'review', 'done'].entries()) $(`#step-${step}`).classList.toggle('active', index <= progress);
   $('#status').hidden = true;
 }
 function setBusy(value) {
@@ -78,6 +86,7 @@ $('#photo-input').onchange = async event => {
   if (!file || busy) return;
   if (file.size > 20 * 1024 * 1024) { status('Ảnh lớn hơn 20 MB. Hãy chọn ảnh nhỏ hơn.', true); return; }
   setBusy(true); status('Đang gửi ảnh gốc và nhận diện marker… Giữ nguyên cửa sổ máy tính.');
+  camera.stop();
   const form = new FormData(); form.append('photo', file);
   try {
     const data = await api(`${base}/photo`, { method: 'POST', body: form });
@@ -104,7 +113,7 @@ $('#confirm').onclick = async () => {
     else status(error.message, true);
   } finally { setBusy(false); }
 };
-$('#retake').onclick = () => { show('capture'); };
+$('#retake').onclick = () => { goPhoto(); };
 $('#review-again').onclick = () => { show('review'); updateReview(); };
 $('#reload').onclick = () => location.reload();
 
@@ -161,16 +170,191 @@ canvas.onkeydown = event => {
 };
 canvas.onfocus = draw; canvas.onblur = draw;
 
+const camera = new Camera($('#camera-video'), {
+  geometry: () => link?.open && sessionState?.mode === 'live' && !freezing && !lensChanging && !cameraDirty && !document.hidden
+    ? { viewport: sessionState.viewport, markers: sessionState.markers, revision: sessionState.revision } : null,
+  ready: mode => { cameraAllowed = true; $('#camera-warning').textContent = mode === 'qr' ? 'Hướng camera vào QR trên máy tính.' : 'Giữ camera tại vị trí mắt. Các marker được nhớ qua nhiều khung hình.'; },
+  error: message => {
+    if (!sessionId) { $('#camera-warning').textContent = message; $('#start-camera').hidden = true; }
+    else goPhoto(message);
+  },
+  qr: value => join(value), frame: result => sendFrame(result),
+  controls: state => lens.render(state), notice: text => lens.notice(text),
+  changing: active => { lensChanging = active; if (active) resetFrames(); lens.busy(active); updateFreeze(); },
+  changed: () => resetCameraCalibration(),
+  preference: (() => { try { return JSON.parse(localStorage.getItem('anamorphic:camera:v1')) || {}; } catch { return {}; } })()
+});
+const lens = new LensUI(camera);
+
+async function resetCameraCalibration() {
+  if (!sessionId) return;
+  cameraDirty = true; updateFreeze();
+  if (!link?.open) { lens.notice('Đang đợi kết nối để bắt đầu lượt hiệu chỉnh với cấu hình camera mới.'); return; }
+  await link.command('start_live');
+  cameraDirty = false;
+  lens.notice('Đã đổi camera. Đang gom lại bốn marker trong cùng phiên.');
+  updateFreeze();
+}
+
+function resetFrames() {
+  latestFrame = null; trackedCount = 0; ticks = []; freezing = false; lastSeq = 0;
+  camera.resetTracking();
+  $('#phone-tracked').textContent = 'Nhớ 0/4';
+  document.querySelectorAll('[data-memory-id]').forEach(node => { node.classList.remove('remembered', 'observed'); node.title = 'Chưa thấy'; });
+  if (pendingFrame) { clearTimeout(pendingFrame.timer); pendingFrame.resolve({ ok: false, samples: 0 }); pendingFrame = null; }
+  updateFreeze();
+}
+function updateFreeze() {
+  $('#freeze').disabled = freezing || lensChanging || cameraDirty || !link?.open || !latestFrame || trackedCount < 4;
+  $('#freeze').textContent = freezing ? 'Đang chốt…' : `Chốt · ${trackedCount}/4 điểm`;
+}
+async function startLive() {
+  if (document.hidden) { resumeOnVisible = true; return; }
+  if (startingLive) return;
+  startingLive = true;
+  attemptedCamera = true;
+  try {
+    if (!link?.open) throw new Error('Đang mất kết nối. Đợi nối lại phiên rồi mở camera.');
+    if (sessionState.mode !== 'live') await link.command('start_live');
+    show('camera'); $('#pair-form').hidden = true; $('#freeze').hidden = false;
+    $('#camera-warning').textContent = 'Đang mở camera…';
+    await camera.start('live');
+  } catch (error) { status(error.message, true); }
+  finally { startingLive = false; }
+}
+async function goPhoto(message = '') {
+  resumeOnVisible = false;
+  camera.stop(); resetFrames(); show('capture');
+  if (link?.open && sessionState?.mode !== 'calibrating') {
+    try { await link.command('fallback'); } catch (error) { if (!message) message = error.message; }
+  }
+  if (message) status(message, true);
+}
+function overlay(result) {
+  const node = $('#camera-overlay'); node.width = result.imageSize.w; node.height = result.imageSize.h;
+  const ctx = node.getContext('2d');
+  result.points.forEach(p => {
+    const fresh = result.updatedIds.includes(p.id);
+    ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2); ctx.fillStyle = fresh ? '#d4f879' : '#27391cbb'; ctx.fill(); ctx.strokeStyle = fresh ? '#27391c' : '#d4f879'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = fresh ? '#27391c' : '#d4f879'; ctx.font = 'bold 15px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(MARKER_IDS.indexOf(p.id) + 1), p.x, p.y);
+  });
+  document.querySelectorAll('[data-memory-id]').forEach(node => {
+    const id = Number(node.dataset.memoryId), remembered = result.points.some(p => p.id === id), fresh = result.updatedIds.includes(id);
+    node.classList.toggle('remembered', remembered); node.classList.toggle('observed', fresh);
+    node.title = fresh ? 'Vừa thấy trong khung này' : remembered ? 'Dùng điểm đã nhớ từ khung trước' : 'Chưa thấy';
+  });
+}
+async function sendFrame(result) {
+  if (!link?.open || freezing || lensChanging || cameraDirty || result.revision !== sessionState?.revision || result.trackingEpoch !== camera.trackingEpoch || sessionState.mode !== 'live') return;
+  overlay(result);
+  const now = performance.now(); ticks.push(now); ticks = ticks.filter(t => now - t <= 1500);
+  const fps = ticks.length > 1 ? (ticks.length - 1) * 1000 / (now - ticks[0]) : 0;
+  $('#phone-detected').textContent = `${result.detected}/4 marker`; $('#phone-fps').textContent = `${fps.toFixed(1)} fps`;
+  $('#phone-tracked').textContent = `Nhớ ${result.tracked}/4`;
+  $('#phone-compression').textContent = result.valid ? `Nén: ${Math.round(result.compression * 100)}%` : 'Nén: —';
+  $('#camera-warning').textContent = result.warning || 'Góc nhìn hợp lệ. Giữ ổn định rồi nhấn Chốt.';
+  const nextSeq = ++seq;
+  const packet = { type: result.observations.length ? 'live_points' : 'live_status', seq: nextSeq, revision: result.revision,
+    points: result.observations, imageSize: result.imageSize, fps };
+  const ack = await new Promise(resolve => {
+    const timer = setTimeout(() => { if (pendingFrame?.seq === nextSeq) { pendingFrame = null; latestFrame = null; updateFreeze(); } resolve({ ok: false, reason: 'Mất xác nhận khung hình. Đang chờ kết nối.' }); }, 2000);
+    pendingFrame = { seq: nextSeq, resolve, timer };
+    if (!link.send(packet)) { clearTimeout(timer); pendingFrame = null; resolve({ ok: false }); }
+  });
+  if (result.revision !== sessionState?.revision || result.trackingEpoch !== camera.trackingEpoch) return;
+  trackedCount = ack.tracked || 0;
+  if (ack.ok && ack.ready && result.freezeValid) {
+    latestFrame = { Q: result.freezeQ, imageSize: result.imageSize }; lastSeq = ack.lastSeq;
+  } else { latestFrame = null; if (ack.reason) $('#camera-warning').textContent = ack.reason; }
+  updateFreeze();
+}
+
+function receive(data) {
+  if (['connected', 'live_started', 'capture_started'].includes(data.type)) {
+    const changed = sessionState?.revision !== data.revision;
+    sessionState = data;
+    if (changed || data.type === 'connected') resetFrames();
+    if (data.type === 'live_started') cameraDirty = false;
+    if (data.type === 'connected' && cameraDirty && camera.mode === 'live') resetCameraCalibration().catch(error => lens.notice(error.message));
+    $('#session-badge').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
+    if (data.mode === 'display' && data.result) { camera.stop(); show('done'); $('#review-again').hidden = !photo; }
+    else if (data.type === 'live_started' && cameraAllowed && camera.mode !== 'live') startLive();
+    else if (data.type === 'connected' && data.mode === 'live' && cameraAllowed && resumeOnVisible) startLive();
+    else if (data.type === 'connected' && photo && data.mode === 'calibrating') { attemptedCamera = true; }
+    else if (data.type === 'connected' && !attemptedCamera) startLive();
+    else if (data.type === 'capture_started') { camera.stop(); show('capture'); }
+  }
+  if (data.type === 'frame_ack' && pendingFrame?.seq === data.seq) {
+    const pending = pendingFrame; pendingFrame = null; clearTimeout(pending.timer); pending.resolve(data);
+  }
+  if (data.type === 'calibrated' && data.source === 'live' && data.revision === sessionState?.revision) {
+    sessionState.mode = 'display'; camera.stop(); resetFrames(); show('done'); $('#review-again').hidden = !photo;
+  }
+}
+
+$('#freeze').onclick = async () => {
+  if (freezing || lensChanging || cameraDirty || !latestFrame || trackedCount < 4) return;
+  freezing = true; updateFreeze();
+  try {
+    if (pendingFrame) await new Promise(resolve => { const check = () => pendingFrame ? setTimeout(check, 10) : resolve(); check(); });
+    if (!latestFrame) throw new Error('Chưa gom đủ bốn điểm hợp lệ.');
+    computeWarp({ viewport: sessionState.viewport, P: sessionState.markers, ...latestFrame });
+    await link.command('freeze', { revision: sessionState.revision, lastSeq });
+  } catch (error) { $('#camera-warning').textContent = error.message; }
+  finally { freezing = false; updateFreeze(); }
+};
+$('#start-camera').onclick = startLive; $('#reopen-live').onclick = startLive;
+$('#use-photo').onclick = () => goPhoto();
+$('#clear-tracking').onclick = () => link?.command('start_live').catch(error => lens.notice(error.message));
+function pauseCamera() {
+  camera.stop(); resetFrames();
+  if (link?.open) link.command('pause').catch(() => {});
+}
+$('#camera-stop').onclick = () => { resumeOnVisible = false; pauseCamera(); if (sessionId) { show('capture'); status('Camera đã tạm dừng. Nhấn mở camera để tiếp tục trong cùng phiên.'); } else location.href = '/capture'; };
+
+function join(value) {
+  try {
+    const url = new URL(value, location.origin);
+    if (!['http:', 'https:'].includes(url.protocol) || !/^\/capture\/[a-f0-9-]{36}$/.test(url.pathname) || url.username || url.password) throw new Error();
+    camera.stop(); location.assign(url.href);
+  } catch { $('#camera-warning').textContent = 'QR này không phải đường dẫn ghép đôi Anamorphic Screen.'; }
+}
+$('#pair-form').onsubmit = event => { event.preventDefault(); join($('#pair-url').value); };
+addEventListener('pagehide', () => { resumeOnVisible = camera.mode === 'live'; camera.stop(); link?.stop(); });
+addEventListener('pageshow', event => { if (event.persisted && sessionId) attachLink(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { resumeOnVisible = camera.mode === 'live'; pauseCamera(); }
+  else if (sessionId && sessionState?.mode === 'live' && cameraAllowed && resumeOnVisible) { resumeOnVisible = false; startLive(); }
+});
+
 async function boot() {
+  if (!sessionId) {
+    let saved; try { saved = localStorage.getItem(sessionKey); } catch { /* Storage is optional. */ }
+    if (saved && !new URLSearchParams(location.search).has('scan')) { location.replace(`/capture/${encodeURIComponent(saved)}`); return; }
+    show('camera'); $('#pair-form').hidden = false; $('#freeze').hidden = true; $('#phone-metrics').hidden = true; $('#marker-memory').hidden = true; $('#use-photo').hidden = true;
+    $('.progress').hidden = true;
+    $('#camera-heading').textContent = 'Quét QR để ghép đôi.'; $('#camera-eyebrow').textContent = 'KẾT NỐI MÁY TÍNH';
+    $('#camera-instruction').textContent = 'Hướng camera sau vào mã QR trên trang hiển thị. Bạn chỉ cần ghép đôi một lần.';
+    await camera.start('qr'); return;
+  }
   setBusy(true); status('Đang mở phiên hiệu chuẩn…');
   try {
     const session = await api(base);
+    try { localStorage.setItem(sessionKey, sessionId); } catch { /* A direct capture URL still survives refresh. */ }
+    sessionState = session;
     $('#session-badge').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
     status();
     if (session.photo) await loadPhoto(session.photo, `${base}/photo?photoId=${session.photo.photoId}`);
+    attachLink();
   } catch (error) {
     if (error.status === 404) expired();
-    else { status(`Không kết nối được server: ${error.message}`, true); toast('Kiểm tra cùng Wi-Fi và địa chỉ server trên máy tính.'); }
+    else { status(`Không kết nối được server: ${error.message}`, true); attachLink(); }
   } finally { setBusy(false); }
+}
+function attachLink() {
+  link?.stop();
+  link = new SessionConnection(sessionId, 'capture', { message: receive, expired,
+    state: state => { if (state !== 'open') { resetFrames(); $('#session-badge').textContent = 'ĐANG NỐI LẠI'; $('#camera-warning').textContent = 'Mất kết nối. Các khung hình tạm dừng, phiên sẽ tự nối lại.'; } }
+  });
 }
 boot();
