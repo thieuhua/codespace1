@@ -16,6 +16,7 @@ export function geometry(viewport, markers) {
 export function snapshot(session) {
   const photo = session.photo;
   return { viewport: session.viewport, markers: session.markers, revision: session.revision, mode: session.mode, result: session.result,
+    contentConfig: session.contentConfig, contentData: session.contentData, contentStatus: session.contentStatus,
     displayApplied: session.displayApplied, busy: session.busy,
     photo: photo ? { photoId: photo.id, imageSize: photo.imageSize, points: photo.points, ok: photo.ok, reason: photo.reason,
       previewUrl: `/api/session/${session.id}/photo?photoId=${photo.id}` } : null };

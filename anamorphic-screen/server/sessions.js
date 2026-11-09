@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { SAMPLE_CONFIG, validateContent } from '../shared/content/schema.js';
 
 export class SessionStore {
   constructor({ ttl = 15 * 60_000, capacity = 40, now = Date.now, onExpire = () => {} } = {}) {
@@ -13,6 +14,10 @@ export class SessionStore {
     if (this.sessions.size >= this.capacity) throw Object.assign(new Error('Server đang có quá nhiều phiên. Hãy thử lại sau.'), { status: 503 });
     const session = { ...data, id: randomUUID(), touched: this.now(), clients: new Set(), photo: null, result: null, busy: false,
       revision: 1, mode: 'calibrating', tracker: null, lastPacketAt: null, lastFrame: null, frameOwner: null };
+    session.controllerToken = randomUUID(); session.contentDisplayKey = randomUUID();
+    session.contentConfig = validateContent(SAMPLE_CONFIG);
+    session.contentData = { fields: session.contentConfig.config.fields, contentRevision: 0 };
+    session.contentStatus = { state: 'ready', contentRevision: 0, reason: '' };
     this.sessions.set(session.id, session);
     return session;
   }

@@ -11,7 +11,7 @@ import { apply } from '../../shared/homography.js';
 async function pair(page) {
   await page.goto('/'); await expect(page.locator('#qr')).toBeVisible();
   await expect(page.locator('#connection-text')).toHaveText('Chưa có điện thoại');
-  return page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
+  return page.locator('#qr').evaluate(img => img.dataset.sessionId);
 }
 
 test('real camera track → worker ArUco → live relay → median freeze; both devices reload/reconnect in the same session', async ({ page }, testInfo) => {

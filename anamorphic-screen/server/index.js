@@ -14,6 +14,7 @@ import { MARKER_IDS, validateCalibration } from '../shared/calibration.js';
 import { PHOTO_WAITING, PHOTO_JOB_MS } from '../shared/photo.js';
 import { geometry, snapshot, peers, resetStream, handleMessage } from './protocol.js';
 import { publicURL } from './public-url.js';
+import { createContentService, requireController } from './content/routes.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const PHOTO_LIMIT = 20 * 1024 * 1024;
@@ -78,15 +79,18 @@ function detectorQueue() {
   };
 }
 
-export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
+export function createApplication({ ttl, now, detector, markerMaxAgeMs, contentFetch } = {}) {
   const app = express();
   const server = createServer(app);
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   const processing = detectorQueue();
+  const content = createContentService({ broadcast, fetchSource: contentFetch, now });
   const store = new SessionStore({ ttl, now, onExpire: session => {
+    content.stop(session);
     broadcast(session, 'session_expired');
     for (const socket of session.clients) socket.close(4001, 'Session expired');
     session.photo = null;
+    session.contentSecrets?.clear();
   } });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: PHOTO_LIMIT, files: 1, fields: 0, parts: 1 } });
   app.disable('x-powered-by');
@@ -94,7 +98,7 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' });
     next();
   });
-  app.use(express.json({ limit: '16kb' }));
+  app.use(express.json({ limit: '64kb' }));
   function sessionRequired(req, _res, next) {
     const session = store.get(req.params.id);
     if (!session) return next(bad('Phiên không tồn tại hoặc đã hết hạn. Quét QR mới trên máy tính.', 404));
@@ -115,12 +119,21 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
     let config;
     try { config = geometry(viewport, markers); } catch (error) { throw bad(error.message); }
     const session = store.create(config);
-    res.status(201).json({ sessionId: session.id, expiresIn: store.ttl });
+    res.status(201).json({ sessionId: session.id, expiresIn: store.ttl, controllerToken: session.controllerToken, contentDisplayKey: session.contentDisplayKey });
   });
   app.get('/api/session/:id', sessionRequired, (req, res) => {
     res.json({ ...snapshot(req.session), peers: peers(req.session) });
   });
   app.delete('/api/session/:id', sessionRequired, (req, res) => { store.delete(req.session.id); res.sendStatus(204); });
+  content.mount(app, sessionRequired);
+  app.post('/api/session/:id/qr', sessionRequired, async (req, res) => {
+    requireController(req.session, req.get('X-Controller-Token'));
+    let url;
+    try { url = new URL(req.body.url); } catch { throw bad('URL QR không hợp lệ.'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== `/capture/${req.session.id}` || url.href.length > 2048) throw bad('URL QR không hợp lệ.');
+    url.hash = new URLSearchParams({ k: req.session.controllerToken }).toString();
+    res.type('svg').send(await QRCode.toString(url.href, { type: 'svg', margin: 2, errorCorrectionLevel: 'M' }));
+  });
   app.get('/api/session/:id/qr', sessionRequired, async (req, res) => {
     const value = req.query.url;
     let url;
@@ -216,7 +229,7 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
   app.use((_req, _res, next) => next(bad('Không tìm thấy đường dẫn.', 404)));
   app.use((error, _req, res, _next) => {
     const status = error.code === 'LIMIT_FILE_SIZE' ? 413 : error instanceof multer.MulterError ? 400 : error.status || 500;
-    const reason = status === 413 ? 'Ảnh vượt giới hạn 20 MB. Hãy chọn ảnh nhỏ hơn.' : status === 500 ? 'Lỗi server. Hãy thử lại.' : error.message;
+    const reason = status === 413 ? error.code === 'LIMIT_FILE_SIZE' ? 'Ảnh vượt giới hạn 20 MB. Hãy chọn ảnh nhỏ hơn.' : 'Dữ liệu yêu cầu quá lớn.' : status === 500 ? 'Lỗi server. Hãy thử lại.' : error.message;
     if (status === 500) console.error(error);
     res.status(status).json({ ok: false, reason });
   });
@@ -242,7 +255,7 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
         let data;
         try { if (isBinary) throw new Error(); data = JSON.parse(buffer); }
         catch { ws.send(JSON.stringify({ type: 'command_ack', ok: false, reason: 'Cần thông điệp JSON hợp lệ.' })); return; }
-        handleMessage(session, ws, data, { broadcast, now: store.now, markerMaxAgeMs });
+        if (!content.message(session, ws, data)) handleMessage(session, ws, data, { broadcast, now: store.now, markerMaxAgeMs });
       });
       ws.send(JSON.stringify({ type: 'connected', sessionId: session.id, ...snapshot(session), peers: peers(session) }));
       broadcast(session, 'peers', peers(session));
@@ -263,6 +276,7 @@ export function createApplication({ ttl, now, detector, markerMaxAgeMs } = {}) {
   maintenance.unref();
   return { app, server, store, async close() {
     clearInterval(maintenance);
+    content.close();
     for (const ws of wss.clients) ws.terminate();
     await processing.close();
     wss.close();

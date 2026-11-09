@@ -2,6 +2,10 @@ import { $, api, json, toast, copyText } from '/assets/utils.js';
 import { markerLayout, computeWarp, validateCalibration, MARKER_IDS, viewportKey } from '/shared/calibration.js';
 import { emaFrame } from '/shared/live.js';
 import { SessionConnection } from '/assets/connection.js';
+import { ContentPanel } from '/assets/content-panel.js';
+import { SAMPLE_CONFIG, isServerSource, validateContent } from '/shared/content/schema.js';
+import { create as createContent } from './content/runtime.js';
+import { renderFields as paintFields, waitForAssets } from './content/renderer.js';
 
 const readViewport = () => ({ vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio || 1 });
 const storagePrefix = 'anamorphic:calibration:v1:';
@@ -11,6 +15,72 @@ const sessionKey = 'anamorphic:display-session:v2';
 let mode = 'calibrating', warped = true, warpResult, rasterGeneration = 0, objectURL;
 const tuning = { scale: 0.9, offset: { x: 0, y: 0 }, width: 960, height: 600, font: 76 };
 let phonePeers = { capture: 0, streaming: false }, streamTimer, summaryAt = 0;
+const contentKey = 'anamorphic:content:v1';
+let contentConfig = validateContent(SAMPLE_CONFIG), contentFields = contentConfig.config.fields, contentRuntime, controllerToken = '', contentDisplayKey = '', freshSession = false, restoredContent = false, qrObjectURL, lastContentStatus;
+let currentContentStatus = { state: 'loading' };
+function temporaryGet(key) { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } }
+function temporarySet(key, value) { try { sessionStorage.setItem(key, value); } catch { /* This tab can still keep the token in memory. */ } }
+const contentPanel = new ContentPanel($('#content-panel'), {
+  display: true, editable: () => !!controllerToken,
+  apply: value => link.command('content_config', { contentConfig: value, controllerToken }),
+  preview: previewContent,
+  saveSecret: value => api(`/api/session/${sessionId}/content/secrets`, { ...json(value), method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Controller-Token': controllerToken, 'X-Content-Display-Key': contentDisplayKey } })
+});
+function contentStatus(value) {
+  const labels = { loading: 'Đang tải', ready: 'Sẵn sàng', stale: 'Dữ liệu cũ', error: 'Lỗi nguồn' };
+  $('#content-status').textContent = `Nội dung: ${labels[value.state] || value.state}`;
+  $('#content-status').dataset.state = value.state; $('#content-status').title = value.reason || '';
+}
+function reportContentStatus(value) {
+  currentContentStatus = value; contentStatus(value);
+  if (controllerToken && !isServerSource(contentConfig) && contentConfig.adapterId !== 'manual' && JSON.stringify(value) !== JSON.stringify(lastContentStatus)) {
+    if (link?.send({ type: 'content_status', ...value, contentRevision: contentConfig.contentRevision, controllerToken })) lastContentStatus = value;
+  }
+}
+function renderFields(fields = contentFields) {
+  contentFields = fields;
+  paintFields($('#content'), fields, contentConfig, { localImage: objectURL });
+  $('#debug-grid').hidden = !$('#debug').checked;
+  if ($('#poster-art')) $('#poster-art').hidden = tuning.width < 700;
+  scheduleRaster();
+}
+function activateContent(raw) {
+  const next = validateContent(raw); contentRuntime?.stop(); contentConfig = next; lastContentStatus = null;
+  if (next.contentRevision > 0) restoredContent = true;
+  contentPanel.load(next); storedSet(contentKey, JSON.stringify(next));
+  $('#raster-mode').disabled = next.adapterId === 'iframe';
+  if (next.adapterId === 'iframe') $('#raster-mode').checked = false;
+  $('#image-picker').disabled = next.adapterId !== 'manual';
+  renderFields();
+  contentRuntime = createContent(next);
+  contentRuntime.start({ onData: renderFields, onStatus: reportContentStatus });
+}
+function receiveContent(data) {
+  if (data.contentConfig) {
+    if (freshSession && restoredContent && data.contentConfig.contentRevision === 0) {
+      freshSession = false;
+      link.command('content_config', { contentConfig: { ...contentConfig, contentRevision: 0 }, controllerToken }).catch(error => contentPanel.notice(error.message));
+      return;
+    }
+    freshSession = false;
+    if (JSON.stringify(data.contentConfig) !== JSON.stringify(contentConfig)) activateContent(data.contentConfig);
+  }
+  const packet = data.type === 'content_data' ? data : data.contentData;
+  if (packet?.contentRevision === contentConfig.contentRevision && (isServerSource(contentConfig) || contentConfig.adapterId === 'manual')) contentRuntime?.push(packet.fields);
+  const state = data.type === 'content_status' ? data : data.contentStatus;
+  if (state?.contentRevision === contentConfig.contentRevision && isServerSource(contentConfig)) contentRuntime?.status(state);
+}
+async function previewContent(value) {
+  if (isServerSource(value)) return (await api(`/api/session/${sessionId}/content/preview`, { ...json(value), headers: { 'Content-Type': 'application/json', 'X-Controller-Token': controllerToken } })).fields;
+  const instance = createContent(value);
+  try {
+    return await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { instance.stop(); reject(new Error('Chưa nhận dữ liệu sau 8 giây.')); }, 8000);
+      instance.start({ onData: fields => { clearTimeout(timeout); resolve(value.adapterId === 'iframe' ? { ghiChu: 'Trang nhúng không hỗ trợ trích xuất; nhiều website chặn nhúng.' } : fields); },
+        onStatus: state => { if (state.state === 'error') { clearTimeout(timeout); reject(new Error(state.reason)); } } });
+    });
+  } finally { instance.stop(); }
+}
 
 function storedGet(key) { try { return localStorage.getItem(key); } catch { return null; } }
 function storedSet(key, value) { try { localStorage.setItem(key, value); } catch { toast('Không lưu được trong trình duyệt. Phiên hiện tại vẫn dùng được.'); } }
@@ -84,7 +154,7 @@ function setMode(next) {
 function remember() {
   if (!calibration || mode !== 'display') return;
   const key = viewportKey(viewport);
-  storedSet(storagePrefix + key, JSON.stringify({ ...calibration, ...tuning, text: $('#text-input').value, savedAt: Date.now() }));
+  storedSet(storagePrefix + key, JSON.stringify({ ...calibration, ...tuning, savedAt: Date.now() }));
   storedSet('anamorphic:last-viewport', key);
   // Bound local cache size; no photo or image content is persisted.
   try {
@@ -101,23 +171,23 @@ function syncControls() {
   $('#font-size').value = tuning.font; $('#font-value').value = `${tuning.font} px`;
 }
 
-function renderWarp() {
+function measureLayout() {
   const content = $('#content'), wrap = $('#warp');
   content.style.width = wrap.style.width = `${tuning.width}px`;
   content.style.height = wrap.style.height = `${tuning.height}px`;
-  $('#poster-text').style.fontSize = `${tuning.font}px`;
-  $('#poster-text').textContent = $('#text-input').value;
-  $('#poster-art').hidden = tuning.width < 700;
+  content.style.setProperty('--content-font', `${tuning.font}px`);
+  if ($('#poster-art')) $('#poster-art').hidden = tuning.width < 700;
   $('#debug-grid').hidden = !$('#debug').checked;
   wrap.style.willChange = $('#gpu-mode').checked ? 'transform' : 'auto';
+}
+function updateWarp() {
   if (calibration) {
     warpResult = computeWarp({ ...calibration, ...tuning });
     $('#compression-warning').hidden = warpResult.compression >= 0.35;
   } else { warpResult = null; $('#compression-warning').hidden = true; }
   paintTransform();
-  syncControls(); remember();
-  scheduleRaster();
 }
+function saveSettings() { remember(); }
 
 function paintTransform() {
   const wrap = $('#warp');
@@ -136,15 +206,20 @@ function paintTransform() {
   $('#compression-warning').hidden = !warpResult || warpResult.compression >= 0.35;
 }
 
-function safeRender() { try { renderWarp(); } catch (error) { toast(error.message); } }
-let rasterTimer;
+function safeRender() { try { measureLayout(); updateWarp(); syncControls(); saveSettings(); scheduleRaster(); } catch (error) { toast(error.message); } }
+let rasterTimer, rasterBusy = false, rasterDirty = false, rasterLastAt = -Infinity;
 function scheduleRaster() {
-  const revision = ++rasterGeneration;
-  clearTimeout(rasterTimer);
-  $('#content').hidden = false; $('#raster').hidden = true;
-  if (!$('#raster-mode').checked || mode !== 'display') return;
+  if (!$('#raster-mode').checked || mode !== 'display' || contentConfig.adapterId === 'iframe') {
+    rasterGeneration++; clearTimeout(rasterTimer); rasterTimer = null; rasterDirty = false;
+    $('#content').hidden = false; $('#raster').hidden = true; return;
+  }
+  rasterDirty = true;
+  if (rasterBusy || rasterTimer) return;
   // Render an untransformed clone: rasterising the warped element would apply G twice.
   rasterTimer = setTimeout(async () => {
+    rasterTimer = null; rasterBusy = true; rasterDirty = false; rasterLastAt = performance.now();
+    const generation = rasterGeneration;
+    const { width, height } = tuning;
     let host;
     try {
       if (!window.html2canvas) throw new Error('Chưa tải được bộ render canvas.');
@@ -153,20 +228,21 @@ function scheduleRaster() {
       host.style.cssText = 'position:fixed;left:-20000px;top:0;pointer-events:none';
       const clone = $('#content').cloneNode(true); clone.hidden = false;
       host.append(clone); document.body.append(host);
-      const rendered = await window.html2canvas(clone, { scale: 2, logging: false, backgroundColor: null, width: tuning.width, height: tuning.height, windowWidth: Math.max(innerWidth, tuning.width) });
-      if (revision !== rasterGeneration || !$('#raster-mode').checked || mode !== 'display') return;
+      await waitForAssets(clone);
+      const rendered = await window.html2canvas(clone, { scale: 2, useCORS: true, imageTimeout: 5000, logging: false, backgroundColor: null, width, height, windowWidth: Math.max(innerWidth, width) });
+      if (generation !== rasterGeneration || !$('#raster-mode').checked || mode !== 'display') return;
       const canvas = $('#raster'); canvas.width = rendered.width; canvas.height = rendered.height;
       canvas.getContext('2d').drawImage(rendered, 0, 0);
       canvas.hidden = false; $('#content').hidden = true;
     } catch (error) {
-      if (revision === rasterGeneration) { $('#raster-mode').checked = false; toast(error.message); }
-    } finally { host?.remove(); }
-  }, 180);
+      if (generation === rasterGeneration) { $('#raster-mode').checked = false; $('#content').hidden = false; $('#raster').hidden = true; toast(error.message); }
+    } finally { host?.remove(); rasterBusy = false; if (rasterDirty) scheduleRaster(); }
+  }, Math.max(0, 650 - (performance.now() - rasterLastAt)));
 }
 
 function showContent() {
   setMode('display');
-  try { renderWarp(); } catch (error) {
+  try { measureLayout(); updateWarp(); syncControls(); scheduleRaster(); } catch (error) {
     calibration = null; setMode('calibrating'); status(error.message, false, true);
   }
 }
@@ -174,9 +250,11 @@ function showContent() {
 function captureURL() {
   const base = new URL($('#server-url').value);
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password) throw new Error('Dùng URL HTTP hoặc HTTPS hợp lệ.');
-  return new URL(`/capture/${sessionId}`, base).href;
+  const url = new URL(`/capture/${sessionId}`, base);
+  if (controllerToken) url.hash = new URLSearchParams({ k: controllerToken }).toString();
+  return url.href;
 }
-function updateQR() {
+async function updateQR() {
   if (!sessionId) return;
   const url = captureURL();
   const target = new URL(url), local = ['localhost', '127.0.0.1', '[::1]'].includes(target.hostname);
@@ -184,7 +262,15 @@ function updateQR() {
   const image = $('#qr');
   image.onload = () => { image.hidden = false; $('#qr-loading').hidden = true; };
   image.onerror = () => { image.hidden = true; $('#qr-loading').hidden = true; status('Không tạo được QR. Hãy thử lại phiên.', false, true); };
-  image.src = `/api/session/${sessionId}/qr?url=${encodeURIComponent(url)}`;
+  image.dataset.sessionId = sessionId;
+  try {
+    if (controllerToken) {
+      const response = await fetch(`/api/session/${sessionId}/qr`, { ...json({ url }), headers: { 'Content-Type': 'application/json', 'X-Controller-Token': controllerToken } });
+      if (!response.ok) throw new Error('Không tạo được QR điều khiển.');
+      const previous = qrObjectURL; qrObjectURL = URL.createObjectURL(await response.blob()); image.src = qrObjectURL;
+      if (previous) URL.revokeObjectURL(previous);
+    } else image.src = `/api/session/${sessionId}/qr?url=${encodeURIComponent(url)}`;
+  } catch (error) { status(error.message, false, true); }
   $('#copy-link').disabled = false;
   $('#copy-link').title = url;
   const hostname = new URL(url).hostname;
@@ -196,8 +282,13 @@ function updateQR() {
 function liveWarning(text = '') { $('#live-warning').textContent = text; $('#live-warning').classList.toggle('error', !!text); }
 
 function receive(data) {
+  receiveContent(data);
+  if (data.type.startsWith('content_')) return;
   if (data.type === 'peers') { phonePeers = data; streaming(data.streaming); }
   if (data.type === 'connected') {
+    if (!isServerSource(contentConfig) && contentConfig.adapterId !== 'manual') {
+      lastContentStatus = null; reportContentStatus(currentContentStatus);
+    }
     phonePeers = data.peers; streaming(data.peers.streaming);
     if ($('#qr').hidden) updateQR();
     if (needsConfigure || viewportKey(data.viewport) !== viewportKey(viewport)) { configure(true); return; }
@@ -226,7 +317,7 @@ function receive(data) {
       const nextCalibration = { viewport, P, ...next };
       const nextWarp = computeWarp({ ...nextCalibration, ...tuning });
       smoothed = next; calibration = nextCalibration; warpResult = nextWarp;
-      if (mode !== 'live') { setMode('live'); renderWarp(); } else paintTransform();
+      if (mode !== 'live') { setMode('live'); measureLayout(); paintTransform(); } else paintTransform();
       liveWarning(data.warning || '');
       applied(data, true);
     } catch (error) { liveWarning(`${error.message} Giữ kết quả hợp lệ gần nhất.`); applied(data, false, error.message); }
@@ -251,6 +342,7 @@ function applyCalibration(data) {
   calibration = candidate; smoothed = null; warped = true;
   $('#viewport-notice').hidden = true;
   showContent();
+  saveSettings();
   streaming(false); applied(data, true);
 }
 function enterLive(data) {
@@ -293,8 +385,13 @@ async function pair() {
         else data = {}; // Reconnect the remembered session even if reload began offline.
       }
     }
-    if (!data) { const created = await api('/api/session', json({ viewport, markers: P })); sessionId = created.sessionId; }
+    if (!data) {
+      const created = await api('/api/session', json({ viewport, markers: P })); sessionId = created.sessionId;
+      controllerToken = created.controllerToken; contentDisplayKey = created.contentDisplayKey; freshSession = true;
+      temporarySet(`anamorphic:controller:${sessionId}`, controllerToken); temporarySet(`anamorphic:content-display:${sessionId}`, contentDisplayKey);
+    } else { controllerToken = temporaryGet(`anamorphic:controller:${sessionId}`); contentDisplayKey = temporaryGet(`anamorphic:content-display:${sessionId}`); }
     storedSet(sessionKey, sessionId);
+    $('#new-content-session').hidden = !!controllerToken;
     $('#session-label').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
     updateQR(); link?.stop();
     link = new SessionConnection(sessionId, 'display', { message: receive,
@@ -339,13 +436,18 @@ async function fullscreen() {
   catch { toast('Trình duyệt không cho bật toàn màn hình. Có thể dùng F11 rồi hiệu chuẩn lại.'); }
 }
 
+// Keep fixed panels above the footer even when its buttons wrap to several rows.
+new ResizeObserver(([entry]) => document.documentElement.style.setProperty('--footer-h', `${Math.ceil(entry.target.getBoundingClientRect().height)}px`))
+  .observe(document.querySelector('.display-footer'));
+
 function revealChrome() {
   document.body.classList.remove('idle'); clearTimeout(idleTimer);
-  if (mode === 'display' && $('#controls').hidden) idleTimer = setTimeout(() => {
+  if (mode === 'display' && $('#controls').hidden && $('#content-controls').hidden) idleTimer = setTimeout(() => {
     if (!document.activeElement?.closest('.chrome')) document.body.classList.add('idle');
   }, 4500);
 }
 function toggleControls(open = $('#controls').hidden) {
+  if (open) { $('#content-controls').hidden = true; $('#content-toggle').setAttribute('aria-expanded', 'false'); }
   $('#controls').hidden = !open; $('#controls-toggle').setAttribute('aria-expanded', String(open)); revealChrome();
 }
 addEventListener('pointermove', revealChrome); addEventListener('pointerdown', revealChrome); addEventListener('focusin', revealChrome);
@@ -361,11 +463,18 @@ addEventListener('keydown', event => {
   if (key === '?') $('#shortcut-help').click();
 });
 $('#fullscreen').onclick = fullscreen;
+$('#content-toggle').onclick = () => {
+  const open = $('#content-controls').hidden; $('#content-controls').hidden = !open;
+  if (open) { $('#controls').hidden = true; $('#controls-toggle').setAttribute('aria-expanded', 'false'); }
+  $('#content-toggle').setAttribute('aria-expanded', String(open)); revealChrome();
+};
+$('#content-close').onclick = () => { $('#content-controls').hidden = true; $('#content-toggle').setAttribute('aria-expanded', 'false'); };
+$('#new-content-session').onclick = () => { storedSet(sessionKey, ''); pair(); };
 $('#shortcut-help').onclick = () => { const dialog = $('#shortcut-dialog'); if (dialog.open) dialog.close(); else dialog.showModal(); };
 $('#shortcut-close').onclick = () => $('#shortcut-dialog').close();
 $('#image-picker').onclick = () => $('#image-input').click();
 $('#controls-toggle').onclick = () => toggleControls(); $('#controls-close').onclick = () => toggleControls(false);
-$('#preview').onclick = () => { showContent(); toggleControls(true); };
+$('#preview').onclick = () => { if (!restoredContent && contentConfig.contentRevision === 0) activateContent(SAMPLE_CONFIG); showContent(); toggleControls(true); };
 $('#recalibrate').onclick = () => { $('#viewport-notice').hidden = true; beginCalibration(); };
 $('#start-live').onclick = () => beginCalibration();
 $('#pair-button').onclick = () => { $('#calibration-card').hidden = !$('#calibration-card').hidden; };
@@ -378,24 +487,22 @@ for (const [selector, property] of [['#content-width', 'width'], ['#content-heig
   if (!event.target.checkValidity()) { toast('Kích thước nội dung từ 100 đến 4000 px.'); syncControls(); return; }
   tuning[property] = Number(event.target.value); safeRender();
 };
-$('#text-input').oninput = safeRender;
 $('#font-size').oninput = event => { tuning.font = Number(event.target.value); safeRender(); };
 for (const selector of ['#debug', '#raster-mode', '#gpu-mode']) $(selector).onchange = safeRender;
 $('#image-input').onchange = async event => {
   const file = event.target.files[0];
   if (!file) return;
   if (file.size > 20 * 1024 * 1024) { toast('Hãy chọn ảnh dưới 20 MB.'); return; }
-  const url = URL.createObjectURL(file), image = $('#custom-image');
+  const url = URL.createObjectURL(file);
   const previous = objectURL;
   try { const probe = new Image(); probe.src = url; await probe.decode(); }
   catch { URL.revokeObjectURL(url); toast('Không đọc được ảnh này. Hãy dùng JPEG/PNG/WebP.'); return; }
-  image.src = url; objectURL = url; if (previous) URL.revokeObjectURL(previous);
-  image.hidden = false; $('#remove-image').hidden = false;
-  image.onload = safeRender; safeRender();
+  objectURL = url; if (previous) URL.revokeObjectURL(previous);
+  $('#remove-image').hidden = false; renderFields();
 };
 $('#remove-image').onclick = () => {
   if (objectURL) URL.revokeObjectURL(objectURL); objectURL = null;
-  $('#custom-image').hidden = true; $('#custom-image').removeAttribute('src'); $('#remove-image').hidden = true; $('#image-input').value = ''; safeRender();
+  $('#remove-image').hidden = true; $('#image-input').value = ''; renderFields();
 };
 $('#apply-url').onclick = () => {
   try { updateQR(); storedSet('anamorphic:server-url', $('#server-url').value); toast('Đã cập nhật QR cho địa chỉ mới.'); }
@@ -406,6 +513,8 @@ $('#copy-link').onclick = async () => {
 };
 
 async function boot() {
+  try { const saved = storedGet(contentKey); if (saved) { contentConfig = validateContent(JSON.parse(saved)); restoredContent = true; } } catch { toast('Cấu hình nội dung cũ không hợp lệ; đang dùng mẫu.'); }
+  activateContent(contentConfig);
   renderMarkers();
   try {
     config = await api('/api/config');
@@ -425,7 +534,6 @@ async function boot() {
       calibration = { viewport: record.viewport, P: record.P, Q: record.Q, imageSize: record.imageSize };
       for (const prop of ['scale', 'width', 'height', 'font']) if (Number.isFinite(record[prop])) tuning[prop] = record[prop];
       if (record.offset) tuning.offset = record.offset;
-      if (typeof record.text === 'string') $('#text-input').value = record.text;
       showContent();
     }
   } catch { toast('Bản hiệu chuẩn cũ không hợp lệ. Hãy chụp lại.'); }
@@ -437,3 +545,5 @@ async function boot() {
   pair();
 }
 boot();
+// Expose the footer height so floating panels never cover footer actions.
+new ResizeObserver(([entry]) => document.documentElement.style.setProperty('--footer-h', `${Math.ceil(entry.target.getBoundingClientRect().height)}px`)).observe($('.display-footer'));

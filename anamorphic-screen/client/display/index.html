@@ -12,13 +12,7 @@
   <main id="stage" aria-label="Màn hình hiệu chuẩn và nội dung">
     <div id="markers" aria-label="Bốn marker hiệu chuẩn"></div>
     <div id="warp" hidden>
-      <article id="content">
-        <div class="poster-top"><span>THỬ NGHIỆM THỊ GIÁC / 001</span><span>ANAMORPHIC SCREEN ↗</span></div>
-        <div class="poster-layout"><div class="poster-copy"><div class="poster-kicker">MỘT ĐIỂM NHÌN. MỘT PHỐI CẢNH.</div><h1 id="poster-text">Đổi góc nhìn.<br>Giữ nguyên<br>hình dáng.</h1><p id="poster-description">Một màn hình phẳng. Một góc nhìn mới.<br>Để phối cảnh làm phần còn lại.</p></div><div id="poster-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><span>↗</span><small>45°</small></div></div>
-        <img id="custom-image" alt="Ảnh tĩnh do bạn chọn" hidden>
-        <div class="poster-bottom"><span>GÓC NHÌN THAY ĐỔI — HÌNH DÁNG VẸN NGUYÊN</span><span>01 — ∞</span></div>
-        <div id="debug-grid" aria-hidden="true" hidden></div>
-      </article>
+      <article id="content"></article>
       <canvas id="raster" hidden aria-label="Nội dung render ở độ phân giải gấp đôi"></canvas>
     </div>
     <svg id="debug-outline" aria-hidden="true" hidden><polygon fill="none" stroke="#ff553d" stroke-width="2" stroke-dasharray="8 6"/></svg>
@@ -42,7 +36,7 @@
     <details class="network-settings"><summary>Địa chỉ kết nối điện thoại</summary><div class="network-fields"><label><span>URL server mà điện thoại truy cập được</span><input id="server-url" type="url" placeholder="http://192.168.1.10:3000"></label><button id="apply-url">Đổi QR</button></div><p id="network-hint">Trong Codespaces, dùng URL cổng được chuyển tiếp mà điện thoại có thể mở.</p><div id="lan-options"></div></details>
   </section>
   <p id="live-summary" class="sr-only" role="status" aria-live="polite"></p><div id="calibration-error" class="notice error" role="alert" hidden></div>
-  <footer class="display-footer chrome"><span id="footer-note">4 marker · 1 điểm nhìn · Không cần cài ứng dụng</span><div class="footer-actions"><button id="shortcut-help" aria-label="Trợ giúp phím tắt" aria-haspopup="dialog">?</button><button id="preview">Xem nội dung mẫu ↗</button><button id="start-live">Hiệu chỉnh trực tiếp</button><button id="pair-button" hidden>Ghép đôi / QR</button><button id="fullscreen" class="primary">⛶ Toàn màn hình</button><button id="controls-toggle" aria-controls="controls" aria-expanded="false" hidden>Tùy chỉnh <kbd>C</kbd></button></div></footer>
+  <footer class="display-footer chrome"><span id="footer-note">4 marker · 1 điểm nhìn · Không cần cài ứng dụng</span><div class="footer-actions"><span id="content-status" class="pill" role="status">Nội dung: Đang tải</span><button id="content-toggle" aria-controls="content-controls" aria-expanded="false">Nội dung</button><button id="shortcut-help" aria-label="Trợ giúp phím tắt" aria-haspopup="dialog">?</button><button id="preview">Xem nội dung mẫu ↗</button><button id="start-live">Hiệu chỉnh trực tiếp</button><button id="pair-button" hidden>Ghép đôi / QR</button><button id="fullscreen" class="primary">⛶ Toàn màn hình</button><button id="controls-toggle" aria-controls="controls" aria-expanded="false" hidden>Tùy chỉnh <kbd>C</kbd></button></div></footer>
   <aside id="controls" class="controls chrome" aria-label="Tùy chỉnh nội dung và phép bù" hidden>
     <div class="controls-heading"><div><span class="eyebrow">KHÔNG GIAN HIỂN THỊ</span><h2>Tùy chỉnh góc nhìn</h2></div><button id="controls-close" class="icon-button" aria-label="Đóng tùy chỉnh">×</button></div>
     <div class="control-row"><button id="warp-toggle" aria-pressed="true">Bù góc: Bật <kbd>W</kbd></button><button id="recalibrate">Hiệu chuẩn lại</button></div>
@@ -51,9 +45,7 @@
     <div class="two-cols"><label><span>Dịch ngang <output id="offset-x-value">0%</output></span><input id="offset-x" type="range" min="-1" max="1" step="0.01" value="0"></label><label><span>Dịch dọc <output id="offset-y-value">0%</output></span><input id="offset-y" type="range" min="-1" max="1" step="0.01" value="0"></label></div>
     <button id="reset-position" class="text-button">Đặt lại vị trí và thu phóng</button>
     <div id="compression-warning" class="notice" hidden>Nén là tỉ lệ hai hướng co giãn chính (σmin/σmax) của Jacobian, lấy mức thấp nhất ở 4 góc và tâm. Dưới 35% nghĩa là nén lệch hướng mạnh: tăng cỡ chữ hoặc chọn góc ít nghiêng hơn.</div>
-    <hr><label><span>Nội dung chữ</span><textarea id="text-input" rows="3" maxlength="2000">Đổi góc nhìn.
-Giữ nguyên
-hình dáng.</textarea></label>
+    <hr>
     <div class="two-cols"><label><span>Rộng (px)</span><input id="content-width" type="number" min="100" max="4000" step="10" value="960"></label><label><span>Cao (px)</span><input id="content-height" type="number" min="100" max="4000" step="10" value="600"></label></div>
     <label class="range-label"><span>Cỡ chữ chính <output id="font-value">76 px</output></span><input id="font-size" type="range" min="24" max="140" value="76"></label>
     <div class="control-row"><button id="image-picker" class="image-button" type="button">＋ Chọn ảnh tĩnh</button><input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/avif" hidden><button id="remove-image" hidden>Bỏ ảnh</button></div>
@@ -62,6 +54,7 @@ hình dáng.</textarea></label>
     <label class="check-label"><input id="gpu-mode" type="checkbox"> Thử tăng tốc lớp hiển thị (will-change)</label>
     <p class="control-help">Rê chuột để hiện điều khiển · <kbd>C</kbd> tùy chỉnh · <kbd>W</kbd> so sánh · <kbd>F</kbd> toàn màn hình · <kbd>D</kbd> lưới. Đổi vị trí mắt cần chụp lại.</p>
   </aside>
+  <aside id="content-controls" class="controls chrome" aria-label="Cấu hình nguồn nội dung" hidden><div class="controls-heading"><h2>Nội dung</h2><button id="content-close" class="icon-button" aria-label="Đóng nội dung">×</button></div><div id="content-panel" class="content-panel"></div><button id="new-content-session" hidden>Tạo phiên mới để lấy quyền sửa nội dung và ghép lại điện thoại</button></aside>
 <dialog id="shortcut-dialog" aria-labelledby="shortcut-title"><h2 id="shortcut-title">Phím tắt</h2><p>C: Tùy chỉnh · W: Bật/tắt bù góc · D: Lưới kiểm tra · F: Toàn màn hình · ?: Trợ giúp · Esc: Đóng.</p><button id="shortcut-close" autofocus>Đóng</button></dialog>
 </body>
 </html>

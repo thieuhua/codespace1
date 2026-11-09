@@ -4,6 +4,9 @@ import { markerStability } from '/shared/temporal-markers.js';
 import { SessionConnection } from '/assets/connection.js';
 import { Camera } from './camera.js';
 import { LensUI } from './lens-ui.js';
+import { ContentPanel } from '/assets/content-panel.js';
+import { isServerSource } from '/shared/content/schema.js';
+import { create as createContent } from '/display/content/runtime.js';
 
 const sessionId = location.pathname.split('/').filter(Boolean)[1] || null;
 const base = `/api/session/${encodeURIComponent(sessionId)}`;
@@ -15,6 +18,29 @@ let lensChanging = false, cameraDirty = false;
 let serverFrame, stable = false, displayApplied, announcementAt = 0, recoveringPhoto = false;
 const canvas = $('#photo-canvas'), context = canvas.getContext('2d');
 const labels = ['1 · trên trái', '2 · trên phải', '3 · dưới phải', '4 · dưới trái'];
+const tokenKey = `anamorphic:controller:${sessionId}`;
+let controllerToken = new URLSearchParams(location.hash.slice(1)).get('k') || '';
+try {
+  if (controllerToken) { sessionStorage.setItem(tokenKey, controllerToken); history.replaceState(null, '', location.pathname + location.search); }
+  else controllerToken = sessionStorage.getItem(tokenKey) || '';
+} catch { /* The fragment or this tab's memory remains sufficient. */ }
+const contentPanel = new ContentPanel($('#content-panel'), {
+  editable: () => !!controllerToken,
+  apply: value => link.command('content_config', { contentConfig: value, controllerToken }),
+  preview: async value => {
+    if (isServerSource(value)) return (await api(`${base}/content/preview`, { ...json(value), headers: { 'Content-Type': 'application/json', 'X-Controller-Token': controllerToken } })).fields;
+    const instance = createContent(value);
+    try { return await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { instance.stop(); reject(new Error('Chưa nhận dữ liệu sau 8 giây.')); }, 8000);
+      instance.start({ onData: fields => { clearTimeout(timeout); resolve(fields); }, onStatus: state => { if (state.state === 'error') { clearTimeout(timeout); reject(new Error(state.reason)); } } });
+    }); } finally { instance.stop(); }
+  }
+});
+function contentState(data) {
+  if (data.contentConfig) contentPanel.load(data.contentConfig);
+  const state = data.type === 'content_status' ? data : data.contentStatus;
+  if (state) $('#content-status').textContent = `${({ loading: 'Đang tải', ready: 'Sẵn sàng', stale: 'Dữ liệu cũ', error: 'Lỗi nguồn' })[state.state]}${state.reason ? ` · ${state.reason}` : ''}`;
+}
 
 function status(text = '', error = false) {
   $('#status').hidden = !text;
@@ -34,7 +60,7 @@ function setBusy(value) {
   for (const id of ['confirm', 'manual', 'undo', 'retake']) $(`#${id}`).disabled = value;
   if (!value) updateReview();
 }
-function expired() { setBusy(false); show('expired'); $('#session-badge').textContent = 'PHIÊN ĐÃ HẾT HẠN'; }
+function expired() { setBusy(false); show('expired'); $('#phone-content').hidden = true; $('#session-badge').textContent = 'PHIÊN ĐÃ HẾT HẠN'; }
 
 function draw() {
   if (!image) return;
@@ -335,6 +361,8 @@ async function sendFrame(result) {
 }
 
 function receive(data) {
+  contentState(data);
+  if (data.type.startsWith('content_')) return;
   if (['connected', 'snapshot', 'live_started', 'capture_started'].includes(data.type)) {
     const changed = sessionState?.revision !== data.revision;
     sessionState = data;
@@ -434,6 +462,7 @@ async function boot() {
     const session = await api(base);
     try { localStorage.setItem(sessionKey, sessionId); } catch { /* A direct capture URL still survives refresh. */ }
     sessionState = session;
+    contentState(session); $('#phone-content').hidden = false;
     $('#session-badge').textContent = `PHIÊN ${sessionId.slice(0, 8).toUpperCase()}`;
     status();
     if (session.photo) await loadPhoto(session.photo, `${base}/photo?photoId=${session.photo.photoId}`);

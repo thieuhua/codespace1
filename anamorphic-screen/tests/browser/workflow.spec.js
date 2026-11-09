@@ -7,7 +7,7 @@ async function displaySession(page) {
   await expect(page.locator('#qr')).toBeVisible();
   await expect(page.locator('#connection-text')).toHaveText('Chưa có điện thoại');
   await page.locator('.marker img').evaluateAll(images => Promise.all(images.map(img => img.decode())));
-  return page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
+  return page.locator('#qr').evaluate(img => img.dataset.sessionId);
 }
 async function openPhone(browser, id, testInfo) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
@@ -37,8 +37,11 @@ test('camera photo → real detection → desktop matrix3d → review → saved 
   await phone.screenshot({ path: testInfo.outputPath('phone-review.png') });
   await phone.locator('#confirm').click(); await expect(phone.locator('#done-section')).toBeVisible();
   await page.keyboard.press('c'); await expect(page.locator('#controls')).toBeVisible();
+  await page.locator('#content-toggle').click();
   await page.locator('#text-input').fill('Phối cảnh đúng\nTừ góc nhìn của tôi');
+  await page.locator('#content-panel').getByRole('button', { name: 'Áp dụng', exact: true }).click();
   await expect(page.locator('#poster-text')).toHaveText('Phối cảnh đúng\nTừ góc nhìn của tôi');
+  await page.locator('#content-close').click(); await page.locator('#controls-toggle').click();
   await page.locator('#content-width').fill('1000'); await page.locator('#content-width').press('Tab');
   await expect(page.locator('#content')).toHaveCSS('width', '1000px');
   await page.locator('#debug').check(); await expect(page.locator('#debug-outline')).toBeVisible();
@@ -55,7 +58,7 @@ test('camera photo → real detection → desktop matrix3d → review → saved 
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator('body')).toHaveAttribute('data-state', 'live');
   await expect(page.locator('#live-warning')).toContainText('Viewport');
-  await expect(page.locator('#qr')).toHaveAttribute('src', new RegExp(id));
+  await expect(page.locator('#qr')).toHaveAttribute('data-session-id', id);
   expect(errors).toEqual([]);
   await context.close();
 });
@@ -166,8 +169,8 @@ test('DPR changes and exiting fullscreen restart live in the same paired session
   await devtools.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false });
   await expect.poll(() => page.evaluate(() => devicePixelRatio)).toBe(2);
   await expect(page.locator('body')).toHaveAttribute('data-state', 'live');
-  await expect(page.locator('#qr')).toHaveAttribute('src', new RegExp(firstId));
-  const secondId = await page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
+  await expect(page.locator('#qr')).toHaveAttribute('data-session-id', firstId);
+  const secondId = await page.locator('#qr').evaluate(img => img.dataset.sessionId);
   const session = await (await page.request.get(`/api/session/${secondId}`)).json();
   expect(session.viewport.dpr).toBe(2);
   await page.locator('#fullscreen').click();

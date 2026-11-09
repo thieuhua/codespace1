@@ -2,7 +2,7 @@
 
 Ứng dụng web hiển thị chữ hoặc hình ảnh đơn giản trên màn hình máy tính, biến dạng trước nội dung để người nhìn từ một góc nghiêng cố định thấy chữ thẳng và hình chữ nhật đúng dáng như khi nhìn chính diện.
 
-**Trạng thái:** đã có ghép đôi bền vững, camera live nhớ marker qua nhiều khung, chốt theo từng marker và phương án chụp ảnh/chạm tay. Chạy bằng Node.js và JavaScript thuần. Các tiêu chí quang học trên màn hình/điện thoại thật vẫn cần kiểm chứng.
+**Trạng thái:** đã có ghép đôi bền vững, camera live nhớ marker qua nhiều khung, chốt theo từng marker, phương án chụp ảnh/chạm tay và nội dung qua adapter. Chạy bằng Node.js và JavaScript thuần. Các tiêu chí quang học trên màn hình/điện thoại thật vẫn cần kiểm chứng.
 
 ## Luồng sử dụng
 
@@ -26,7 +26,7 @@ Góc nhìn được khóa sau lần chụp. Đổi chỗ ngồi hoặc thay đ�
 
 ## Tính năng đã triển khai
 
-- Một màn hình phẳng, một điểm nhìn cố định; nội dung là chữ và ảnh tĩnh đơn giản.
+- Một màn hình phẳng, một điểm nhìn cố định; nội dung gồm trường chữ, ảnh URL và các nguồn cập nhật qua adapter.
 - Trang máy tính hiển thị marker, QR, nội dung đã biến dạng và điều khiển hiệu chuẩn.
 - Trang điện thoại chụp/gửi ảnh, xem kết quả nhận diện và hỗ trợ chọn marker thủ công.
 - Server quản lý phiên và chuyển tiếp điểm qua WebSocket; chỉ giải mã/dò ảnh khi dùng luồng upload dự phòng.
@@ -67,7 +67,50 @@ npm run dev
 
 **Chạy trong Codespaces:** server tự dựng `https://${CODESPACE_NAME}-${PORT}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}` cho QR và log khởi động. `PUBLIC_URL` ghi đè giá trị tự động. Chuyển tiếp cổng 3000, đặt Public nếu muốn điện thoại truy cập không cần đăng nhập GitHub, rồi mở **cùng URL HTTPS đó trên máy tính lẫn điện thoại**. Với Codespace hiện tại: `https://supreme-acorn-69g4wgg9qx75hrj44-3000.app.github.dev`. Không dùng IP `172.x` của container để ghép điện thoại. Không cần cấu hình `PUBLIC_URL` khi hai biến Codespaces đã có.
 
-**Điều khiển:** nút **?** trên thanh công cụ hoặc phím `?` mở trợ giúp; rê chuột để hiện thanh công cụ; `C` mở tùy chỉnh, `W` bật/tắt bù, `D` hiện lưới và đường bao, `F` bật/tắt fullscreen. **Xem nội dung mẫu** cho phép thử các điều khiển trước khi hiệu chuẩn. Ảnh nội dung chọn trên máy tính chỉ được đọc cục bộ, không gửi lên server và không lưu sau khi tải lại trang. Có thể sửa HTML trong phần tử `#content` để thay mẫu; giữ các phần tử có ID mà `app.js` sử dụng.
+**Điều khiển:** nút **?** trên thanh công cụ hoặc phím `?` mở trợ giúp; rê chuột để hiện thanh công cụ; `C` mở tùy chỉnh, `W` bật/tắt bù, `D` hiện lưới và đường bao, `F` bật/tắt fullscreen. **Xem nội dung mẫu** cho phép thử các điều khiển trước khi hiệu chuẩn. Đổi nội dung bằng bảng **Nội dung**. Ảnh chọn bằng **Chọn ảnh tĩnh** chỉ dùng với nguồn nhập tay, được đọc cục bộ, không gửi lên server và không lưu sau khi tải lại trang.
+
+## Nguồn nội dung và đồng bộ
+
+Trên máy tính chọn **Nội dung → nguồn → cấu hình → Thử → Ánh xạ trường → mẫu hiển thị → Áp dụng**. **Thử** chỉ xem dữ liệu, không đổi màn hình. Nút **Dùng nội dung mẫu** điền lại cấu hình nhập tay; bấm **Áp dụng** để dùng. Điện thoại có mục **Nội dung** thu gọn sau phần hiệu chuẩn, dùng cùng schema/biểu mẫu. Đổi trường hoặc nguồn không đổi marker, revision live, phép bù hay bản lưu hiệu chuẩn.
+
+| Adapter | Cấu hình / giới hạn |
+| --- | --- |
+| `manual` | Nhập trường chữ/URL ảnh; giữ bộ chọn ảnh cục bộ trên máy tính. |
+| `json` | URL JSON công khai có CORS; chu kỳ ≥ 5 giây. Bật **Lấy qua server** nếu cần proxy hoặc khóa có tên; khi đó chu kỳ ≥ 15 giây. |
+| `websocket` | URL `ws:`/`wss:` công khai, mỗi thông điệp là JSON ≤ 2 MiB; tự nối lại. Trang HTTPS cần `wss:`. |
+| `clock` | Đồng hồ/ngày trên thiết bị hiển thị, không cần mạng. |
+| `rss` | RSS 2.0 / Atom qua server, chọn mục từ 0, chu kỳ ≥ 15 giây. |
+| `html` | Trích xuất HTML tĩnh qua server, chu kỳ ≥ 15 giây; không chạy JavaScript nguồn. |
+| `iframe` | Nhúng tài liệu trong iframe sandbox, không canvas 2×. Website có thể chặn bằng CSP/X-Frame-Options; không thể trích xuất hay xác nhận đã tải từ tài liệu khác origin. |
+
+Ba mẫu là **Áp phích** (`title`, `description`, `kicker`, `footer`, `image`), **Danh sách trường** (nhãn/giá trị theo mapping), **Chữ lớn** (`title` hoặc trường đầu có dữ liệu). Loại trường `text` tối đa 2.000 ký tự, `multiline` 10.000, `imageUrl` 2.048; tối đa 24 trường. Có thể đặt `maxLength` nhỏ hơn. Chữ luôn đi qua `textContent`, ảnh chỉ nhận HTTP(S) và tắt referrer; ảnh từ xa cần CORS để dùng trên canvas. Nội dung cập nhật dồn được gộp, lỗi giữ dữ liệu hợp lệ gần nhất; thanh công cụ báo đang tải / sẵn sàng / dữ liệu cũ / lỗi nguồn. Canvas 2× đợi font/ảnh có thời hạn, giới hạn khoảng 1–2 lượt/giây, cửa sổ chờ cố định không bị feed nhanh đẩy lùi; giữ canvas cũ đến khi canvas mới sẵn sàng.
+
+Ánh xạ là JSON, không thực thi mã. JSON dùng JSON Pointer (`/items/0/title`, `~1` cho `/`, `~0` cho `~`); RSS/Atom dùng tên phần tử trong item/entry (`title`, `pubDate`, `summary`, `content:encoded`; không phân biệt hoa thường). HTML hỗ trợ tag, `#id`, `.class`, `[name=value]`, hậu duệ và `>`; lấy phần tử khớp đầu tiên, không hỗ trợ pseudo-selector/comma. Thuộc tính trích xuất: `src`, `href`, `content`, `datetime`, `title`. Bộ định dạng chỉ có `trim`, `upper`, `date` (UTC, định dạng Việt Nam), `number`. Ví dụ JSON:
+
+```json
+{
+  "title": { "source": "/items/0/title", "type": "multiline", "formatters": ["trim"] },
+  "image": { "source": "/items/0/image", "type": "imageUrl" }
+}
+```
+
+Server giữ `{version, adapterId, config, templateId, fieldMap, contentRevision}` trong RAM cho từng phiên; máy tính lưu riêng tại `anamorphic:content:v1`. Hiệu chuẩn tiếp tục dùng khóa riêng theo viewport. Cấu hình có revision để từ chối ghi đè bản đã đổi trên thiết bị khác. Nguồn server có đúng một poller mỗi phiên, dừng khi phiên bị xóa/hết hạn; snapshot/WS khôi phục cấu hình và dữ liệu gần nhất.
+
+Tạo phiên trả `controllerToken` cho máy tính. QR/đường dẫn chuyển quyền sửa qua fragment `#k=…`; fragment không nằm trong URL yêu cầu HTTP, QR được tạo bằng POST để khóa không vào query log. Hai thiết bị chỉ nhớ quyền trong `sessionStorage` của tab, không trong localStorage; điện thoại xóa fragment khỏi thanh địa chỉ sau khi nhận. Ai có đường dẫn này có quyền đổi nội dung. Nếu đóng tab làm mất quyền trong khi phiên còn được nhớ, bảng Nội dung trên máy tính có nút tạo phiên mới để lấy quyền và ghép lại điện thoại.
+
+Khóa API/header nguồn nhập tại **JSON/RSS/HTML → Nhập khóa nguồn vào RAM server** trên tab máy tính tạo phiên. Khóa có tên, gắn với origin; cấu hình chỉ lưu `secretRef`, không lưu giá trị. JSON dùng khóa cần bật **Lấy qua server**. Không nhập khóa vào URL hay trường nội dung. Header cho phép: `Authorization`, `X-Api-Key`, `Api-Key`; server không gửi khóa sang origin chuyển hướng khác. Giá trị khóa không nằm trong localStorage, QR hay snapshot, mất khi phiên/server kết thúc.
+
+### Proxy và cấu hình mạng
+
+Proxy chỉ nhận HTTP(S), mặc định cổng 80/443; DNS được kiểm tra toàn bộ địa chỉ, chặn loopback, mạng riêng, link-local, CGNAT, multicast, metadata, IPv6 ULA/`::1` và các dải không công khai. Mỗi hop chuyển hướng (tối đa 3) được kiểm tra lại và request ghim IP đã phân giải bằng `lookup` để chống DNS rebinding. Tổng thời gian ≤ 8 giây, body ≤ 2 MiB, kiểm tra Content-Type theo adapter; không nhận body nén. XML không cho DOCTYPE/entity, parser giới hạn độ sâu/số phần tử. Preview giới hạn 10 lượt/phút/phiên, cấu hình 20, lưu khóa 5.
+
+`CONTENT_ALLOW_HOSTS` là ngoại lệ **tên host chính xác**, phân tách dấu phẩy, cho nguồn nội bộ bạn chủ động tin cậy; không wildcard. Ngoại lệ bỏ chặn dải IP cho host đó, vẫn kiểm tra giao thức/cổng/chuyển hướng/thời gian/kích thước. `CONTENT_ALLOW_PORTS` thay danh sách cổng proxy được phép. Không cấu hình ngoại lệ rộng cho nguồn không tin cậy. Các kiểm tra DNS/IP này áp dụng cho proxy server; nguồn JSON/WebSocket trực tiếp và ảnh/iframe chạy trong trình duyệt, theo CORS/chính sách của trình duyệt.
+
+```bash
+CONTENT_ALLOW_HOSTS=bangtin.lan CONTENT_ALLOW_PORTS=80,443,8080 npm start
+```
+
+API nội dung: `GET/PUT /api/session/:id/content/config`, `POST /api/session/:id/content/preview`, `PUT /api/session/:id/content/secrets`. Ghi/preview cần header `X-Controller-Token`; lưu khóa cần thêm `X-Content-Display-Key` chỉ trả lúc tạo phiên. WebSocket bổ sung `content_config` (lệnh có token và `contentConfig`), `content_data` (`fields`, `contentRevision`) và `content_status` (`state`, `reason`, `contentRevision`). Máy tính báo trạng thái nguồn chạy tại trình duyệt về server để điện thoại theo dõi.
 
 ```bash
 npm test                         # Toán học, ảnh tổng hợp và HTTP/WebSocket thật
@@ -116,6 +159,8 @@ Server xác thực và gom tọa độ theo ID, chuyển tứ giác mới nhất
 
 - [Đặc tả chi tiết](<Đặc tả Trình hiển thị bù góc nhìn trên trình duyệt.md>): thiết kế toán học, giao thức và tiêu chí nghiệm thu.
 - [client/display/index.html](client/display/index.html), [app.js](client/display/app.js), [style.css](client/display/style.css): trang máy tính, nội dung và điều khiển.
+- [client/display/content/](client/display/content/README.md): runtime, adapter, renderer và mẫu; [client/common/content-panel.js](client/common/content-panel.js): biểu mẫu dùng chung máy tính/điện thoại.
+- [shared/content/](shared/content/README.md): schema, trường mẫu, JSON Pointer/selector và formatter dùng chung; [server/content/](server/content/README.md): proxy an toàn, parser và poller phiên.
 - [client/capture/](client/capture/): trang điện thoại; [camera.js](client/capture/camera.js) quản lý camera/backpressure, [vision-worker.js](client/capture/vision-worker.js) dò marker/QR. [client/common/connection.js](client/common/connection.js) nối lại phiên và xác nhận lệnh dùng chung.
 - [client/capture/track-controls.js](client/capture/track-controls.js), [lens-ui.js](client/capture/lens-ui.js): điều khiển camera/zoom/focus theo capabilities; [shared/camera-settings.js](shared/camera-settings.js): dải/bước zoom, chọn camera và ánh xạ điểm lấy nét.
 - [server/index.js](server/index.js): HTTP/WebSocket và hàng đợi ảnh; [protocol.js](server/protocol.js): lệnh live; [public-url.js](server/public-url.js): URL Codespaces; [sessions.js](server/sessions.js): vòng đời phiên.

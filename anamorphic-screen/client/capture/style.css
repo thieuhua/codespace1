@@ -39,3 +39,5 @@ body.camera-active #camera-section .intro{font-size:12px;line-height:1.6;margin-
 button,.text-button,.zoom-presets button,.focus-row button,input[type=range],summary{min-height:40px;min-width:40px}
 .capture-tips{flex-wrap:wrap}.progress{flex-wrap:wrap;white-space:normal}.phone-metrics{gap:8px}
 header .brand{min-height:40px}
+/* Nội dung dùng chung biểu mẫu với trang máy tính. */
+.content-panel{margin:24px 0;padding:16px;border:1px solid #dfe2d8;border-radius:12px}.content-panel summary{cursor:pointer;font-weight:600}.content-panel #content-panel,.content-inputs{display:flex;flex-direction:column;gap:12px}.content-panel label{display:block}.content-panel label>span{display:block;font-size:12px;margin:5px 0}.content-panel textarea{resize:vertical;font-size:12px}.content-panel p{font-size:12px;overflow-wrap:anywhere}.content-message{white-space:pre-wrap;max-height:180px;overflow:auto}.content-actions{display:flex;gap:8px}.content-panel input[type=checkbox]{width:auto}

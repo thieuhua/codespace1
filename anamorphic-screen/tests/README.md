@@ -20,6 +20,8 @@ Linux thiếu thư viện trình duyệt: `npx playwright install-deps chromium`
 - `protocol.test.js`: không mở cổng; tuổi từng ID, tái hiện khung trống sau 60 giây, cửa sổ tuổi tùy chỉnh, ACK chứa đúng median/số mẫu/dao động, kiểm tra chân trời live/chốt, chuyển tiếp `display_applied`, `sync` và trạng thái ghép đôi.
 - `temporal-markers.test.js`: tuổi không đổi bởi khung trống, ngưỡng ổn định, dao động và gom bốn ID từ các khung riêng, giữ qua khung trống, thay đúng tọa độ vừa thấy, không đếm điểm nhớ thành mẫu mới, median theo ID và xóa khi ngữ cảnh camera/viewport đổi.
 - `camera-settings.test.js`: chọn camera sau thường, zoom theo dải/bước thiết bị, bảo toàn zoom khi autofocus, gộp/tuần tự hóa yêu cầu, lỗi/cancel và tọa độ chạm lấy nét theo sensor.
+- `content-*.test.js`: schema/mapping/formatter, IP/DNS/redirect và deadline qua resolver/transport giả; fixture RSS/Atom/HTML trong `fixtures/`; vòng đời adapter, burst, hủy, giữ dữ liệu cũ, DOM không phân tích XSS, chờ font/ảnh, quyền HTTP/WS nội dung, khóa API có origin, poller và revision hiệu chuẩn không đổi. Bộ này không dùng mạng hay mở cổng.
+- `browser/content.spec.js`: nội dung nhập tay/JSON/đồng hồ/iframe, XSS, điện thoại có token từ fragment, lưu/đồng bộ, giữ bản hiệu chuẩn và canvas 2× có throttle trong feed liên tục. Nguồn bên ngoài được chặn bằng route/factory giả; API/WS phiên và DOM/canvas chạy thật.
 - `browser/workflow.spec.js`: hai trang desktop/điện thoại, upload ảnh chụp trang có marker thật, overlay, thao tác chạm/hoàn tác, xác nhận, điều khiển, canvas 2×, lưu/khôi phục, resize/đổi DPR/thoát fullscreen và mất mạng/kết nối lại.
 - `browser/live.spec.js`: video camera Y4M giả lập → `getUserMedia` thật → worker ArUco thật → WebSocket → live/chốt/hiệu chỉnh lại, không upload ảnh; kiểm tra một lượt đang xử lý, refresh cả hai thiết bị, nối lại mạng, jsQR thật khi không có BarcodeDetector và giữ warp khi chân trời cắt viewport. `fake-camera.js` chỉ thay phần cứng camera bằng video sinh từ ảnh tổng hợp, không giả đầu ra detector.
 - Có video mỗi khung chỉ chứa **một marker**, rồi một đoạn hoàn toàn trống: phải gom đủ 4, cập nhật màn hình và chốt được khi từng ID còn mới/ổn định dù chưa từng dò đủ bốn ID cùng khung. Kiểm thử cũng đối chiếu tọa độ CSS với tứ giác mới nhất sau khi chỉ cập nhật một ID, để phát hiện việc vẫn render khung cũ/EMA.
@@ -31,7 +33,7 @@ Các test trình duyệt tự động dùng **Chromium**, điện thoại là vi
 Nếu sandbox chặn TCP bằng `listen EPERM`, báo lỗi môi trường ở `live.test.js`/`server.test.js`, không bỏ kiểm tra hoặc sửa server để lách. Có thể chạy riêng bộ không mở cổng:
 
 ```bash
-node --test tests/math.test.js tests/detection.test.js tests/camera-settings.test.js tests/temporal-markers.test.js tests/protocol.test.js
+node --test tests/content-*.test.js tests/math.test.js tests/detection.test.js tests/camera-settings.test.js tests/temporal-markers.test.js tests/protocol.test.js
 ```
 
 Browser spec cần mở được cổng và khởi chạy được Chromium đã cài; nếu không, ghi rõ chưa chạy, không cài thêm trong phiên kiểm tra.

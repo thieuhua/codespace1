@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel><title>Bảng tin</title>
+    <item><title>Tin &amp; ảnh &#x1F4F7;</title><description><![CDATA[<p>Đoạn <b>nội dung</b></p><script>alert(1)</script>]]></description><pubDate>Mon, 09 Nov 2026 08:30:00 GMT</pubDate><link>https://example.com/tin</link><enclosure url="/cover.png" type="image/png"/><content:encoded><![CDATA[<div>Nội dung đầy đủ</div>]]></content:encoded></item>
+    <item><title>Mục thứ hai</title><description>Hai &lt;b&gt;chữ&lt;/b&gt;</description></item>
+  </channel>
+</rss>

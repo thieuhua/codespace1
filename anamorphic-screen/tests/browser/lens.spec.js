@@ -35,7 +35,7 @@ async function installLensHardware(page, unsupported = false) {
 
 test('camera choice, actual zoom, autofocus/tap/manual focus and sample reset work together without changing pairing', async ({ page }, testInfo) => {
   await page.goto('/'); await expect(page.locator('#qr')).toBeVisible();
-  const id = await page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
+  const id = await page.locator('#qr').evaluate(img => img.dataset.sessionId);
   const fixture = await syntheticPhoto(), browser = await cameraBrowser(fixture.buffer, testInfo.outputPath('lens.y4m'));
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['camera'] });
   try {
@@ -87,7 +87,7 @@ test('camera choice, actual zoom, autofocus/tap/manual focus and sample reset wo
 
 test('unsupported lens APIs are explained without fake zoom/focus controls or breaking detection', async ({ page }, testInfo) => {
   await page.goto('/'); await expect(page.locator('#qr')).toBeVisible();
-  const id = await page.locator('#qr').evaluate(img => new URL(img.src).pathname.split('/')[3]);
+  const id = await page.locator('#qr').evaluate(img => img.dataset.sessionId);
   const fixture = await syntheticPhoto(), browser = await cameraBrowser(fixture.buffer, testInfo.outputPath('fixed-lens.y4m'));
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['camera'] });
   try {

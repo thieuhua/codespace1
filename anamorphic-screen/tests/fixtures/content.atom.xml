@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Nguồn Atom</title>
+  <entry><title>Ngày mới</title><summary type="html">&lt;p&gt;Nắng &amp;amp; gió&lt;/p&gt;</summary><updated>2026-11-09T08:30:00Z</updated><link rel="self" href="/api/entry"/><link rel="alternate" href="/bai-viet"/><link rel="enclosure" href="/skip"/><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="/atom.png"/></entry>
+</feed>
