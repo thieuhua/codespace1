@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Quản lý HTTPS subdomain trỏ về dịch vụ web trên laptop (không cần sudo).
+#   lap-web list
+#   lap-web add <tên> <cổng>     # https://<tên>.xuanthieu.site -> laptop:<cổng>
+#   lap-web rm <tên>
+# nginx tự reload qua laptop-apps-reload.path khi apps.map thay đổi.
+set -euo pipefail
+
+MAP=/etc/nginx/laptop-apps/apps.map
+DOMAIN=xuanthieu.site
+RESERVED="www file laptop mcp blindnav simulator"
+
+die() { echo "lỗi: $*" >&2; exit 1; }
+
+check_name() {
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || die "tên chỉ gồm a-z, 0-9, '-' (tối đa 40 ký tự)"
+  for r in $RESERVED; do [[ "$1" == "$r" ]] && die "'$1' đang dùng cho việc khác"; done
+  if grep -rqsE "server_name[^;]*[[:space:]]$1\.$DOMAIN[[:space:];]" \
+       /etc/nginx/conf.d /etc/nginx/sites-enabled --exclude=laptop-apps; then
+    die "'$1.$DOMAIN' đã có site nginx riêng"
+  fi
+}
+
+without() { grep -v "^$1\.$DOMAIN " "$MAP" || true; }
+
+write_map() {  # ghi tại chỗ (file thuộc user này); systemd path unit sẽ reload nginx
+  printf '%s' "$1" | sed '/^$/d' > "$MAP"
+}
+
+wait_reload() {
+  sleep 2
+  systemctl is-failed --quiet laptop-apps-reload.service \
+    && die "nginx từ chối cấu hình mới; xem: journalctl -u laptop-apps-reload" || true
+}
+
+case "${1:-list}" in
+  list)
+    [[ -s $MAP ]] || { echo "(chưa có subdomain nào)"; exit 0; }
+    awk '{p=$2; sub(/;$/,"",p); printf "https://%s  ->  laptop:%s\n", $1, p}' "$MAP"
+    ;;
+  add)
+    name="${2:-}"; port="${3:-}"
+    [[ -n $name && -n $port ]] || die "dùng: lap-web add <tên> <cổng>"
+    check_name "$name"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 20000 && port <= 20099 )) || die "cổng phải trong 20000-20099"
+    write_map "$(without "$name")"$'\n'"$name.$DOMAIN $port;"$'\n'
+    wait_reload
+    echo "https://$name.$DOMAIN  ->  laptop:$port"
+    ;;
+  rm)
+    name="${2:-}"; [[ -n $name ]] || die "dùng: lap-web rm <tên>"
+    write_map "$(without "$name")"$'\n'
+    wait_reload
+    echo "Đã xóa $name.$DOMAIN"
+    ;;
+  *) sed -n '2,6p' "$0"; exit 1 ;;
+esac
