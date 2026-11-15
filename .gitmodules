@@ -1,3 +1,6 @@
 [submodule "combat-analysis"]
 	path = combat-analysis
 	url = git@github.com:thieuhua/combat-analysis.git
+[submodule "IoT-chuong-trai-thong-minh"]
+	path = IoT-chuong-trai-thong-minh
+	url = https://github.com/thieuhua/IoT-chuong-trai-thong-minh.git

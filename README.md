@@ -10,6 +10,7 @@ Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm tro
 | [VPS MCP Gateway](vps-mcp/) | MCP Server chạy trên VPS Debian 12; Codespace chỉ sửa mã nguồn | [README](vps-mcp/README.md) |
 | [Laptop Tunnel](laptop-tunnel/) | Đưa dịch vụ TCP/UDP trên laptop Windows ra Internet qua VPS bằng WireGuard (`laptop.xuanthieu.site`) | [README](laptop-tunnel/README.md) |
 | [Focus Monitor](focus-monitor/) | Demo nhận diện mất focus, trang bị ẩn, rời trang và dấu hiệu cần xem xét | [README](focus-monitor/README.md) |
+| [IoT Chuồng Trại Thông Minh](IoT-chuong-trai-thong-minh/) | Nền tảng thiết bị ESP32 và Mosquitto | [README](IoT-chuong-trai-thong-minh/README.md) |
 
 Khi thêm dự án, cập nhật bảng này và đặt liên kết đến `README.md` của dự án.
 
