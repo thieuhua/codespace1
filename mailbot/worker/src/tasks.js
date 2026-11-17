@@ -16,7 +16,7 @@ const stmt = (env, sql, ...args) => env.DB.prepare(sql).bind(...args);
 // Used only inside SQL statements that serialize the reservation with its INSERT.
 const budget = (owner, hour) => `((SELECT COUNT(*) FROM runs br JOIN tasks bt ON bt.id=br.task_id WHERE bt.owner=${owner} AND br.created_at>${hour}) + (SELECT COUNT(*) FROM command_receipts WHERE sender=${owner} AND created_at>${hour}))`;
 export const publicRun = ({ token_hash, ...run }) => run;
-export const liveMessages = `SELECT e.message_id FROM events e JOIN tasks t ON t.id=e.task_id LEFT JOIN runs r ON r.id=e.run_id WHERE t.status IN ${LIVE} AND e.message_id IS NOT NULL AND (e.run_id IS NULL OR r.status IN ('pending','running'))`;
+export const liveMessages = `SELECT e.message_id FROM events e JOIN tasks t ON t.id=e.task_id LEFT JOIN runs r ON r.id=e.run_id WHERE t.status IN ${LIVE} AND e.message_id IS NOT NULL AND (e.run_id IS NULL OR r.status IN ('pending','running') OR EXISTS(SELECT 1 FROM events l LEFT JOIN runs lr ON lr.id=l.run_id WHERE l.task_id=e.task_id AND l.kind='run_lost' AND json_extract(l.payload_json,'$.run_id')=e.run_id AND (l.run_id IS NULL OR lr.status IN ('pending','running'))))`;
 
 // A fresh schedule_key scopes event assignment even if INSERT changes() is zero.
 // The entire batch is atomic: nobody can claim until session/wait/counters agree.
@@ -190,8 +190,8 @@ export async function runTool(env, run, tool, body, send) {
       stmt(env, `INSERT INTO outbound_mails(task_id,run_id,dedupe_key,message_id,kind,text,subject,in_reply_to,references_hdr,created_at)
         SELECT t.id,r.id,?3,'<mailbot-notify-'||?3||'@'||?4||'>','notify',?5,'Re: '||t.title,t.rfc_message_id,t.references_hdr,?6
         FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=?1 AND r.token_hash=?2 AND r.status='running' AND r.cancel_requested=0
-        AND t.status IN ${LIVE} AND t.expires_at>?6 AND t.parent_id IS NULL AND r.notify_count<3 AND t.mail_count<14
-        AND (t.mail_count<13 OR NOT EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND e.kind='mail'))`, run.id,run.token_hash,key,domain(env),body.text,now),
+        AND t.status IN ${LIVE} AND t.expires_at>?6 AND t.parent_id IS NULL AND r.notify_count<3
+        AND t.mail_count+((SELECT COUNT(*)+127 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND e.kind='mail')/128)<14`, run.id,run.token_hash,key,domain(env),body.text,now),
       stmt(env, `UPDATE runs SET notify_count=notify_count+1,outcome_json=json_insert(outcome_json,'$.notifications[#]',?2)
         WHERE id=?1 AND EXISTS(SELECT 1 FROM outbound_mails WHERE dedupe_key=?2)`, run.id,key),
     ]);
@@ -395,10 +395,13 @@ export async function receiveTaskMail(env,{msgId,agent,tag=null,sender,mail},sen
     stmt(env,`UPDATE tasks SET max_runs=CASE WHEN status='done' THEN run_count+8 ELSE max_runs END,
       expires_at=CASE WHEN status='done' THEN ?3 ELSE expires_at END,finished_at=NULL,completion_key=NULL,
       status='active',options_json=json_patch(options_json,?4),updated_at=?2
-      WHERE id=?1 AND status IN ('active','waiting','done') AND mail_count<14
+      WHERE id=?1 AND status IN ('active','waiting','done')
+        AND mail_count+(SELECT COUNT(*) FROM events e WHERE e.task_id=tasks.id AND e.run_id IS NULL)/128<14
         AND (status='done' OR expires_at>?2)`,task.id,now,expiry(),JSON.stringify(parsed.options)),
     stmt(env,`INSERT OR IGNORE INTO events(task_id,kind,message_id,rfc_message_id,payload_json,dedupe_key,created_at)
-      SELECT id,'mail',?2,?3,?4,?5,?6 FROM tasks WHERE id=?1 AND status IN ${LIVE} AND mail_count<14 AND expires_at>?6`,
+      SELECT id,'mail',?2,?3,?4,?5,?6 FROM tasks WHERE id=?1 AND status IN ${LIVE}
+        AND mail_count+(SELECT COUNT(*) FROM events e WHERE e.task_id=tasks.id AND e.run_id IS NULL)/128<14
+        AND expires_at>?6`,
       task.id,msgId,ids(mail.messageId)[0]||'',JSON.stringify({subject:parsed.subject,text:prompt}),`mail:${task.id}:${msgId}`,now),
   ]);
   if(!received[1].meta.changes && !await stmt(env,'SELECT 1 FROM events WHERE dedupe_key=?1',`mail:${task.id}:${msgId}`).first()) return fresh();
