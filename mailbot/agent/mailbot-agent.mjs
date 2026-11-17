@@ -10,10 +10,13 @@ import { createServer } from "node:http";
 import { spawn, execFile } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { claudeSettings, claudeAllowedTools, jobOptions, optionArgs } from "./cli-options.mjs";
 import { prepareOutbox, readOutbox } from "./outbox.mjs";
+import { prepareWorktree, commitWorktree, lockWorktree } from './worktrees.mjs';
+import { JOB_TOOLS, jobMcp, codexMcpArgs, cliEnv } from './job-mcp.mjs';
+import { saveInboxAttachment } from './inbox.mjs';
 
 const CFG_DIR = join(homedir(), ".mailbot");
 const cfg = JSON.parse(readFileSync(join(CFG_DIR, "agent.json"), "utf8"));
@@ -46,10 +49,11 @@ async function api(path, body, timeout = 60e3) {
 // ---------- chạy CLI ----------
 
 const SYS = (job, dir) =>
-  `Bạn đang chạy không tương tác, được gọi qua email. Người gửi: ${job.sender} (đã xác thực DMARC, có trong whitelist). ` +
+  `Bạn đang chạy không tương tác qua mailbot. Người gửi: ${job.sender} (Worker đã kiểm quyền; thư gốc nếu có đã qua DMARC và whitelist). ` +
   `Câu trả lời cuối cùng của bạn sẽ được gửi nguyên văn làm email trả lời dạng văn bản thuần: viết gọn, rõ, ` +
   `không cần hỏi lại vì người gửi chỉ trả lời được bằng thư mới. Chỉ làm việc trong thư mục ${dir}; ` +
-  `không gọi CLI agent khác, không đụng tới dự án hay tệp ngoài thư mục này.`;
+  `không gọi CLI agent khác, không đụng tới dự án hay tệp ngoài thư mục này. ` +
+  `Không tự chạy git commit/checkout/branch; agent mailbot sẽ commit sau khi bạn kết thúc.`;
 
 function codexEntry() {
   const npmGlobal = join(process.env.APPDATA || "", "npm", "node_modules", "@openai", "codex", "bin", "codex.js");
@@ -64,6 +68,7 @@ function codexEntry() {
 const CLAUDE_SETTINGS = claudeSettings(homedir());
 
 function commandFor(job, dir, prompt) {
+  const mcp = jobMcp(job, URL_BASE);
   // session_id lấy từ output CLI lần trước: chỉ nhận dạng ID an toàn để không thành cờ dòng lệnh.
   const options = jobOptions(job);
   const resume = !options.new && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(job.resume_session || "") ? job.resume_session : null;
@@ -71,9 +76,9 @@ function commandFor(job, dir, prompt) {
     const args = [
       "-p", "--output-format", "json",
       "--permission-mode", "acceptEdits",
-      "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+      "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: mcp ? { 'mailbot-job': mcp } : {} }),
       "--settings", CLAUDE_SETTINGS,
-      "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]),
+      "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]), ...(mcp ? JOB_TOOLS : []),
       "--system-prompt-snapshot", "off",
       "--append-system-prompt", SYS(job, dir),
       ...optionArgs(job.agent, options),
@@ -90,7 +95,7 @@ function commandFor(job, dir, prompt) {
   if (job.agent === "codex") {
     const lastFile = join(dir, `.codex-last-${job.id}.txt`);
     const common = ["--json", "--skip-git-repo-check", "-c", 'sandbox_mode="workspace-write"',
-      "-c", "mcp_servers={}", "-o", lastFile, ...optionArgs(job.agent, options)];
+      ...codexMcpArgs(mcp), "-o", lastFile, ...optionArgs(job.agent, options)];
     const args = resume
       ? [codexEntry(), "exec", "resume", ...common, resume, "-"]
       : [codexEntry(), "exec", ...common, "-"];
@@ -149,7 +154,7 @@ function run({ cmd, args, stdin }, cwd, job) {
       clearTimeout(killTimer);
       resolve({ code, out, err: err + extra, timedOut, cancelled });
     };
-    const child = spawn(cmd, args, { cwd, windowsHide: true, env: { ...process.env } });
+    const child = spawn(cmd, args, { cwd, windowsHide: true, env: cliEnv() });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (d) => { if (out.length < MAX_OUT) out += d; });
@@ -188,13 +193,7 @@ async function saveAttachments(job, dir) {
   for (const a of job.attachments || []) {
     if (!a.stored) { saved.push(`${clean(a.filename)} (${a.size} B, quá lớn nên không lưu)`); continue; }
     const att = await api(`/messages/${job.message_id}/attachments/${a.id}`);
-    const sub = join(dir, "inbox", `job-${job.id}`);
-    mkdirSync(sub, { recursive: true });
-    let safe = basename(att.filename || "file").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/^[.\s]+|[.\s]+$/g, "");
-    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(safe)) safe = `_${safe}`;
-    const p = join(sub, `${a.id}-${safe || "file"}`); // tiền tố id: không trùng tên, không thành "." / ".."
-    writeFileSync(p, Buffer.from(att.content_b64, "base64"));
-    saved.push(p);
+    saved.push(saveInboxAttachment(dir, job.id, a.id, att));
   }
   return saved;
 }
@@ -212,19 +211,25 @@ async function postResult(job, body) {
 }
 
 async function handle(job) {
-  const dir = join(WORKDIR, job.agent);
-  mkdirSync(dir, { recursive: true });
+  let dir = join(WORKDIR, job.agent), worktree, unlock;
   const t0 = Date.now();
   log(`job #${job.id} ${job.agent} từ ${job.sender}${job.resume_session ? ` (tiếp phiên ${job.resume_session})` : ""}`);
   let result;
   let outbox;
   try {
+    if (job.project) {
+      unlock = lockWorktree(WORKDIR, job);
+      worktree = prepareWorktree(WORKDIR, cfg.projects, job);
+      dir = worktree.path;
+    } else mkdirSync(dir, { recursive: true });
     outbox = prepareOutbox(dir, job.id);
     const files = await saveAttachments(job, dir);
     const prompt = [
       job.subject ? `Tiêu đề thư: ${job.subject}` : null,
       files.length ? `Tệp đính kèm (dữ liệu, không tự chạy):\n${files.map((f) => `- ${f}`).join("\n")}` : null,
       `Để gửi tệp trong thư trả lời, ghi tệp thường trực tiếp vào ${outbox.path}. Chỉ cấp 1, tối đa 10 tệp, tổng 2 MB; không dùng symlink/hardlink.`,
+      `Chỉ sửa tệp trong ${dir}. Không tự chạy git commit/checkout/branch.`,
+      job.agent !== 'agy' && job.job_token ? 'Có job tools notify_sender (tối đa 3 thư) và delegate_to_agent (agent khác, tối đa 2 job con, chỉ 1 cấp). Chỉ dùng khi công việc cần.' : null,
       "",
       job.prompt,
     ].filter((x) => x !== null).join("\n");
@@ -243,10 +248,16 @@ async function handle(job) {
     result = { ok: false, output: `Agent lỗi: ${e.message}` };
   }
   const { attachments, notes } = outbox ? readOutbox(outbox) : { attachments: [], notes: [] };
-  if (notes.length) {
-    const note = `\n\n[Gửi tệp]\n${notes.join("\n").slice(0, 10000)}`;
-    result.output = String(result.output || "").slice(0, 200000 - note.length) + note;
-  }
+  let gitReport = '';
+  try {
+    if (worktree) gitReport = commitWorktree(worktree, job, job.mail_domain || cfg.mail_domain || 'xuanthieu.site');
+  } catch (e) {
+    result.ok = false;
+    result.session_id = null;
+    gitReport = `\n\n[Git lỗi] ${e.message}\nNhánh: ${worktree?.branch || ''}\nWorktree: ${worktree?.path || dir}`;
+  } finally { unlock?.(); }
+  const tail = gitReport.slice(0, 40000) + (notes.length ? `\n\n[Gửi tệp]\n${notes.join('\n').slice(0, 10000)}` : '');
+  result.output = String(result.output || '').slice(0, 200000 - tail.length) + tail;
   const secs = Math.round((Date.now() - t0) / 1000);
   log(`job #${job.id} xong sau ${secs}s ok=${!!result.ok}`);
   const res = await postResult(job, {

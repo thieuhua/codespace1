@@ -1,7 +1,8 @@
 // Email Worker: nhận thư từ Cloudflare Email Routing, lưu vào D1 (inbox của claude@),
 // và biến thư từ người trong whitelist gửi tới claude@/codex@/agy@ thành job chạy CLI trên laptop.
 import PostalMime from "postal-mime";
-import { agentFor, senderAuth, isAllowed, createJob, wakeAgent, claimJob, finishJob, AGENTS } from "./mailbot.js";
+import { agentFor, rejectRecipient, readerScope, senderAuth, isAllowed, createJob, wakeAgent, claimJob, finishJob, AGENTS } from "./mailbot.js";
+import { jobForToken, notifySender, delegateJob, submitJob, cancelJob, publicJob } from './job-api.js';
 import { sendMail, sendReply } from "./send.js";
 
 const MAX_RAW = 20 * 1024 * 1024; // từ chối thư lớn hơn 20 MB
@@ -16,9 +17,11 @@ export default {
       message.setReject("Message too large");
       return;
     }
+    const target = agentFor(message.to, env.MAIL_DOMAIN || 'xuanthieu.site');
+    if (!target) { message.setReject('Unknown recipient'); return; }
+    const { agent, tag } = target;
     const raw = await new Response(message.raw).arrayBuffer();
     const mail = await PostalMime.parse(raw);
-    const agent = agentFor(message.to);
 
     let allowed = false;
     let auth = { ok: false, reason: "không phải địa chỉ agent" };
@@ -27,7 +30,7 @@ export default {
       allowed = auth.ok && (await isAllowed(env, auth.address, agent));
     }
     // claude@ vẫn là hộp thư công khai; codex@/agy@ chỉ nhận thư từ whitelist.
-    if (agent && agent !== "claude" && !allowed) {
+    if (rejectRecipient(target, allowed)) {
       console.log(`reject ${message.from} -> ${message.to}: ${auth.ok ? "không trong whitelist" : auth.reason}`);
       message.setReject("Sender not allowed");
       return;
@@ -35,7 +38,7 @@ export default {
 
     const msgId = await storeMessage(env, message, mail);
     if (allowed) {
-      const job = await createJob(env, { msgId, agent, sender: auth.address, mail }, sendMail);
+      const job = await createJob(env, { msgId, agent, tag, sender: auth.address, mail }, sendMail);
       console.log(`${job.id ? `job #${job.id}` : 'command'} ${agent} từ ${auth.address}: ${job.status}`);
       if (job.status === "pending") ctx.waitUntil(wakeAgent(env));
     }
@@ -44,9 +47,19 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
-    const role = await roleOf(request, env);
-    if (!role) return json({ error: "unauthorized" }, 401);
     try {
+      if (parts[0] === 'job-api') {
+        const job = await jobForToken(env, request.headers.get('X-Job-Token'));
+        if (!job) return json({ error: 'invalid job token' }, 401);
+        if (request.method !== 'POST' || parts.length !== 2) return json({ error: 'not found' }, 404);
+        const body = await request.json();
+        const result = parts[1] === 'notify' ? await notifySender(env, job, body, sendMail)
+          : parts[1] === 'delegate' ? await delegateJob(env, job, body) : { error: 'not found', code: 404 };
+        if (result.job) await wakeAgent(env);
+        return json(result, result.code || 200);
+      }
+      const role = await roleOf(request, env);
+      if (!role) return json({ error: "unauthorized" }, 401);
       if (parts[0] === "messages") return await messagesApi(request, env, url, parts, role);
       if (role !== "admin") return json({ error: "forbidden" }, 403);
       if (parts[0] === "jobs") return await jobsApi(request, env, url, parts);
@@ -113,9 +126,7 @@ async function storeMessage(env, message, mail) {
 
 // Token đọc inbox (MCP) chỉ thấy thư gửi claude@; thư gửi codex@/agy@ chỉ admin xem được.
 async function messagesApi(request, env, url, parts, role) {
-  const scope = role === "admin" ? "1 = 1"
-    : `lower(envelope_to) NOT LIKE 'codex@%' AND lower(envelope_to) NOT LIKE 'codex+%'
-       AND lower(envelope_to) NOT LIKE 'agy@%' AND lower(envelope_to) NOT LIKE 'agy+%'`;
+  const scope = role === "admin" ? "1 = 1" : readerScope(env.MAIL_DOMAIN || 'xuanthieu.site');
   if (parts.length >= 2) {
     const visible = await env.DB.prepare(`SELECT 1 FROM messages WHERE id = ?1 AND ${scope}`)
       .bind(int(parts[1], -1)).first();
@@ -177,11 +188,17 @@ async function messagesApi(request, env, url, parts, role) {
 }
 
 async function jobsApi(request, env, url, parts) {
+  if (parts.length === 1 && request.method === 'POST') {
+    const result = await submitJob(env, await request.json());
+    if (result.job) await wakeAgent(env);
+    return json(result, result.code || 200);
+  }
   if (parts.length === 1 && request.method === "GET") {
     const limit = Math.min(int(url.searchParams.get("limit"), 20), 100);
     const { results } = await env.DB.prepare(
       `SELECT id, agent, sender, subject, status, attempts, created_at, claimed_at, finished_at,
-         exit_ok, session_id, reply_status, reply_error, substr(prompt, 1, 200) AS prompt_preview
+         exit_ok, session_id, reply_status, reply_error, project, parent_id, root_id, depth, outbox_json,
+         substr(prompt, 1, 200) AS prompt_preview
        FROM jobs ORDER BY id DESC LIMIT ?1`
     ).bind(limit).all();
     return json({ jobs: results });
@@ -200,6 +217,14 @@ async function jobsApi(request, env, url, parts) {
     const job = await env.DB.prepare(`SELECT id, status, cancel_requested FROM jobs WHERE id = ?1`)
       .bind(int(parts[1], -1)).first();
     return job ? json(job) : json({ error: "not found" }, 404);
+  }
+  if (parts.length === 3 && parts[2] === 'cancel' && request.method === 'POST') {
+    const result = await cancelJob(env, int(parts[1], -1));
+    return json(result, result.code || 200);
+  }
+  if (parts.length === 2 && request.method === 'GET') {
+    const job = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?1`).bind(int(parts[1], -1)).first();
+    return job ? json({ job: publicJob(job) }) : json({ error: 'not found' }, 404);
   }
   return json({ error: "not found" }, 404);
 }
@@ -240,7 +265,9 @@ async function sameSecret(got, token) {
     crypto.subtle.digest("SHA-256", enc.encode(got)),
     crypto.subtle.digest("SHA-256", enc.encode(token)),
   ]);
-  return crypto.subtle.timingSafeEqual(a, b);
+  // Fixed-size digests; Cloudflare exposes timingSafeEqual, Node tests use this fallback.
+  if (crypto.subtle.timingSafeEqual) return crypto.subtle.timingSafeEqual(a, b);
+  return new Uint8Array(a).reduce((v, byte, i) => v | (byte ^ new Uint8Array(b)[i]), 0) === 0;
 }
 
 function json(data, status = 200) {

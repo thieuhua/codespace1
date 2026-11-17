@@ -2,14 +2,28 @@
 import { parseSubject, COMMAND_HELP } from "./subject.js";
 import { validateAttachments } from "./mime.js";
 
+export async function tokenHash(token) {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+  return Array.from(bytes, (v) => v.toString(16).padStart(2, '0')).join('');
+}
+
 export const AGENTS = ["claude", "codex", "agy"];
 const RATE_PER_HOUR = 20;
 const KEEP_JOBS = 1000;
 const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
-export function agentFor(envelopeTo) {
-  const local = (envelopeTo || "").toLowerCase().split("@")[0].split("+")[0];
-  return AGENTS.includes(local) ? local : null;
+export function agentFor(envelopeTo, domain) {
+  const m = String(envelopeTo || "").toLowerCase().match(/^(claude|codex|agy)(?:\+([a-z0-9-]{1,32}))?@([^@\s]+)$/);
+  return m && (!domain || m[3] === domain.toLowerCase()) ? { agent: m[1], tag: m[2] || null } : null;
+}
+
+export function rejectRecipient(target, allowed) {
+  return !target || (!allowed && (target.agent !== 'claude' || !!target.tag));
+}
+
+export function readerScope(domain) {
+  // Domain is configuration, still quote it as an SQL literal.
+  return `envelope_to = 'claude@${domain.replaceAll("'", "''")}' COLLATE NOCASE`;
 }
 
 const stripComments = (s) => {
@@ -95,7 +109,19 @@ function threadKey(sender, mail) {
   return `${sender}|${root}`;
 }
 
-export async function createJob(env, { msgId, agent, sender, mail }, sendMail) {
+export async function createJob(env, { msgId, agent, tag = null, sender, mail }, sendMail) {
+  let key = threadKey(sender, mail);
+  let inheritedProject = null;
+  // Reply IDs are aliases of the original thread, including for worktree identity.
+  const alias = key.slice(sender.length + 1).match(/^<mailbot-(?:job-(\d+)|notify-(\d+)-\d+)@([^>]+)>$/);
+  if (alias && alias[3] === (env.MAIL_DOMAIN || 'xuanthieu.site')) {
+    const original = await env.DB.prepare(`SELECT thread_key, project FROM jobs WHERE id = ?1 AND sender = ?2 AND agent = ?3`)
+      .bind(Number(alias[1] || alias[2]), sender, agent).first();
+    if (original) { key = original.thread_key; inheritedProject = original.project; }
+  }
+  const thread = await env.DB.prepare(`SELECT project FROM threads WHERE thread_key = ?1 AND agent = ?2`)
+    .bind(key, agent).first();
+  const project = tag || thread?.project || inheritedProject || null;
   const now = new Date();
   const hourAgo = new Date(now - 3600e3).toISOString();
   const { n } = await env.DB.prepare(
@@ -127,7 +153,7 @@ export async function createJob(env, { msgId, agent, sender, mail }, sendMail) {
       text = results.length ? results.map((j) => `#${j.id}: ${j.status === 'cancelled' ? 'đã hủy' : 'đã yêu cầu dừng'}`).join("\n") : "Không có job phù hợp của bạn đang chờ/chạy.";
     }
     await sendMail(env, {
-      from: `${agent}@${env.MAIL_DOMAIN || "xuanthieu.site"}`, to: sender,
+      from: `${agent}${project ? '+' + project : ''}@${env.MAIL_DOMAIN || "xuanthieu.site"}`, to: sender,
       subject: `Re: ${parsed.subject || mail.subject || '(no subject)'}`, text,
       inReplyTo: mail.messageId, references: mail.references,
     });
@@ -137,12 +163,18 @@ export async function createJob(env, { msgId, agent, sender, mail }, sendMail) {
   const prompt = extractPrompt(mail.text || "") || parsed.subject;
   const res = await env.DB.prepare(
     `INSERT INTO jobs (message_id, agent, sender, subject, prompt, rfc_message_id, references_hdr,
-       thread_key, status, created_at, options_json)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+       thread_key, status, created_at, options_json, project)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`
   ).bind(msgId, agent, sender, parsed.subject.slice(0, 300), prompt,
     msgIds(mail.messageId)[0] || "", msgIds(mail.references).join(" "),
-    threadKey(sender, mail), status, now.toISOString(), JSON.stringify(parsed.options)).run();
+    key, status, now.toISOString(), JSON.stringify(parsed.options), project).run();
   const id = res.meta.last_row_id;
+  if (project) await env.DB.prepare(
+    `INSERT INTO threads (thread_key, agent, session_id, project, updated_at) VALUES (?1, ?2, '', ?3, ?4)
+     ON CONFLICT (thread_key, agent) DO UPDATE SET
+       session_id = CASE WHEN project IS NOT excluded.project THEN '' ELSE session_id END,
+       project = excluded.project, updated_at = excluded.updated_at`
+  ).bind(key, agent, project, now.toISOString()).run();
   await env.DB.prepare(`DELETE FROM jobs WHERE id <= ?1 AND status NOT IN ('pending','running')`)
     .bind(id - KEEP_JOBS).run();
   return { id, status };
@@ -169,16 +201,20 @@ export async function claimJob(env, agents) {
   const now = new Date().toISOString();
   const stale = new Date(Date.now() - 30 * 60e3).toISOString();
   await env.DB.prepare(
-    `UPDATE jobs SET status = 'cancelled', finished_at = ?1, session_id = NULL
+    `UPDATE jobs SET status = 'cancelled', finished_at = ?1, session_id = NULL, job_token_hash = NULL
      WHERE status = 'running' AND cancel_requested = 1 AND claimed_at < ?2`
   ).bind(now, stale).run();
   await env.DB.prepare(
-    `UPDATE jobs SET status = 'failed', finished_at = ?1, output = 'Quá thời gian sau 2 lần chạy'
+    `UPDATE jobs SET status = 'failed', finished_at = ?1, job_token_hash = NULL, output = 'Quá thời gian sau 2 lần chạy'
      WHERE status = 'running' AND cancel_requested = 0 AND claimed_at < ?2 AND attempts >= 2`
   ).bind(now, stale).run();
   const marks = list.map((_, i) => `?${i + 3}`).join(",");
+  const token = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
+    .replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  const hash = await tokenHash(token);
+  const hashMark = `?${list.length + 3}`;
   const job = await env.DB.prepare(
-    `UPDATE jobs SET status = 'running', claimed_at = ?1, attempts = attempts + 1
+    `UPDATE jobs SET status = 'running', claimed_at = ?1, attempts = attempts + 1, job_token_hash = ${hashMark}
      WHERE id = (
        SELECT id FROM jobs
        WHERE agent IN (${marks})
@@ -186,18 +222,19 @@ export async function claimJob(env, agents) {
          AND (status = 'pending' OR (status = 'running' AND claimed_at < ?2 AND attempts < 2))
        ORDER BY id LIMIT 1)
      RETURNING *`
-  ).bind(now, stale, ...list).first();
+  ).bind(now, stale, ...list, hash).first();
   if (!job) return null;
   const thread = await env.DB.prepare(
-    `SELECT session_id FROM threads WHERE thread_key = ?1 AND agent = ?2`
+    `SELECT session_id, project FROM threads WHERE thread_key = ?1 AND agent = ?2`
   ).bind(job.thread_key, job.agent).first();
   const { results: attachments } = await env.DB.prepare(
     `SELECT id, filename, mime_type, size, content_b64 IS NOT NULL AS stored
      FROM attachments WHERE message_id = ?1 ORDER BY id`
   ).bind(job.message_id).all();
   const options = JSON.parse(job.options_json || "{}");
-  const resume = !options.new && SESSION_RE.test(thread?.session_id || "") ? thread.session_id : null;
-  return { ...job, resume_session: resume, attachments };
+  const resume = !options.new && (thread?.project || null) === job.project && SESSION_RE.test(thread?.session_id || "") ? thread.session_id : null;
+  delete job.job_token_hash;
+  return { ...job, job_token: token, mail_domain: env.MAIL_DOMAIN || 'xuanthieu.site', resume_session: resume, attachments };
 }
 
 export async function finishJob(env, id, { ok, output, session_id, cancelled, attachments = [] }, send) {
@@ -222,17 +259,21 @@ export async function finishJob(env, id, { ok, output, session_id, cancelled, at
       `UPDATE jobs SET status = CASE WHEN cancel_requested = 1 OR ?2 = 1 THEN 'cancelled' WHEN ?3 = 1 THEN 'done' ELSE 'failed' END,
        finished_at = ?4, exit_ok = CASE WHEN cancel_requested = 1 OR ?2 = 1 THEN 0 ELSE ?3 END,
        output = ?5, session_id = CASE WHEN cancel_requested = 1 OR ?2 = 1 THEN NULL ELSE ?6 END,
-       outbox_json = ?7 WHERE id = ?1 AND status = 'running' RETURNING *`
+       outbox_json = ?7, job_token_hash = NULL WHERE id = ?1 AND status = 'running' RETURNING *`
     ).bind(id, cancelled ? 1 : 0, ok ? 1 : 0, now, text, sid, metadata).first();
     if (!updated) return { error: "job không còn running" };
     job = updated;
   }
   // Khôi phục mapping nếu Worker đã chết sau UPDATE kết quả, trước batch threads.
-  if (SESSION_RE.test(job.session_id || '') && job.status === 'done') {
-    await env.DB.batch([job.thread_key, `${job.sender}|${replyId}`].map((key) => env.DB.prepare(
-      `INSERT INTO threads (thread_key, agent, session_id, updated_at) VALUES (?1, ?2, ?3, ?4)
-       ON CONFLICT (thread_key, agent) DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at`
-    ).bind(key, job.agent, job.session_id, now)));
+  const sid = job.status === 'done' && SESSION_RE.test(job.session_id || '') ? job.session_id : '';
+  const notifyIds = msgIds(job.references_hdr).filter((s) => s.startsWith(`<mailbot-notify-${job.id}-`));
+  if (sid || job.project || notifyIds.length) {
+    await env.DB.batch([job.thread_key, `${job.sender}|${replyId}`, ...notifyIds.map((s) => `${job.sender}|${s}`)].map((key) => env.DB.prepare(
+      `INSERT INTO threads (thread_key, agent, session_id, project, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT (thread_key, agent) DO UPDATE SET
+       session_id = CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE threads.session_id END,
+       project = excluded.project, updated_at = excluded.updated_at`
+    ).bind(key, job.agent, sid, job.project, now)));
   }
   const body = (job.status === 'cancelled' ? `Đã hủy job.\n\n${job.output || ''}` :
     job.status === 'done' ? job.output : `Lỗi khi chạy ${job.agent}:\n\n${job.output || ''}`).trim() || "(không có nội dung trả về)";

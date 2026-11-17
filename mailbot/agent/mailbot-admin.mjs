@@ -5,9 +5,12 @@
 //   list                                    xem whitelist
 //   jobs [số_lượng]                         xem job gần nhất
 //   wake                                    gọi /wake của agent cục bộ (kiểm tra agent sống)
+//   worktrees                               liệt kê worktree do mailbot quản lý
+//   prune <tag>                             chỉ xóa worktree sạch và nhánh đã merge
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { listWorktrees, pruneWorktrees } from './worktrees.mjs';
 
 const cfg = JSON.parse(readFileSync(join(homedir(), ".mailbot", "agent.json"), "utf8"));
 const base = (cfg.url || "https://mailbot.thieupro666.workers.dev").replace(/\/+$/, "");
@@ -25,6 +28,12 @@ async function api(method, path, body) {
 
 const [cmd, a1, a2] = process.argv.slice(2);
 switch (cmd) {
+  case 'worktrees':
+    console.log(JSON.stringify(listWorktrees(cfg.workdir || 'E:\\mailbot-work'), null, 2));
+    break;
+  case 'prune':
+    console.log(JSON.stringify(pruneWorktrees(cfg.workdir || 'E:\\mailbot-work', cfg.projects, a1), null, 2));
+    break;
   case "allow":
     await api("POST", "/allowlist", { address: a1, agent: a2 || "*" });
     console.log(`Đã cho phép ${a1} -> ${a2 || "*"}`);
@@ -55,5 +64,5 @@ switch (cmd) {
     break;
   }
   default:
-    console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 8).join("\n"));
+    console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(1, 10).join("\n"));
 }
