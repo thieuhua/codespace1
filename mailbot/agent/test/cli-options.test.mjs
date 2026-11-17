@@ -9,6 +9,7 @@ test('per-job options map to verified CLI flags, agy model not duplicated', () =
   assert.deepEqual(optionArgs('codex', o), ['-m', 'opus', '-c', 'model_reasoning_effort="xhigh"']);
   assert.deepEqual(optionArgs('agy', o, 'fallback'), ['--model', 'opus', '--effort', 'max']);
   assert.deepEqual(optionArgs('agy', {}, 'fallback'), ['--model', 'fallback']);
+  assert.deepEqual(optionArgs('claude', {}, 'opus'), ['--model', 'opus']);
 });
 test('malformed job options cannot become CLI arguments', () => {
   for (const raw of ['bad json', 'null', '{"model":"--evil", "effort":"anything"}']) {

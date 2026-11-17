@@ -86,7 +86,7 @@ async function commandFor(job, dir, prompt) {
       "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]), ...(mcp ? JOB_TOOLS : []),
       "--system-prompt-snapshot", "off",
       "--append-system-prompt", SYS(job, dir),
-      ...optionArgs(job.agent, options),
+      ...optionArgs(job.agent, options, cfg.claude_model ?? "opus"),
     ];
     if (resume) args.push("--resume", resume);
     return {
@@ -102,7 +102,7 @@ async function commandFor(job, dir, prompt) {
     const servers = await codexInventory(entry, dir);
     const lastFile = join(dir, `.codex-last-${job.id}.txt`);
     const common = ["--json", "--skip-git-repo-check", "-c", 'sandbox_mode="workspace-write"',
-      ...codexMcpArgs(mcp, servers), "-o", lastFile, ...optionArgs(job.agent, options)];
+      ...codexMcpArgs(mcp, servers), "-o", lastFile, ...optionArgs(job.agent, options, cfg.codex_model)];
     const args = resume
       ? [codexEntry(), "exec", "resume", ...common, resume, "-"]
       : [codexEntry(), "exec", ...common, "-"];

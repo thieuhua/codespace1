@@ -29,9 +29,11 @@ export function jobOptions(job) {
   };
 }
 
-export function optionArgs(agent, options, agyModel) {
+// defaultModel: model mặc định theo agent từ agent.json (claude --restricted bỏ qua settings của user,
+// nên phải truyền rõ model, nếu không CLI rơi về model mặc định có thể cần credit riêng).
+export function optionArgs(agent, options, defaultModel) {
   const args = [];
-  const model = options.model || (agent === "agy" ? agyModel : null);
+  const model = options.model || defaultModel || null;
   if (model) args.push(agent === "codex" ? "-m" : "--model", model);
   if (options.effort) {
     if (agent === "codex") args.push("-c", `model_reasoning_effort="${options.effort === 'max' ? 'xhigh' : options.effort}"`);
