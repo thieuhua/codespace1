@@ -5,7 +5,7 @@
   "scripts": {
     "test": "node --test",
     "deploy": "wrangler deploy",
-    "schema": "wrangler d1 execute mailbot --remote --file=schema.sql && wrangler d1 execute mailbot --remote --file=schema-v2.sql && wrangler d1 execute mailbot --remote --file=schema-v3.sql",
+    "schema": "wrangler d1 execute mailbot --remote --file=schema.sql && wrangler d1 execute mailbot --remote --file=schema-v2.sql && wrangler d1 execute mailbot --remote --file=schema-v3.sql && wrangler d1 execute mailbot --remote --file=schema-v4.sql",
     "tail": "wrangler tail"
   },
   "dependencies": {

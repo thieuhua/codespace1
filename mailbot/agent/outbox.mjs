@@ -31,7 +31,7 @@ export function prepareOutbox(cwd, id) {
 }
 
 // Chỉ đọc cấp 1; kiểm tra trước và sau open để chặn link và thay tệp giữa chừng.
-export function readOutbox({ path, root }) {
+export function readOutbox({ path, root }, { discard = false } = {}) {
   path = resolve(path);
   const attachments = [], notes = [];
   let total = 0, safeCleanup = false;
@@ -47,7 +47,7 @@ export function readOutbox({ path, root }) {
     directory(path);
     const base = real(path);
     if (!same(base, path)) throw new Error("Outbox đã bị chuyển hướng");
-    for (const name of readdirSync(path).sort()) {
+    for (const name of discard ? [] : readdirSync(path).sort()) {
       let fd;
       try {
         const p = join(path, name);
@@ -67,7 +67,8 @@ export function readOutbox({ path, root }) {
         }
         const after = fstatSync(fd);
         if (after.nlink !== 1 || after.size !== f.size || after.mtimeMs !== f.mtimeMs) throw new Error("tệp thay đổi khi đọc");
-        attachments.push({ filename: name, mime_type: mimeTypes[extname(name).toLowerCase()] || 'application/octet-stream', b64: buf.toString('base64') });
+        attachments.push({ filename: name, mime_type: mimeTypes[extname(name).toLowerCase()] || 'application/octet-stream',
+          b64_lines: buf.toString('base64').match(/.{1,76}/g)?.join('\r\n') || '' });
         total += bytes;
       } catch (err) { notes.push(`Bỏ tệp ${name.replace(/[\x00-\x1f\x7f]/g, '')}: ${err.message}`); }
       finally { if (fd !== undefined) closeSync(fd); }

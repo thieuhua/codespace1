@@ -20,7 +20,7 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
 | --- | --- |
 | Email Routing | MX `route1/2/3.mx.cloudflare.net`; catch-all → Worker `mailbot` (Worker tự từ chối địa chỉ không hợp lệ) |
 | Worker | [`worker/src/`](worker/src/) (`index.js` định tuyến, `mailbot.js` whitelist/job, `send.js` gửi thư); [`worker/wrangler.toml`](worker/wrangler.toml) |
-| D1 | Database `mailbot`; schema `worker/schema.sql` + `worker/schema-v2.sql` + `worker/schema-v3.sql` |
+| D1 | Database `mailbot`; schema `worker/schema.sql` + `worker/schema-v2.sql` + `worker/schema-v3.sql` + `worker/schema-v4.sql` |
 | API | `https://mailbot.thieupro666.workers.dev`; secret `API_TOKEN` (đọc inbox), `ADMIN_TOKEN` (agent, whitelist) |
 | MCP | [`mcp/server.mjs`](mcp/server.mjs), stdio, đọc inbox `claude@` |
 | Agent laptop | [`agent/mailbot-agent.mjs`](agent/mailbot-agent.mjs), quản trị qua [`agent/mailbot-admin.mjs`](agent/mailbot-admin.mjs), cổng 20025, Scheduled Task `mailbot-agent`; cấu hình `~/.mailbot/agent.json` |
@@ -35,8 +35,10 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
   Gửi tới địa chỉ chưa xác minh sẽ lỗi; `jobs` hiện `reply_error`. Muốn gửi tới địa chỉ bất kỳ cần Workers Paid.
 - **Xác thực người gửi** (`senderAuth` trong `worker/src/mailbot.js`, đọc header thô):
   chỉ tin `Authentication-Results` đầu tiên (do `mx.cloudflare.net` thêm; A-R giả nằm bên dưới), tách theo mệnh đề `;`
-  sau khi bỏ comment, yêu cầu mệnh đề `dmarc=pass` có `header.from` trùng domain của From; thư phải có **đúng một**
-  header `From:` viết chuẩn với **đúng một** địa chỉ (postal-mime lấy From cuối cùng và chấp nhận `From :`).
+  ngoài chuỗi ngoặc kép sau khi bỏ comment, yêu cầu mệnh đề `dmarc=pass` có `header.from=domain` hoặc `header.from="domain"`
+  trùng domain của From. Thư phải có **đúng một** header `From:` chuẩn: `addr` hoặc `Tên hiển thị <addr>`;
+  tên có thể được bọc bằng ngoặc kép (không escape/ngoặc kép bên trong), tên không bọc cấm `<>(),;"\\@`.
+  Không chấp nhận comment hay dấu phẩy; địa chỉ bắt được phải khớp hoàn toàn `mail.from.address` khi chuyển chữ thường.
   DMARC chỉ chứng minh domain; phần trước `@` dựa vào nhà cung cấp (Gmail không cho gửi bằng địa chỉ của người khác).
 - `codex@`/`agy@` và mọi địa chỉ `+tag` từ chối thư không hợp lệ ngay ở SMTP. Địa chỉ ngoài agent/domain cũng bị từ chối. `claude@` không tag vẫn là inbox công khai: thư lạ chỉ vào inbox, không thành job.
 - `API_TOKEN` (MCP) chỉ thấy envelope đúng `claude@<MAIL_DOMAIN>` (không phân biệt hoa thường); thư `+tag`, `codex@`/`agy@` chỉ `ADMIN_TOKEN` xem được.
@@ -47,12 +49,12 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
   (client chỉ gửi `In-Reply-To` vẫn nối đúng). Chỉ lưu phiên của job thành công; `session_id` phải khớp regex ID
   `/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/`.
 - **Quyền của CLI**: mỗi agent chạy trong `E:\mailbot-work\<agent>`:
-  `claude -p --permission-mode acceptEdits`, chỉ MCP job tools theo phiên, cấm `Read`/`Edit` các thư mục `~/.mailbot`, `~/.ssh`,
+  `claude -p --restricted --permission-mode acceptEdits --permission-prompts none`, chỉ MCP job tools theo phiên, cấm `Read`/`Edit` các thư mục `~/.mailbot`, `~/.ssh`,
   `~/.aws`, `~/.codex`, `~/.claude`…; shell chỉ được tự chạy theo allowlist bên dưới;
-  `codex exec` sandbox `workspace-write`, xóa MCP kế thừa rồi chỉ cấp MCP job tools — sandbox này **không chặn đọc** ngoài thư mục,
+  `codex exec` sandbox `workspace-write`, tắt plugins và từng MCP kế thừa rồi chỉ cấp MCP job tools — sandbox này **không chặn đọc** ngoài thư mục,
   nên Codex về lý thuyết đọc được token trong `~/.mailbot`; `agy --mode accept-edits --sandbox`.
   Tệp đính kèm lưu vào `inbox/job-<id>/<id>-<tên>`. Output thô mỗi lần chạy: `~/.mailbot/runs/job-<id>.out`.
-- Giới hạn: 20 job/giờ/người gửi (vượt thì job `rate_limited`, không chạy); mỗi job tối đa 20 phút;
+- Giới hạn: 20 lượt/giờ/người gửi, dùng chung cho job và thư trả lệnh (vượt thì job `rate_limited`, lệnh không trả thư); mỗi job tối đa 20 phút;
   mỗi agent chạy tuần tự, các agent khác nhau chạy song song.
 - Laptop tắt: job nằm chờ trong D1; agent tự kéo khi chạy lại (poll dự phòng mỗi 60 giây). Job `running` quá 30 phút
   được chạy lại 1 lần, treo lần nữa thì thành `failed`. Agent gửi kết quả có thử lại khi lỗi mạng. Giữ 1000 job gần nhất.
@@ -77,13 +79,20 @@ Ví dụ: `Re: /new /model=opus /effort=high Phân tích lỗi`. `/etc/fstab` l�
 | `/cancel` hoặc `/cancel=<id>` | Chỉ hủy job của chính người gửi, trên mọi agent; pending hủy ngay, running yêu cầu dừng |
 
 Mỗi thư chỉ có một lệnh `/status` hoặc `/cancel`, không ghép với các tùy chọn tạo job. Lệnh lạ/sai giá trị trả danh sách lệnh;
-không trả trợ giúp nếu người gửi đã chạm giới hạn 20 job/giờ. Agent kiểm tra yêu cầu hủy mỗi 15 giây (request timeout 5 giây),
-dừng cây tiến trình bằng `taskkill /T /F`, không lưu phiên của job hủy. Running đã yêu cầu hủy quá 30 phút chuyển sang `cancelled`, không claim lại.
+không trả thư lệnh nếu đã chạm ngân sách chung 20 lượt/giờ. Lượt trả lệnh được giữ nguyên tử trong `command_receipts`, không tạo job.
+Tiêu đề trả lệnh rỗng dùng `[status]`/`[cancel]`/`[help]`, không chép lại lệnh đầu vào; MIME có `Auto-Submitted: auto-replied`
+và `X-Auto-Response-Suppress: All`. Thư lệnh có Auto-Submitted khác `no` không được trả tự động.
+Agent kiểm tra yêu cầu hủy mỗi 15 giây (request timeout 5 giây), dừng cây tiến trình bằng `taskkill /T /F`.
+Job hủy/timeout không commit, không gửi tệp dở dang và không lưu phiên; vẫn dọn inbox/outbox của job.
+Running đã yêu cầu hủy quá 30 phút chuyển sang `cancelled`, không claim lại. Hủy qua email xóa ngay job token hash.
 
 Để **gửi tệp trong thư trả lời**, yêu cầu CLI ghi tệp vào `<cwd>/outbox/job-<id>/`; đường dẫn cụ thể nằm trong prompt mỗi job,
 kể cả khi resume. Chỉ nhận tệp thường ở cấp 1, không symlink/junction/hardlink, tối đa 10 tệp và tổng 2 MB (`2 × 1024 × 1024` byte).
 Tệp vượt giới hạn hoặc không an toàn bị bỏ, kèm ghi chú cuối thư. Agent đọc xong dọn thư mục job; Worker gửi MIME multipart,
 chỉ lưu `{filename, size}` vào `jobs.outbox_json`, không lưu nội dung tệp đầu ra vào D1.
+Agent gửi `{filename, mime_type, b64_lines}`: base64 đã cắt dòng 76 bằng CRLF, không có CRLF cuối.
+Worker quét tuyến tính một lần; mảng kết quả bất biến được đánh dấu nội bộ bằng WeakSet để MIME tái sử dụng,
+không chấp nhận cờ JSON để bỏ qua validate và không cắt dòng tệp lần nữa. Agent/Worker mới phải được nâng cấp cùng đợt.
 
 Claude mặc định chỉ cho shell với `git status`, `git diff`, `git log`, `git show` qua các mẫu
 `Bash(git status:*)`, `Bash(git diff:*)`, `Bash(git log:*)`, `Bash(git show:*)`.
@@ -111,6 +120,18 @@ SQLite không có `ADD COLUMN IF NOT EXISTS`; chạy lại v3 sẽ lỗi `duplic
 để nâng cấp database đã có v3. Cài database mới thì `npm run schema` chạy cả ba schema theo thứ tự một lần.
 V3 có đủ cột dự phòng T1/T8, `threads.project` và trạng thái `cancelled`; job không xuất phát từ thư dùng `message_id = 0`.
 Đợt B dùng nguyên schema v3 đã migrate, không thêm cột hoặc schema v4.
+
+### Nâng cấp đợt C
+
+Database đã có v3: chủ máy áp dụng **schema-v4.sql trước khi chạy Worker mới**:
+
+```powershell
+cd worker
+npx wrangler d1 execute mailbot --remote --file=schema-v4.sql
+```
+
+V4 chỉ thêm bảng/index `command_receipts`, dùng `IF NOT EXISTS` nên chạy lại an toàn. Không chạy lại v3.
+Các schema và lệnh triển khai ở đây là hướng dẫn để chủ máy tự chạy; đợt C chỉ kiểm thử offline.
 
 ## Dự án thật qua +tag (T1)
 
@@ -142,9 +163,15 @@ Thư kết quả/notify gửi từ `<agent>+<tag>@domain`. Agent tạo worktree 
 khóa theo agent và đường dẫn worktree (khóa thư mục tồn tại qua crash trong `worktree-state/`).
 Nếu crash để lại `.lock`, chủ máy xác nhận không còn job chạy rồi tự gỡ khóa.
 
-State nằm ngoài worktree, tại `<workdir>/worktree-state/<tag>/`. Mọi Git do chương trình agent/admin gọi
-đều tắt hooks, fsmonitor, SSH và ký commit. Sau CLI, `.git` phải còn nguyên nội dung và nhánh phải đúng;
-sai thì không commit, báo lỗi trong thư. Agent tự `add -A` + commit `--no-verify` dưới tên mailbot,
+State nằm ngoài worktree, tại `<workdir>/worktree-state/<tag>/`. Claude bị deny Read/Edit `**/.git`, `**/.git/**`
+và `worktree-state/**`. Cờ `--restricted` (đã đối chiếu `claude --help` cục bộ) giới hạn file tools trong cwd,
+bỏ settings user/project/local; `--permission-prompts none` từ chối mọi yêu cầu cần duyệt.
+`--tools Read,Glob,Grep,Edit,Write,Bash` chỉ khôi phục shell Bash để áp dụng allowlist Git/runner đã cấu hình.
+Máy chạy phải có Claude hỗ trợ các cờ này; chưa thử hành vi với model thật.
+Mọi Git do chương trình agent/admin gọi đều tắt hooks, fsmonitor, SSH, attributesFile (`NUL`) và ký commit.
+Sau CLI, `.git` phải còn nguyên nội dung, nhánh đúng, `rev-parse --show-toplevel` khớp worktree;
+`<gitdir>/config.worktree` và common config phải khớp snapshot trước CLI. Khác thì từ chối commit, báo trong thư.
+Agent tự `add -A` + commit `--no-verify` dưới tên mailbot,
 không push; thư kèm nhánh, đường dẫn, `git diff --stat <baseSha>..HEAD`.
 Prompt cấm CLI tự commit/checkout/branch. Codex workspace-write có thể không ghi được gitdir ngoài cwd;
 agent phụ trách commit. Các đường dẫn inbox/outbox bị chuyển hướng sẽ bị từ chối.
@@ -152,8 +179,18 @@ agent phụ trách commit. Các đường dẫn inbox/outbox bị chuyển hư�
 `/inbox/`, `/outbox/`, `/.codex-last-*` được thêm vào `<gitdir worktree>/info/exclude`.
 **Điều chỉnh so với thiết kế:** Git mặc định dùng exclude của common gitdir, không đọc tệp riêng này.
 Agent bật `extensions.worktreeConfig=true` trong repo và đặt `core.excludesFile` riêng cho worktree
-trỏ tới tệp trên; không sửa `.gitignore` nguồn. Nếu inbox/outbox đã tracked, agent từ chối commit các tệp đó.
+trỏ tới tệp trên; không sửa `.gitignore` nguồn. `git add` còn dùng pathspec exclude không phân biệt hoa thường,
+chặn dữ liệu trao đổi trước khi tạo blob dù `.gitignore` bị phủ định. Nếu phát hiện inbox/outbox/output Codex
+trong index trước hoặc sau add, agent bỏ stage bằng `git reset --mixed HEAD` và từ chối commit.
+Inbox của job được dọn sau CLI. `config` có bất kỳ `filter.` nào (kể cả Git LFS toàn cục) hoặc `.gitattributes`
+thay đổi so với baseSha (gồm tệp untracked bị ignore) đều khiến job không commit; chủ máy tự xem và xử lý nhánh.
 Chỉ dùng repo/config Git đáng tin; đây không phải môi trường cách ly thực thi mã hoàn chỉnh.
+
+State đợt B thiếu snapshot `config.worktree` sẽ bị từ chối tái sử dụng. Chủ máy cần kiểm tra state/config,
+prune worktree sạch đã merge hoặc chuẩn bị lại worktree bằng quy trình quản trị tin cậy; không tự tin cấu hình cũ.
+Khóa repo nằm tại `<workdir>/worktree-state/repo-locks/<sha256-real-repo>.lock`, dùng chung giữa các tag trỏ cùng repo,
+bọc prepare và prune, thử lại 25 ms/lần trong khoảng 2 giây. Khóa này được thả trước CLI; khóa worktree vẫn giữ tới sau commit.
+Nếu crash để lại khóa repo, chỉ chủ máy gỡ sau khi xác nhận không còn tiến trình sử dụng repo.
 
 ```powershell
 node agent/mailbot-admin.mjs worktrees
@@ -169,7 +206,21 @@ sau đó `git worktree remove` + `git branch -d`. Worktree bẩn, nhánh chưa m
 `delegate_to_agent {agent, prompt}`. Claude/Codex được cấp tự động khi chạy job; agy không được cấp vì
 không có cấu hình MCP theo phiên tương đương trong thiết kế này. CLI không nhận job token trong env;
 chỉ cấu hình MCP của đúng server chứa `MAILBOT_URL` + `MAILBOT_JOB_TOKEN`.
-Codex xóa map MCP kế thừa rồi thêm các khóa command/args/env cho `mailbot-job` (đường dẫn `/`).
+Codex luôn thêm `--disable plugins`; agent đọc `node <codex.js> --disable plugins mcp list --json`,
+thêm `-c mcp_servers.<tên>.enabled=false` cho **từng** server (quote TOML key khi cần) và kiểm tra lại danh sách phải toàn disabled.
+Danh sách đã kiểm được cache 10 phút theo codex entry; lỗi đọc/xác minh làm job failed. `-c mcp_servers={}` không xóa map kế thừa.
+Sau các cờ disable, agent mới bật và cấu hình command/args/env cho `mailbot-job` (đường dẫn `/`).
+Tệp `.codex-last-<id>.txt` chỉ được đọc/xóa sau kiểm tra đường dẫn, lstat/fstat, tệp thường, nlink=1 và cùng inode;
+link hoặc tệp bị thay thế làm job failed, không lấy nội dung làm câu trả lời.
+
+Đợt C đã thử `agy --settings <json-file> mcp list` không gọi model: các khóa `mcpServers`, `mcp`, `disabledMcpServers`
+đều báo `unknown setting`; `agy mcp list --settings` cũng không hỗ trợ. Chưa chứng minh được cơ chế cô lập theo phiên.
+Vì vậy **trước mỗi job agy**, agent chạy `agy mcp list`; server enabled ngoài `agent.json` → `agy_allowed_global_mcp`
+(mặc định `[]`) làm job failed trước CLI. Lỗi lệnh/định dạng không hiểu cũng từ chối chạy.
+Chủ máy có thể chạy `agy mcp disable agent_mailbox` (và các server khác được liệt kê) để tắt global,
+hoặc chủ động cho phép theo tên, ví dụ `"agy_allowed_global_mcp": ["agent_mailbox"]`.
+Cho phép nghĩa là job email có quyền dùng server đó; không cho phép MCP admin/orchestrator có token điều phối.
+Mailbot không tự sửa cấu hình agy. Chỉ cấp job tools cho Claude/Codex.
 
 Claim sinh token 32 byte ngẫu nhiên, D1 chỉ lưu SHA-256; reclaim đổi token, finish/hủy làm token hết hiệu lực.
 Token chỉ dùng `X-Job-Token` cho `POST /job-api/notify` và `POST /job-api/delegate`, không thay thế admin/reader.
@@ -313,7 +364,7 @@ Các lệnh trên chỉ là hướng dẫn đăng ký, không tự thêm cấu h
 
 1. Chạy `npm install` trong cả `worker/` và `mcp/`.
 2. Trong `worker/`: `npx wrangler login`, rồi `npx wrangler d1 create mailbot`; thay `REPLACE_WITH_D1_ID` bằng ID mới trong `wrangler.toml` (binding vẫn là `DB`).
-3. Với database mới, chạy `npm run schema` (áp dụng lần lượt `schema.sql`, `schema-v2.sql`, `schema-v3.sql` trên D1 remote một lần; xác nhận khi Wrangler hỏi), rồi `npx wrangler deploy`.
+3. Với database mới, chạy `npm run schema` (áp dụng lần lượt `schema.sql`, `schema-v2.sql`, `schema-v3.sql`, `schema-v4.sql` trên D1 remote một lần; xác nhận khi Wrangler hỏi), rồi `npx wrangler deploy`.
 4. Tạo token ngẫu nhiên; chạy `npx wrangler secret put API_TOKEN`, nhập token và ghi cùng token vào cấu hình MCP ở trên.
 5. Bật Email Routing; cấu hình catch-all tới Worker mailbot trong Cloudflare Dashboard để nhận +tag. Luật literal sau chỉ đủ cho inbox không tag:
 
@@ -326,12 +377,13 @@ npx wrangler email routing rules create xuanthieu.site --name "mailbot inbox" --
 
 ## Thử cục bộ
 
-Trong `worker/`, với database local mới, chạy ba schema một lần:
+Trong `worker/`, với database local mới, chạy bốn schema một lần:
 
 ```powershell
 npx wrangler d1 execute mailbot --local --file=schema.sql
 npx wrangler d1 execute mailbot --local --file=schema-v2.sql
 npx wrangler d1 execute mailbot --local --file=schema-v3.sql
+npx wrangler d1 execute mailbot --local --file=schema-v4.sql
 ```
 
 Tạo `.dev.vars` chứa `API_TOKEN=localtest`, rồi chạy `npx wrangler dev --port 8799`.
@@ -357,6 +409,38 @@ test agent tạo tệp trong thư mục tạm hệ thống, thử hardlink, syml
 Nếu sandbox Windows chặn test runner tạo tiến trình con (`spawn EPERM`), chạy `node --test --test-isolation=none`.
 Trong `worker/`, kiểm tra bundle bằng `npx wrangler deploy --dry-run --outdir "$env:TEMP\mb-dry"` (cần dependency đã cài; không deploy).
 Hướng dẫn tiếp quản mã nguồn và các bất biến bảo mật: [`AGENTS.md`](AGENTS.md).
+
+Đợt C, 2026-11-18, offline: `node --check` qua **32 tệp JS/MJS**, JSON package hợp lệ và
+`git diff --check -- mailbot` qua. `npm test` mặc định ở cả ba package lỗi **spawn EPERM** trong test runner;
+`npm test -- --test-isolation=none` qua **worker 34/34, agent 29/29, MCP 3/3**, không skip.
+Lượt kiểm cuối đặt TEMP/TMP vào `.test-tmp` của từng package; các lượt đầu dùng TEMP mặc định do fixture có sẵn.
+Ba thư mục `agent/.test-tmp`, `worker/.test-tmp`, `mcp/.test-tmp` còn cache biên dịch Node:
+automatic approval review từ chối dọn bằng Remove-Item với `blocked by policy`, kể cả đường dẫn cố định đã xác minh trong mailbot.
+Chủ máy tự xóa ba thư mục cache này trước commit; không đưa chúng vào Git.
+Git test dùng config rỗng riêng để không phụ thuộc filter Git LFS của máy; production vẫn từ chối mọi `filter.`.
+Tamper `.git`/config và toplevel được kiểm tại ranh giới đọc/chạy Git vì sandbox bảo vệ metadata Git;
+worktree/add/commit/prune, pathspec và kiểm blob chưa được tạo dùng Git thật trong repo test.
+
+Benchmark chuỗi 2 MB: validate một lần + tái sử dụng kết quả, 40 lần/batch, 5 batch, CPU trung vị **3.125 ms/lượt**;
+batch CPU 4.675 / 3.125 / 3.125 / 3.125 / 3.525 ms, dưới mục tiêu 5 ms.
+Không bao gồm JSON, dựng toàn bộ MIME, I/O/gửi thư; chưa đo trên Cloudflare Free.
+Không chạy model CLI, gửi email, gọi mạng, deploy, migrate D1 hay sửa cấu hình/credential thật.
+`agy --help`, `agy mcp --help`, `agy mcp list --help`, `agy mcp list` và thử settings chỉ đọc cục bộ, không gọi model.
+`claude --help` xác nhận restricted giới hạn file tools/các nguồn settings; test C2 kiểm tra args dựng ra,
+chưa chạy CLI/model để chứng minh runtime permission enforcement.
+
+| Review | Sửa và kiểm thử hồi quy |
+| --- | --- |
+| 1 | From khớp toàn bộ và A-R quote: `worker/test/jobs.test.mjs` → C1 |
+| 2 | Deny Git/state; snapshot config/toplevel, filter và attributes: `agent/test/security-c.test.mjs` + `worktrees.test.mjs` → C2 |
+| 3 | Output Codex chặn link/đổi tệp: `agent/test/security-c.test.mjs` → C3 |
+| 4 | Exclude icase trước tạo blob, reset index cấm, dọn inbox: `agent/test/worktrees.test.mjs` + `security-c.test.mjs` → C4 |
+| 5 + A/B | Codex disable từng server/cache/xác minh; agy fail-closed/allowlist: `agent/test/security-c.test.mjs` → C5/A, C5/B |
+| 6 | b64_lines validate tuyến tính một lần, MIME roundtrip và benchmark: `worker/test/mime.test.mjs` → C6; `agent/test/outbox.test.mjs` |
+| 7 | Hủy/timeout bỏ commit và attachment, dọn dữ liệu/thả khóa: `agent/test/security-c.test.mjs` → C7 |
+| 8 | Ngân sách lệnh nguyên tử, chống auto-reply, revoke token: `worker/test/jobs.test.mjs` + `features-b.test.mjs` → C8 |
+| 9 | Khóa repo canonical, retry và prepare/prune: `agent/test/worktrees.test.mjs` → C9 |
+| 10 | Giữ threads khi rate limit; References root trước notify; reply submit/delegate lần 2 giữ phiên/project/worktree: `worker/test/features-b.test.mjs` → C10 |
 
 Đợt B, 2026-11-18, offline: `node --check` qua 28 tệp (gồm test); `git diff --check` qua.
 `npm test` mặc định ở worker/agent/mcp đều bị sandbox chặn tạo pipe với `spawn EPERM`.

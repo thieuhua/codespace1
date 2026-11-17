@@ -1,22 +1,41 @@
 const one = (s) => String(s ?? "").replace(/[\r\n]+/g, " ").trim();
 const ids = (s) => one(s).match(/<[^<>\s]+>/g) || [];
 const address = /^[^\s<>@,;"\x00-\x1f\x7f]+@[^\s<>@,;"\x00-\x1f\x7f]+$/;
+const validated = new WeakSet();
+
+// One linear scan, without allocating a string/array per MIME line.
+export function validateBase64Lines(s) {
+  const padding = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
+  const nonData = /[^A-Za-z0-9+/]/g;
+  let nextBreak = 76, breaks = 0;
+  while (nonData.test(s)) {
+    const i = nonData.lastIndex - 1;
+    if (i === nextBreak && s.charCodeAt(i) === 13 && s.charCodeAt(i + 1) === 10 && i + 2 < s.length) {
+      nonData.lastIndex++; nextBreak += 78; breaks++;
+    } else if (padding && i === s.length - padding) break;
+    else throw new Error('attachments: base64 không hợp lệ');
+  }
+  const length = s.length - breaks * 2;
+  if (length % 4 || s.length - breaks * 78 > 76) throw new Error('attachments: base64 không hợp lệ');
+  return length / 4 * 3 - padding;
+}
 
 export function validateAttachments(input = []) {
+  if (validated.has(input)) return input;
   if (!Array.isArray(input) || input.length > 10) throw new Error("attachments: tối đa 10 tệp");
   let total = 0;
-  return input.map((a) => {
-    if (!a || typeof a.b64 !== "string") throw new Error("attachments: base64 không hợp lệ");
-    total += a.b64.length;
+  const files = input.map((a) => {
+    if (!a || typeof a.b64_lines !== "string") throw new Error("attachments: base64 không hợp lệ");
+    total += a.b64_lines.length;
     if (total > 2.8 * 1024 * 1024) throw new Error("attachments: base64 vượt 2.8 MB");
-    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(a.b64) || a.b64.length % 4 !== 0) {
-      throw new Error("attachments: base64 không hợp lệ");
-    }
+    const size = validateBase64Lines(a.b64_lines);
     if (typeof a.mime_type !== "string" || !/^[\w.+-]+\/[\w.+-]+$/.test(a.mime_type)) throw new Error("attachments: MIME không hợp lệ");
     const filename = String(a.filename ?? "").replace(/[\x00-\x1f\x7f-\x9f"\\/]/g, "").slice(0, 150).toWellFormed() || "attachment";
-    const size = a.b64.length / 4 * 3 - (a.b64.endsWith("==") ? 2 : a.b64.endsWith("=") ? 1 : 0);
-    return { filename, mime_type: a.mime_type, b64: a.b64, size };
+    return Object.freeze({ filename, mime_type: a.mime_type, b64_lines: a.b64_lines, size });
   });
+  Object.freeze(files);
+  validated.add(files);
+  return files;
 }
 
 export function b64utf8(s) {
@@ -53,7 +72,8 @@ export function buildMail({ from, to, subject, text, inReplyTo, references, mess
     `Message-ID: ${ids(messageId)[0] || `<mailbot-${crypto.randomUUID()}@${from.split("@")[1]}>`}`,
     irt ? `In-Reply-To: ${irt}` : null,
     refs.length ? `References: ${refs.join("\r\n ")}` : null,
-    Number.isSafeInteger(jobId) ? `X-Mailbot-Job: ${jobId}` : null, "MIME-Version: 1.0",
+    Number.isSafeInteger(jobId) ? `X-Mailbot-Job: ${jobId}` : null,
+    'Auto-Submitted: auto-replied', 'X-Auto-Response-Suppress: All', "MIME-Version: 1.0",
   ].filter(Boolean);
   const plain = ["Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: base64", "", wrap76(b64utf8(String(text ?? "")))].join("\r\n");
   if (!files.length) return headers.join("\r\n") + "\r\n" + plain + "\r\n";
@@ -63,7 +83,7 @@ export function buildMail({ from, to, subject, text, inReplyTo, references, mess
     const ascii = a.filename.replace(/[^\x20-\x7e]/g, "_");
     const encoded = encodeURIComponent(a.filename).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     parts.push([`Content-Type: ${a.mime_type}`, "Content-Transfer-Encoding: base64",
-      `Content-Disposition: attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`, "", wrap76(a.b64)].join("\r\n"));
+      `Content-Disposition: attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`, "", a.b64_lines].join("\r\n"));
   }
   return headers.join("\r\n") + "\r\n\r\n" + parts.map((p) => `--${boundary}\r\n${p}\r\n`).join("") + `--${boundary}--\r\n`;
 }

@@ -1,5 +1,18 @@
-import { mkdirSync, lstatSync, realpathSync, existsSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { mkdirSync, lstatSync, realpathSync, existsSync, unlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { join, basename, resolve } from 'node:path';
+
+export function cleanupInbox(cwd, jobId) {
+  if (!Number.isSafeInteger(Number(jobId)) || Number(jobId) < 1) throw new Error('ID job không hợp lệ');
+  let path = resolve(cwd);
+  for (const part of ['', 'inbox', `job-${jobId}`]) {
+    path = join(path, part);
+    if (!existsSync(path)) return;
+    const st = lstatSync(path), real = realpathSync.native(path);
+    const same = process.platform === 'win32' ? real.toLowerCase() === path.toLowerCase() : real === path;
+    if (!st.isDirectory() || st.isSymbolicLink() || !same) throw new Error('Không dọn inbox bị chuyển hướng');
+  }
+  rmSync(path, { recursive: true, force: true });
+}
 
 export function saveInboxAttachment(cwd, jobId, attachmentId, attachment) {
   if (![jobId, attachmentId].every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)) throw new Error('ID tệp không hợp lệ');

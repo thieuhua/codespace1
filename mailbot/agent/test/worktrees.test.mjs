@@ -6,20 +6,21 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { git, prepareWorktree, commitWorktree, listWorktrees, pruneWorktrees, lockWorktree } from '../worktrees.mjs';
+import { git, prepareWorktree, commitWorktree, listWorktrees, pruneWorktrees, lockWorktree, lockRepository, verifyWorktree } from '../worktrees.mjs';
 import { JOB_TOOLS, jobMcp, codexMcpArgs, cliEnv } from '../job-mcp.mjs';
 
 const execFile = childProcess.execFileSync;
 
 function setup(t) {
   const root = mkdtempSync(join(tmpdir(), 'mailbot-wt-test-'));
+  const emptyConfig = join(root, 'empty-config'); writeFileSync(emptyConfig, '');
   // The unelevated Windows sandbox rejects Node pipe handles (EPERM), while file
   // descriptors work. Keep real git and its actual argv, only replace stdio here.
   t.mock.method(childProcess, 'execFileSync', (cmd, args, options) => {
     const outPath = join(root, 'git-stdout'), errPath = join(root, 'git-stderr');
     const out = openSync(outPath, 'w'), err = openSync(errPath, 'w');
     try {
-      execFile(cmd, args, { ...options, stdio: ['ignore', out, err] });
+      execFile(cmd, args, { ...options, env: { ...options.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' }, stdio: ['ignore', out, err] });
       return readFileSync(outPath, 'utf8');
     } catch (e) { e.stderr = readFileSync(errPath, 'utf8'); throw e; }
     finally { closeSync(out); closeSync(err); }
@@ -115,4 +116,98 @@ test('job MCP is scoped to Claude/Codex; token absent from CLI env; paths use fo
   assert.match(args, /mcp_servers.mailbot-job.command=/);
   assert.match(args, /mcp_servers.mailbot-job.env=/);
   assert.equal(JOB_TOOLS.length, 2);
+});
+
+test('C2 config snapshots and actual toplevel are verified before commit; filter config refused', (t) => {
+  const { workdir, repo, projects, job } = setup(t);
+  const state = prepareWorktree(workdir, projects, job);
+  assert.equal(git(state.path, ['config', '--get', 'core.attributesFile']), 'NUL');
+  // Simulate untrusted post-CLI writes at the read boundary: Windows protects
+  // physical .git files in TEMP too. Assert refusal before *any* Git invocation.
+  const read = fs.readFileSync, run = childProcess.execFileSync;
+  let tampered = join(state.gitdir, 'config.worktree'), called = false;
+  t.mock.method(fs, 'readFileSync', (p, ...args) => String(p) === tampered ? '[core]\n worktree = outside\n fsmonitor = arbitrary-command\n' : read(p, ...args));
+  t.mock.method(childProcess, 'execFileSync', (...args) => { called = true; return run(...args); });
+  syncBuiltinESMExports();
+  assert.throws(() => commitWorktree(state, job, 'x'), /config.worktree đã thay đổi/);
+  assert.equal(called, false);
+  tampered = state.commonConfigPath;
+  assert.throws(() => commitWorktree(state, job, 'x'), /common config đã thay đổi/);
+  assert.equal(called, false);
+  fs.readFileSync.mock.restore(); childProcess.execFileSync.mock.restore(); syncBuiltinESMExports();
+  const exec = childProcess.execFileSync;
+  t.mock.method(childProcess, 'execFileSync', (cmd, args, options) => args.includes('--show-toplevel') ? repo : exec(cmd, args, options));
+  syncBuiltinESMExports();
+  assert.throws(() => verifyWorktree(state), /toplevel/);
+  childProcess.execFileSync.mock.restore(); syncBuiltinESMExports();
+  git(repo, ['config', 'filter.test.clean', 'this-must-never-run']);
+  // Snapshot trusted common config for this test; filter guard still blocks git add.
+  state.commonConfig = readFileSync(state.commonConfigPath, 'utf8');
+  assert.throws(() => commitWorktree(state, job, 'x'), /filter\./);
+  assert.equal(git(state.path, ['rev-parse', 'HEAD']), state.baseSha);
+});
+
+test('C2 tracked .gitattributes modifications/deletion refused before add; old state needs owner review', (t) => {
+  const { repo, workdir, projects, job } = setup(t);
+  writeFileSync(join(repo, '.gitattributes'), '*.txt text\n');
+  git(repo, ['add', '.gitattributes']);
+  git(repo, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'attributes']);
+  const state = prepareWorktree(workdir, projects, job);
+  writeFileSync(join(state.path, '.gitattributes'), '*.txt filter=evil\n');
+  assert.throws(() => commitWorktree(state, job, 'x'), /\.gitattributes/);
+  rmSync(join(state.path, '.gitattributes'));
+  assert.throws(() => commitWorktree(state, job, 'x'), /\.gitattributes/);
+  assert.equal(git(state.path, ['diff', '--cached', '--name-only']), '');
+  const legacy = JSON.parse(readFileSync(state.stateFile, 'utf8')); delete legacy.worktreeConfig;
+  writeFileSync(state.stateFile, JSON.stringify(legacy));
+  assert.throws(() => prepareWorktree(workdir, projects, job), /thiếu snapshot/);
+});
+
+test('C2 ignored untracked nested .gitattributes refused before staging', (t) => {
+  const { workdir, projects, job } = setup(t);
+  const state = prepareWorktree(workdir, projects, job);
+  mkdirSync(join(state.path, 'nested'));
+  writeFileSync(join(state.path, '.gitignore'), 'nested/\n');
+  writeFileSync(join(state.path, 'nested', '.gitattributes'), '* filter=evil');
+  assert.throws(() => commitWorktree(state, job, 'x'), /\.gitattributes/);
+  assert.equal(git(state.path, ['diff', '--cached', '--name-only']), '');
+});
+
+test('C4 case-insensitive pathspec excludes negated ignores before object creation; dirty reserved index is reset', (t) => {
+  const { workdir, projects, job } = setup(t);
+  const state = prepareWorktree(workdir, projects, job);
+  writeFileSync(join(state.path, '.gitignore'), '!/inbox/\n!/inbox/**\n!/outbox/\n!/outbox/**\n');
+  for (const dir of ['Inbox', 'Outbox']) {
+    mkdirSync(join(state.path, dir));
+    writeFileSync(join(state.path, dir, 'private.txt'), `unique-${dir}-payload`);
+  }
+  writeFileSync(join(state.path, '.CODEX-LAST-1.txt'), 'unique-codex-payload');
+  writeFileSync(join(state.path, 'hello.txt'), 'safe edit');
+  commitWorktree(state, job, 'x');
+  const files = git(state.path, ['ls-tree', '-r', '--name-only', 'HEAD']);
+  assert.ok(!/inbox|outbox|codex-last/i.test(files));
+  for (const file of ['Inbox/private.txt', 'Outbox/private.txt', '.CODEX-LAST-1.txt']) {
+    const hash = git(state.path, ['hash-object', '--no-filters', file]);
+    assert.throws(() => git(state.path, ['cat-file', '-e', hash]));
+  }
+  git(state.path, ['add', '-f', 'Inbox/private.txt']);
+  assert.throws(() => commitWorktree(state, job, 'x'), /đã bỏ stage/);
+  assert.equal(git(state.path, ['diff', '--cached', '--name-only']), '');
+});
+
+test('C9 repo lock shares identity across tags, retries briefly and guards prepare/prune', (t) => {
+  const { repo, workdir, projects, job } = setup(t);
+  const release = lockRepository(workdir, repo);
+  assert.throws(() => prepareWorktree(workdir, projects, job), /Repo đang khóa/);
+  let waits = 0;
+  const unlock = lockRepository(workdir, repo, { attempts: 2, wait: () => { waits++; release(); } });
+  assert.equal(waits, 1);
+  assert.throws(() => lockRepository(workdir, repo, { attempts: 1 }), /Repo đang khóa/);
+  unlock();
+  const state = prepareWorktree(workdir, projects, job);
+  const again = lockRepository(workdir, repo);
+  assert.equal(pruneWorktrees(workdir, projects, 'demo').removed.length, 0);
+  assert.equal(existsSync(state.path), true);
+  again();
+  assert.equal(pruneWorktrees(workdir, projects, 'demo').removed.length, 1);
 });

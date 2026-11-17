@@ -1,10 +1,19 @@
 export const SECRET_DIRS = [".mailbot", ".ssh", ".aws", ".codex", ".claude", ".config", ".wrangler"];
 export const GIT_READ_TOOLS = ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)"];
 
-export function claudeSettings(home) {
+// Verified by local claude --help: restricted confines file tools to cwd and
+// ignores user/project/local settings. Only reintroduce the allowlisted shell.
+export function claudeIsolationArgs() {
+  return ['--restricted', '--permission-prompts', 'none', '--tools', 'Read,Glob,Grep,Edit,Write,Bash'];
+}
+
+export function claudeSettings(home, workdir = '') {
   const unixHome = home.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
   return JSON.stringify({ permissions: { deny: [
     ...SECRET_DIRS.flatMap((d) => [`Read(/${unixHome}/${d}/**)`, `Edit(/${unixHome}/${d}/**)`, `Bash(*${d}*)`]),
+    ...['**/.git', '**/.git/**', '**/worktree-state/**',
+      ...(workdir ? ['/' + workdir.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) + '/worktree-state/**'] : [])]
+      .flatMap((p) => [`Read(${p})`, `Edit(${p})`]),
     ...["*--no-index*", "*--output*", "*--ext-diff*", "*-c *", "*core.*"].map((s) => `Bash(${s})`),
   ] } });
 }

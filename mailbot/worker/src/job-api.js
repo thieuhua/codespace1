@@ -19,7 +19,8 @@ export async function submitJob(env, { agent, prompt, project = null, reply_to }
   const row = await env.DB.prepare(
     `INSERT INTO jobs (message_id, agent, sender, reply_to, subject, prompt, project, thread_key, created_at)
      SELECT 0, ?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7
-     WHERE (SELECT COUNT(*) FROM jobs WHERE sender = ?2 AND created_at > ?8 AND status != 'rate_limited') < 20
+     WHERE (SELECT COUNT(*) FROM jobs WHERE sender = ?2 AND created_at > ?8 AND status != 'rate_limited') +
+       (SELECT COUNT(*) FROM command_receipts WHERE sender = ?2 AND created_at > ?8) < 20
      RETURNING *`
   ).bind(agent, sender, prompt.split('\n')[0].slice(0, 300), prompt, project,
     `${sender}|<submit-${crypto.randomUUID()}@mailbot>`, now, hour).first();
@@ -43,7 +44,7 @@ export async function notifySender(env, job, { subject, body }, send) {
   // Reserve quota and durable Message-ID together. Finish recovers aliases from references_hdr.
   const row = await env.DB.prepare(
     `UPDATE jobs SET notify_count = notify_count + 1,
-       references_hdr = trim(COALESCE(references_hdr, '') || ' ' || '<mailbot-notify-' || id || '-' || (notify_count + 1) || '@' || ?3 || '>')
+       references_hdr = trim(COALESCE(NULLIF(references_hdr, ''), rfc_message_id, '') || ' ' || '<mailbot-notify-' || id || '-' || (notify_count + 1) || '@' || ?3 || '>')
      WHERE id = ?1 AND status = 'running' AND cancel_requested = 0 AND job_token_hash = ?2 AND notify_count < 3 RETURNING *`
   ).bind(job.id, job.job_token_hash, domain).first();
   if (!row) return fail('notification limit or inactive job', 409);
@@ -68,7 +69,8 @@ export async function delegateJob(env, parent, { agent, prompt }) {
          AND EXISTS (SELECT 1 FROM allowlist WHERE address = jobs.sender AND (agent = '*' OR agent = ?3))
          AND (SELECT COUNT(*) FROM jobs tree WHERE tree.id = COALESCE(jobs.root_id, jobs.id)
               OR tree.root_id = COALESCE(jobs.root_id, jobs.id)) < 3
-         AND (SELECT COUNT(*) FROM jobs rate WHERE rate.sender = jobs.sender AND rate.created_at > ?4 AND rate.status != 'rate_limited') < 20
+         AND (SELECT COUNT(*) FROM jobs rate WHERE rate.sender = jobs.sender AND rate.created_at > ?4 AND rate.status != 'rate_limited') +
+           (SELECT COUNT(*) FROM command_receipts WHERE sender = jobs.sender AND created_at > ?4) < 20
        RETURNING id`
     ).bind(parent.id, parent.job_token_hash, agent, hour),
     env.DB.prepare(

@@ -124,3 +124,55 @@ test('submission and delegation share sender rate budget; cancellation revokes j
   assert.equal(await jobForToken(env, c.job_token), null);
   assert.equal((await delegateJob(env, parent, { agent: 'codex', prompt: 'x' })).code, 409);
 });
+
+test('C10 rate_limited leaves thread project/session intact', async (t) => {
+  const { env, create, send, sqlite } = setup(t);
+  await create('demo');
+  const job = await claimJob(env, ['claude']);
+  await finishJob(env, job.id, { ok: true, session_id: 'kept' }, send);
+  for (let i = 0; i < 19; i++) await create('demo');
+  const before = sqlite.prepare('SELECT * FROM threads ORDER BY thread_key').all();
+  assert.equal((await create('other')).status, 'rate_limited');
+  assert.deepEqual(sqlite.prepare('SELECT * FROM threads ORDER BY thread_key').all(), before);
+});
+
+test('C8 command receipts also bound submission/delegation without consuming child quota', async (t) => {
+  const { env, create, sqlite } = setup(t);
+  await create();
+  const claim = await claimJob(env, ['claude']), parent = await jobForToken(env, claim.job_token);
+  for (let i = 0; i < 19; i++) assert.equal((await create(null, { subject: '/status' })).status, 'command');
+  assert.equal((await submitJob(env, { agent: 'agy', prompt: 'x', reply_to: 'a@example.com' })).code, 429);
+  assert.equal((await delegateJob(env, parent, { agent: 'codex', prompt: 'x' })).code, 409);
+  assert.equal(sqlite.prepare('SELECT delegate_count FROM jobs WHERE id=?').get(parent.id).delegate_count, 0);
+});
+
+for (const origin of ['submit', 'delegate']) test(`C10 ${origin}: notify root first; second reply retains session/project`, async (t) => {
+  const { env, create, send, sent, sqlite } = setup(t);
+  let first;
+  if (origin === 'submit') {
+    await submitJob(env, { agent: 'codex', prompt: 'root', project: 'demo', reply_to: 'a@example.com' });
+    first = await claimJob(env, ['codex']);
+  } else {
+    await create('demo');
+    const parent = await claimJob(env, ['claude']);
+    await delegateJob(env, await jobForToken(env, parent.job_token), { agent: 'codex', prompt: 'child' });
+    first = await claimJob(env, ['codex']);
+  }
+  await finishJob(env, first.id, { ok: true, session_id: 'first-sid' }, send);
+  const reply = (mail) => createJob(env, { msgId: 0, agent: 'codex', sender: 'a@example.com',
+    mail: { text: 'next', subject: 'next', ...mail } }, send);
+  await reply({ messageId: '<reply1@user>', inReplyTo: `<mailbot-job-${first.id}@example.com>` });
+  const next = await claimJob(env, ['codex']);
+  assert.equal(next.resume_session, 'first-sid');
+  assert.equal(next.project, 'demo');
+  await notifySender(env, await jobForToken(env, next.job_token), { subject: 'update', body: 'progress' }, send);
+  const refs = sqlite.prepare('SELECT references_hdr FROM jobs WHERE id=?').get(next.id).references_hdr;
+  assert.ok(refs.startsWith('<reply1@user> <mailbot-notify-'));
+  await finishJob(env, next.id, { ok: true, session_id: 'next-sid' }, send);
+  await reply({ messageId: '<reply2@user>', references: `<reply1@user> <mailbot-job-${next.id}@example.com>` });
+  const third = await claimJob(env, ['codex']);
+  assert.equal(third.resume_session, 'next-sid');
+  assert.equal(third.project, 'demo');
+  // The root key must also remain stable for worktree identity, not just resume.
+  assert.equal(third.thread_key, first.thread_key);
+});

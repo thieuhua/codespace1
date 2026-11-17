@@ -27,18 +27,18 @@ export function readerScope(domain) {
 }
 
 const stripComments = (s) => {
-  // Bỏ comment RFC 5322 "(...)" kể cả lồng nhau, và chuỗi trong ngoặc kép.
+  // Remove comments, preserving quoted property values (RFC 8601).
   let out = "", depth = 0, quoted = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (c === "\\") { if (!depth && !quoted) out += s.slice(i, i + 2); i++; continue; }
-    if (!depth && c === '"') { quoted = !quoted; out += " "; continue; }
-    if (quoted) continue;
+    if (c === "\\") { if (!depth) out += s.slice(i, i + 2); i++; continue; }
+    if (!depth && c === '"') { quoted = !quoted; out += c; continue; }
+    if (quoted) { out += c; continue; }
     if (c === "(") { depth++; continue; }
     if (c === ")" && depth) { depth--; continue; }
     if (!depth) out += c;
   }
-  return out;
+  return depth || quoted ? null : out;
 };
 
 // Xác thực người gửi dựa trên header thô (mail.headerLines, thứ tự từ trên xuống):
@@ -54,21 +54,41 @@ export function senderAuth(mail) {
   const fromLine = fromLines[0].line.replace(/\r?\n[ \t]+/g, " ");
   const m = fromLine.match(/^From:(.*)$/is);
   if (!m) return { ok: false, reason: "header From không chuẩn" };
-  const fromValue = stripComments(m[1]);
-  if ((fromValue.match(/@/g) || []).length !== 1) return { ok: false, reason: "From không phải đúng một địa chỉ" };
+  const fromValue = m[1].trim();
+  const addr = /^[^<>@\s,;()\\"\x00-\x1f\x7f]+@[^<>@\s,;()\\"\x00-\x1f\x7f]+$/;
+  let captured = fromValue;
+  if (!addr.test(captured)) {
+    // Separate name/address before validation; avoid overlapping whitespace
+    // quantifiers (quadratic backtracking on a malformed, very long header).
+    const open = fromValue.lastIndexOf('<');
+    const name = fromValue.slice(0, open).trimEnd();
+    if (open < 1 || !fromValue.endsWith('>') || !/[ \t]/.test(fromValue[open - 1]) ||
+      !/^(?:"[^"\\\x00-\x1f\x7f]*"|[^<>(),;"\\@\x00-\x1f\x7f]+)$/.test(name))
+      return { ok: false, reason: "From không phải đúng một địa chỉ chuẩn" };
+    captured = fromValue.slice(open + 1, -1);
+  }
+  if (!addr.test(captured) || fromValue.includes(',')) return { ok: false, reason: "From không phải đúng một địa chỉ chuẩn" };
   const fromAddr = (mail.from?.address || "").toLowerCase();
-  if (!fromAddr || !fromValue.toLowerCase().includes(fromAddr)) return { ok: false, reason: "From không khớp" };
+  if (!fromAddr || captured.toLowerCase() !== fromAddr) return { ok: false, reason: "From không khớp" };
   const domain = fromAddr.split("@")[1] || "";
 
   const arLine = lines.find((h) => h.key === "authentication-results");
   if (!arLine) return { ok: false, reason: "không có Authentication-Results" };
   const ar = stripComments(arLine.line.replace(/\r?\n[ \t]+/g, " ").replace(/^[^:]*:/, ""));
-  const clauses = ar.split(";").map((c) => c.trim());
+  if (ar === null) return { ok: false, reason: "A-R không chuẩn" };
+  const clauses = [];
+  let start = 0, quoted = false;
+  for (let i = 0; i < ar.length; i++) {
+    if (ar[i] === '\\') { i++; continue; }
+    if (ar[i] === '"') quoted = !quoted;
+    if (ar[i] === ';' && !quoted) { clauses.push(ar.slice(start, i).trim()); start = i + 1; }
+  }
+  clauses.push(ar.slice(start).trim());
   if (clauses.shift().toLowerCase() !== "mx.cloudflare.net") return { ok: false, reason: "A-R đầu tiên không phải của Cloudflare" };
   const dmarc = clauses.find((c) => /^dmarc=/i.test(c));
   if (!dmarc || !/^dmarc=pass(\s|$)/i.test(dmarc)) return { ok: false, reason: "DMARC không pass" };
-  const hf = dmarc.match(/(?:^|\s)header\.from=([^\s]+)/i);
-  if (!hf || hf[1].toLowerCase() !== domain) return { ok: false, reason: "DMARC header.from lệch domain From" };
+  const hf = dmarc.match(/(?:^|\s)header\.from=(?:"([^"\\\s]+)"|([^"\s]+))(?=\s|$)/i);
+  if (!hf || (hf[1] || hf[2]).toLowerCase() !== domain) return { ok: false, reason: "DMARC header.from lệch domain From" };
   return { ok: true, address: fromAddr };
 }
 
@@ -118,6 +138,13 @@ export async function createJob(env, { msgId, agent, tag = null, sender, mail },
     const original = await env.DB.prepare(`SELECT thread_key, project FROM jobs WHERE id = ?1 AND sender = ?2 AND agent = ?3`)
       .bind(Number(alias[1] || alias[2]), sender, agent).first();
     if (original) { key = original.thread_key; inheritedProject = original.project; }
+  } else {
+    // User Message-IDs also alias the canonical thread (submit/delegate have no
+    // original RFC ID). Preserve worktree identity as well as session/project.
+    const original = await env.DB.prepare(
+      `SELECT thread_key, project FROM jobs WHERE rfc_message_id = ?1 AND sender = ?2 AND agent = ?3 ORDER BY id DESC LIMIT 1`
+    ).bind(key.slice(sender.length + 1), sender, agent).first();
+    if (original) { key = original.thread_key; inheritedProject = original.project; }
   }
   const thread = await env.DB.prepare(`SELECT project FROM threads WHERE thread_key = ?1 AND agent = ?2`)
     .bind(key, agent).first();
@@ -125,13 +152,23 @@ export async function createJob(env, { msgId, agent, tag = null, sender, mail },
   const now = new Date();
   const hourAgo = new Date(now - 3600e3).toISOString();
   const { n } = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM jobs WHERE sender = ?1 AND created_at > ?2 AND status != 'rate_limited'`
+    `SELECT (SELECT COUNT(*) FROM jobs WHERE sender = ?1 AND created_at > ?2 AND status != 'rate_limited') +
+       (SELECT COUNT(*) FROM command_receipts WHERE sender = ?1 AND created_at > ?2) AS n`
   ).bind(sender, hourAgo).first();
   const parsed = parseSubject(mail.subject);
   if (parsed.error || parsed.action) {
+    if (n >= RATE_PER_HOUR || (mail.headerLines || []).some((h) =>
+      h.key === 'auto-submitted' && !/^Auto-Submitted:\s*no\s*$/i.test(h.line))) return { status: "command_suppressed" };
+    await env.DB.prepare('DELETE FROM command_receipts WHERE created_at <= ?1').bind(hourAgo).run();
+    const reserved = await env.DB.prepare(
+      `INSERT INTO command_receipts(sender, created_at) SELECT ?1, ?2
+       WHERE (SELECT COUNT(*) FROM command_receipts WHERE sender = ?1 AND created_at > ?3) +
+         (SELECT COUNT(*) FROM jobs WHERE sender = ?1 AND created_at > ?3 AND status != 'rate_limited') < 20
+       RETURNING id`
+    ).bind(sender, now.toISOString(), hourAgo).first();
+    if (!reserved) return { status: 'command_suppressed' };
     let text;
     if (parsed.error) {
-      if (n >= RATE_PER_HOUR) return { status: "command_suppressed" };
       text = `${parsed.error}\n\n${COMMAND_HELP}`;
     } else if (parsed.action === "status") {
       const { results: active } = await env.DB.prepare(
@@ -144,7 +181,7 @@ export async function createJob(env, { msgId, agent, tag = null, sender, mail },
       text = `Job đang chờ/chạy:\n${lines(active)}\n\n5 job gần nhất:\n${lines(recent)}`;
     } else {
       const { results } = await env.DB.prepare(
-        `UPDATE jobs SET cancel_requested = 1,
+        `UPDATE jobs SET cancel_requested = 1, job_token_hash = NULL,
            status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END,
            finished_at = CASE WHEN status = 'pending' THEN ?1 ELSE finished_at END
          WHERE status IN ('pending','running') AND sender = ?2 AND (?3 IS NULL OR id = ?3)
@@ -154,7 +191,7 @@ export async function createJob(env, { msgId, agent, tag = null, sender, mail },
     }
     await sendMail(env, {
       from: `${agent}${project ? '+' + project : ''}@${env.MAIL_DOMAIN || "xuanthieu.site"}`, to: sender,
-      subject: `Re: ${parsed.subject || mail.subject || '(no subject)'}`, text,
+      subject: `Re: ${parsed.subject || `[${parsed.action || 'help'}]`}`, text,
       inReplyTo: mail.messageId, references: mail.references,
     });
     return { status: "command" };
@@ -169,7 +206,7 @@ export async function createJob(env, { msgId, agent, tag = null, sender, mail },
     msgIds(mail.messageId)[0] || "", msgIds(mail.references).join(" "),
     key, status, now.toISOString(), JSON.stringify(parsed.options), project).run();
   const id = res.meta.last_row_id;
-  if (project) await env.DB.prepare(
+  if (project && status === 'pending') await env.DB.prepare(
     `INSERT INTO threads (thread_key, agent, session_id, project, updated_at) VALUES (?1, ?2, '', ?3, ?4)
      ON CONFLICT (thread_key, agent) DO UPDATE SET
        session_id = CASE WHEN project IS NOT excluded.project THEN '' ELSE session_id END,
@@ -268,7 +305,9 @@ export async function finishJob(env, id, { ok, output, session_id, cancelled, at
   const sid = job.status === 'done' && SESSION_RE.test(job.session_id || '') ? job.session_id : '';
   const notifyIds = msgIds(job.references_hdr).filter((s) => s.startsWith(`<mailbot-notify-${job.id}-`));
   if (sid || job.project || notifyIds.length) {
-    await env.DB.batch([job.thread_key, `${job.sender}|${replyId}`, ...notifyIds.map((s) => `${job.sender}|${s}`)].map((key) => env.DB.prepare(
+    await env.DB.batch([...new Set([job.thread_key, `${job.sender}|${replyId}`,
+      ...(job.rfc_message_id ? [`${job.sender}|${job.rfc_message_id}`] : []),
+      ...notifyIds.map((s) => `${job.sender}|${s}`)])].map((key) => env.DB.prepare(
       `INSERT INTO threads (thread_key, agent, session_id, project, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
        ON CONFLICT (thread_key, agent) DO UPDATE SET
        session_id = CASE WHEN excluded.session_id != '' THEN excluded.session_id ELSE threads.session_id END,

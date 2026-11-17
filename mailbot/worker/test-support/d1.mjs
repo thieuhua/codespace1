@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 export function database(t) {
   const sqlite = new DatabaseSync(':memory:');
   t.after(() => sqlite.close());
-  for (const f of ['schema.sql', 'schema-v2.sql', 'schema-v3.sql']) sqlite.exec(readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
+  for (const f of ['schema.sql', 'schema-v2.sql', 'schema-v3.sql', 'schema-v4.sql']) sqlite.exec(readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
   const DB = {
     prepare(sql) {
       const statement = sqlite.prepare(sql.replace(/\?(\d+)/g, '$p$1'));

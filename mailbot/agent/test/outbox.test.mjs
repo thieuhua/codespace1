@@ -19,9 +19,9 @@ test('reads regular files only at level one, detects MIME and cleans outbox', (t
   const { attachments, notes } = readOutbox(outbox);
   assert.equal(attachments.length, 2);
   assert.equal(attachments[0].mime_type, 'text/plain');
-  assert.equal(Buffer.from(attachments[0].b64, 'base64').toString(), 'Xin chào');
+  assert.equal(Buffer.from(attachments[0].b64_lines, 'base64').toString(), 'Xin chào');
   assert.equal(attachments[1].mime_type, 'application/octet-stream');
-  assert.ok(attachments.every((a) => !/[\r\n]/.test(a.b64)));
+  assert.ok(attachments.every((a) => a.b64_lines.split('\r\n').every((line) => line.length <= 76)));
   assert.equal(notes.length, 1);
   assert.equal(existsSync(outbox.path), false);
 });
@@ -53,7 +53,7 @@ test('oversize file skipped; exact total budget accepted and later excess noted'
   writeFileSync(join(outbox.path, 'c-extra.txt'), 'x');
   const r = readOutbox(outbox);
   assert.deepEqual(r.attachments.map((a) => a.filename), ['b-full.bin']);
-  assert.equal(Buffer.from(r.attachments[0].b64, 'base64').length, MAX_BYTES);
+  assert.equal(Buffer.from(r.attachments[0].b64_lines, 'base64').length, MAX_BYTES);
   assert.equal(r.notes.length, 2);
   assert.equal(existsSync(outbox.path), false);
 });

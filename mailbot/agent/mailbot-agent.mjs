@@ -8,15 +8,18 @@
 //     "workdir": "E:\\mailbot-work", "agents": ["claude", "codex", "agy"] }
 import { createServer } from "node:http";
 import { spawn, execFile } from "node:child_process";
-import { readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { claudeSettings, claudeAllowedTools, jobOptions, optionArgs } from "./cli-options.mjs";
-import { prepareOutbox, readOutbox } from "./outbox.mjs";
-import { prepareWorktree, commitWorktree, lockWorktree } from './worktrees.mjs';
+import { claudeSettings, claudeAllowedTools, claudeIsolationArgs, jobOptions, optionArgs } from "./cli-options.mjs";
+import { prepareOutbox } from "./outbox.mjs";
+import { prepareWorktree, lockWorktree } from './worktrees.mjs';
 import { JOB_TOOLS, jobMcp, codexMcpArgs, cliEnv } from './job-mcp.mjs';
 import { saveInboxAttachment } from './inbox.mjs';
+import { readLastOutput } from './cli-output.mjs';
+import { codexInventoryCache, inspectCli, verifyAgyMcp } from './mcp-isolation.mjs';
+import { finalizeFiles } from './job-finalize.mjs';
 
 const CFG_DIR = join(homedir(), ".mailbot");
 const cfg = JSON.parse(readFileSync(join(CFG_DIR, "agent.json"), "utf8"));
@@ -65,9 +68,10 @@ function codexEntry() {
 
 // Trả về { cmd, args, parse(stdout) -> { ok, output, session_id } }
 // Thư mục chứa token/khóa: chặn Claude đọc/sửa (Codex sandbox chỉ chặn ghi, không chặn đọc).
-const CLAUDE_SETTINGS = claudeSettings(homedir());
+const CLAUDE_SETTINGS = claudeSettings(homedir(), WORKDIR);
+const codexInventory = codexInventoryCache();
 
-function commandFor(job, dir, prompt) {
+async function commandFor(job, dir, prompt) {
   const mcp = jobMcp(job, URL_BASE);
   // session_id lấy từ output CLI lần trước: chỉ nhận dạng ID an toàn để không thành cờ dòng lệnh.
   const options = jobOptions(job);
@@ -76,6 +80,7 @@ function commandFor(job, dir, prompt) {
     const args = [
       "-p", "--output-format", "json",
       "--permission-mode", "acceptEdits",
+      ...claudeIsolationArgs(),
       "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: mcp ? { 'mailbot-job': mcp } : {} }),
       "--settings", CLAUDE_SETTINGS,
       "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]), ...(mcp ? JOB_TOOLS : []),
@@ -93,9 +98,11 @@ function commandFor(job, dir, prompt) {
     };
   }
   if (job.agent === "codex") {
+    const entry = codexEntry();
+    const servers = await codexInventory(entry, dir);
     const lastFile = join(dir, `.codex-last-${job.id}.txt`);
     const common = ["--json", "--skip-git-repo-check", "-c", 'sandbox_mode="workspace-write"',
-      ...codexMcpArgs(mcp), "-o", lastFile, ...optionArgs(job.agent, options)];
+      ...codexMcpArgs(mcp, servers), "-o", lastFile, ...optionArgs(job.agent, options)];
     const args = resume
       ? [codexEntry(), "exec", "resume", ...common, resume, "-"]
       : [codexEntry(), "exec", ...common, "-"];
@@ -110,12 +117,14 @@ function commandFor(job, dir, prompt) {
           } catch {}
         }
         let output = "";
-        try { output = readFileSync(lastFile, "utf8"); rmSync(lastFile); } catch { output = out.slice(-20000); }
+        try { output = readLastOutput(lastFile, dir); }
+        catch (e) { if (e.code !== 'ENOENT') throw e; output = out.slice(-20000); }
         return { ok: code === 0, output, session_id };
       },
     };
   }
   if (job.agent === "agy") {
+    verifyAgyMcp(await inspectCli(cfg.agy_exe || 'agy.exe', ['mcp', 'list'], dir), cfg.agy_allowed_global_mcp);
     const args = ["--output-format", "json", "--mode", "accept-edits", "--sandbox"];
     args.push(...optionArgs(job.agent, options, cfg.agy_model));
     if (resume) args.push("--conversation", resume);
@@ -214,7 +223,7 @@ async function handle(job) {
   let dir = join(WORKDIR, job.agent), worktree, unlock;
   const t0 = Date.now();
   log(`job #${job.id} ${job.agent} từ ${job.sender}${job.resume_session ? ` (tiếp phiên ${job.resume_session})` : ""}`);
-  let result;
+  let result, execution;
   let outbox;
   try {
     if (job.project) {
@@ -233,8 +242,9 @@ async function handle(job) {
       "",
       job.prompt,
     ].filter((x) => x !== null).join("\n");
-    const spec = commandFor(job, dir, prompt);
+    const spec = await commandFor(job, dir, prompt);
     const r = await run(spec, dir, job);
+    execution = r;
     try {
       const runs = join(CFG_DIR, "runs");
       mkdirSync(runs, { recursive: true });
@@ -242,20 +252,14 @@ async function handle(job) {
     } catch {}
     result = spec.parse(r.out, r.code);
     result.cancelled = r.cancelled;
+    result.timedOut = r.timedOut;
     if (!result.ok && r.err.trim()) result.output = `${result.output || ""}\n\n[stderr]\n${r.err.slice(-4000)}`;
     if (r.code !== 0 && result.ok) result.ok = false;
   } catch (e) {
-    result = { ok: false, output: `Agent lỗi: ${e.message}` };
+    result = { ok: false, output: `Agent lỗi: ${e.message}`, cancelled: execution?.cancelled, timedOut: execution?.timedOut };
   }
-  const { attachments, notes } = outbox ? readOutbox(outbox) : { attachments: [], notes: [] };
-  let gitReport = '';
-  try {
-    if (worktree) gitReport = commitWorktree(worktree, job, job.mail_domain || cfg.mail_domain || 'xuanthieu.site');
-  } catch (e) {
-    result.ok = false;
-    result.session_id = null;
-    gitReport = `\n\n[Git lỗi] ${e.message}\nNhánh: ${worktree?.branch || ''}\nWorktree: ${worktree?.path || dir}`;
-  } finally { unlock?.(); }
+  const { attachments, notes, gitReport } = finalizeFiles({ result, outbox, worktree, dir, job,
+    domain: job.mail_domain || cfg.mail_domain || 'xuanthieu.site', unlock, executed: !!execution });
   const tail = gitReport.slice(0, 40000) + (notes.length ? `\n\n[Gửi tệp]\n${notes.join('\n').slice(0, 10000)}` : '');
   result.output = String(result.output || '').slice(0, 200000 - tail.length) + tail;
   const secs = Math.round((Date.now() - t0) / 1000);
