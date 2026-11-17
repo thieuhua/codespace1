@@ -18,7 +18,7 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
 
 | Thành phần | Giá trị |
 | --- | --- |
-| Email Routing | MX `route1/2/3.mx.cloudflare.net`; catch-all → Worker `mailbot` (Worker tự từ chối địa chỉ không hợp lệ) |
+| Email Routing | MX `route1/2/3.mx.cloudflare.net`; luật literal cho `claude@`, `codex@`, `agy@` và từng `<agent>+<tag>@` đã khai báo → Worker `mailbot` (catch-all giữ `drop`) |
 | Worker | [`worker/src/`](worker/src/) (`index.js` định tuyến, `mailbot.js` whitelist/job, `send.js` gửi thư); [`worker/wrangler.toml`](worker/wrangler.toml) |
 | D1 | Database `mailbot`; schema `worker/schema.sql` + `worker/schema-v2.sql` + `worker/schema-v3.sql` + `worker/schema-v4.sql` |
 | API | `https://mailbot.thieupro666.workers.dev`; secret `API_TOKEN` (đọc inbox), `ADMIN_TOKEN` (agent, whitelist) |
@@ -135,8 +135,14 @@ Các schema và lệnh triển khai ở đây là hướng dẫn để chủ má
 
 ## Dự án thật qua +tag (T1)
 
-Bật **catch-all Email Routing → Worker mailbot** để nhận `claude+demo@xuanthieu.site`,
-`codex+demo@xuanthieu.site`, `agy+demo@xuanthieu.site`. Tag gồm 1–32 chữ thường/số/dấu `-`.
+Catch-all của Email Routing không trỏ được về Worker qua wrangler (chỉ `forward`/`drop`), và luật literal không khớp `+tag`,
+nên mỗi tag cần luật literal riêng cho từng agent, ví dụ:
+
+```bash
+for a in claude codex agy; do npx wrangler email routing rules create xuanthieu.site --name "$a demo" --match-type literal --match-field to --match-value $a+demo@xuanthieu.site --action-type worker --action-value mailbot; done
+```
+
+Địa chỉ không có luật bị Cloudflare từ chối trước khi tới Worker. Tag gồm 1–32 chữ thường/số/dấu `-`.
 `+tag` luôn cần DMARC + whitelist đúng agent. Chỉ `claude@` không tag là inbox công khai.
 
 Thêm `projects` vào `~/.mailbot/agent.json` (giữ các trường đang có):
@@ -366,7 +372,7 @@ Các lệnh trên chỉ là hướng dẫn đăng ký, không tự thêm cấu h
 2. Trong `worker/`: `npx wrangler login`, rồi `npx wrangler d1 create mailbot`; thay `REPLACE_WITH_D1_ID` bằng ID mới trong `wrangler.toml` (binding vẫn là `DB`).
 3. Với database mới, chạy `npm run schema` (áp dụng lần lượt `schema.sql`, `schema-v2.sql`, `schema-v3.sql`, `schema-v4.sql` trên D1 remote một lần; xác nhận khi Wrangler hỏi), rồi `npx wrangler deploy`.
 4. Tạo token ngẫu nhiên; chạy `npx wrangler secret put API_TOKEN`, nhập token và ghi cùng token vào cấu hình MCP ở trên.
-5. Bật Email Routing; cấu hình catch-all tới Worker mailbot trong Cloudflare Dashboard để nhận +tag. Luật literal sau chỉ đủ cho inbox không tag:
+5. Bật Email Routing và tạo luật literal (thêm luật cho từng `<agent>+<tag>@` như mục dự án):
 
 ```powershell
 npx wrangler email routing enable xuanthieu.site
