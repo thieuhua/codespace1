@@ -33,7 +33,8 @@ export async function pruneTaskDirectories(workdir,lookup,{now=Date.now(),days=7
   if(!existsSync(state)) return [];
   ordinaryDirectory(root);ordinaryDirectory(state);
   const removed=[];
-  for(const name of readdirSync(state).filter(n=>/^(claude|codex|agy)-task-[1-9]\d*\.json$/.test(n)).slice(0,limit)) {
+  for(const name of readdirSync(state).filter(n=>/^(claude|codex|agy)-task-[1-9]\d*\.json$/.test(n))) {
+    if(removed.length>=limit) break;
     const marker=join(state,name),st=lstatSync(marker);
     if(!st.isFile()||st.isSymbolicLink()||st.nlink!==1) continue;
     const data=JSON.parse(readFileSync(marker,'utf8'));

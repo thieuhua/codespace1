@@ -201,7 +201,7 @@ test('run/mail ceilings and task TTL use terminal path; cron bounded, mail persi
   const f=setup(t),root=await f.create(),r=await f.claim();
   f.sqlite.prepare('UPDATE tasks SET mail_count=14 WHERE id=?').run(root.id);
   await Promise.all(Array.from({length:6},()=>f.tool(r,'notify',{text:'progress'})));
-  assert.equal(f.row('tasks',root.id).mail_count,15);assert.equal(f.sent.length,1);
+  assert.equal(f.row('tasks',root.id).mail_count,14);assert.equal(f.sent.length,0);
   for(let i=0;i<8;i++) await f.create('agy');
   f.sqlite.prepare("UPDATE tasks SET expires_at='2000' WHERE id!=?").run(root.id);
   let sent=0;

@@ -79,3 +79,19 @@ test('admin/run APIs separate auth; old job APIs removed; owner fixed; finish re
   await api(`/runs/${run.id}/result`,'admin',{ok:true,output:'done'});
   assert.equal((await api(`/messages/${id}`,'admin',undefined,{},'DELETE')).status,200);
 });
+
+for (const status of ['failed', 'cancelled']) test(`E7 DELETE releases unconsumed mail of ${status} task`, async t => {
+  const { api, email, sqlite } = setup(t);
+  await email('claude@example.com');
+  const id = sqlite.prepare('SELECT id FROM messages').get().id;
+  const { run } = await (await api('/runs/claim', 'admin', { agents: ['claude'] })).json();
+  sqlite.prepare("INSERT INTO events(task_id,kind,message_id,payload_json,dedupe_key,created_at) VALUES(?,'mail',?,'{}','late','now')").run(run.task_id, id);
+  if (status === 'failed') await api(`/runs/${run.id}/result`, 'admin', { ok: false, output: 'error' });
+  else {
+    const before = sqlite.prepare('SELECT COUNT(*) n FROM outbound_mails').get().n;
+    await api(`/tasks/${run.task_id}/cancel?owner=a%40example.com`, 'admin', {});
+    assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM outbound_mails WHERE status=\'sent\'').get().n, before + 1);
+  }
+  assert.equal((await api(`/messages/${id}`, 'admin', undefined, {}, 'DELETE')).status, 200);
+  assert.equal(sqlite.prepare('SELECT id FROM messages WHERE id=?').get(id), undefined);
+});

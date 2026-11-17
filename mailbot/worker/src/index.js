@@ -164,7 +164,7 @@ async function messagesApi(request, env, url, parts, role) {
   }
   if (parts.length === 2 && request.method === "DELETE") {
     const live = await env.DB.prepare(
-      `SELECT 1 FROM events e LEFT JOIN runs r ON r.id=e.run_id WHERE e.message_id=?1 AND (e.run_id IS NULL OR r.status IN ('pending','running'))`
+      `SELECT 1 WHERE ?1 IN (${liveMessages})`
     ).bind(id).first();
     if (live) return json({ error: 'thư có event chưa xử lý hoặc run chờ/chạy' }, 409);
     await env.DB.batch([
@@ -229,7 +229,7 @@ async function tasksApi(request, env, url, parts) {
   const id=Number(parts[1]);
   if(!Number.isSafeInteger(id)||id<1) return json({error:'bad id'},400);
   const result=parts.length===2&&request.method==='GET'?await getTask(env,id,owner):
-    parts.length===3&&parts[2]==='cancel'&&request.method==='POST'?await cancelTask(env,id,owner):{error:'not found',code:404};
+    parts.length===3&&parts[2]==='cancel'&&request.method==='POST'?await cancelTask(env,id,owner,sendMail):{error:'not found',code:404};
   return json(result,result.code||200);
 }
 

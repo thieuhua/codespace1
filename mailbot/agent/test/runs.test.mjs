@@ -68,3 +68,18 @@ test('task cwd rejects junction/symlink parent',t=>{
   try{symlinkSync(outside,join(root,'claude'),'junction');}catch(e){if(['EPERM','EACCES'].includes(e.code))return t.skip(e.code);throw e;}
   assert.throws(()=>prepareTaskDirectory(root,'claude',1));assert.ok(existsSync(outside));
 });
+
+for (const blocker of ['recent', 'active', 'missing']) test(`E5 retention scans past first ${blocker} marker and removes at most limit`, async t => {
+  const root = fixture(t), now = Date.now() + 8 * 86400000;
+  for (const id of [1, 2, 3]) {
+    prepareTaskDirectory(root, 'claude', id);
+    recordTaskUse(root, { agent: 'claude', task_id: id });
+  }
+  if (blocker === 'recent') writeFileSync(join(root, 'task-state', 'claude-task-1.json'), JSON.stringify({ agent: 'claude', id: 1, last_used: now }));
+  const terminal = { status: 'done', finished_at: new Date(now - 8 * 86400000).toISOString() };
+  const lookup = async id => id !== 1 ? terminal : blocker === 'missing' ? null : { status: 'active' };
+  assert.deepEqual(await pruneTaskDirectories(root, lookup, { now, limit: 1 }), [2]);
+  assert.ok(existsSync(join(root, 'claude', 'task-1')));
+  assert.ok(existsSync(join(root, 'claude', 'task-3')));
+  assert.deepEqual(await pruneTaskDirectories(root, lookup, { now, limit: 1 }), [3]);
+});
