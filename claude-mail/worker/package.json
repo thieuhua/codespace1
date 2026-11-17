@@ -1,0 +1,16 @@
+{
+  "name": "claude-mail-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "schema": "wrangler d1 execute claude-mail --remote --file=schema.sql",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "postal-mime": "^2.4.4"
+  },
+  "devDependencies": {
+    "wrangler": "^4.164.0"
+  }
+}

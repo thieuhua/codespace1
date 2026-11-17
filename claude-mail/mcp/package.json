@@ -1,0 +1,10 @@
+{
+  "name": "claude-mail-mcp",
+  "private": true,
+  "type": "module",
+  "bin": { "claude-mail-mcp": "server.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "zod": "^3.25.0"
+  }
+}

@@ -1,0 +1,202 @@
+// Mailbot: thư từ người gửi trong whitelist tới <agent>@domain thành job chạy CLI trên laptop.
+
+export const AGENTS = ["claude", "codex", "agy"];
+const RATE_PER_HOUR = 20;
+const KEEP_JOBS = 1000;
+const SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+export function agentFor(envelopeTo) {
+  const local = (envelopeTo || "").toLowerCase().split("@")[0].split("+")[0];
+  return AGENTS.includes(local) ? local : null;
+}
+
+const stripComments = (s) => {
+  // Bỏ comment RFC 5322 "(...)" kể cả lồng nhau, và chuỗi trong ngoặc kép.
+  let out = "", depth = 0, quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") { if (!depth && !quoted) out += s.slice(i, i + 2); i++; continue; }
+    if (!depth && c === '"') { quoted = !quoted; out += " "; continue; }
+    if (quoted) continue;
+    if (c === "(") { depth++; continue; }
+    if (c === ")" && depth) { depth--; continue; }
+    if (!depth) out += c;
+  }
+  return out;
+};
+
+// Xác thực người gửi dựa trên header thô (mail.headerLines, thứ tự từ trên xuống):
+// - Chỉ tin Authentication-Results đầu tiên, phải do mx.cloudflare.net thêm (MTA nhận prepend header;
+//   A-R giả do người gửi chèn nằm phía dưới).
+// - Mệnh đề "dmarc=pass" phải là một resinfo riêng (tách theo ";"), header.from lấy trong chính mệnh đề đó.
+// - Thư phải có đúng một header "From:" viết chuẩn, chứa đúng một địa chỉ (postal-mime lấy From cuối cùng
+//   và chấp nhận "From :", nên không tin mail.from khi có nhiều hơn một).
+export function senderAuth(mail) {
+  const lines = mail.headerLines || [];
+  const fromLines = lines.filter((h) => h.key === "from");
+  if (fromLines.length !== 1) return { ok: false, reason: `có ${fromLines.length} header From` };
+  const fromLine = fromLines[0].line.replace(/\r?\n[ \t]+/g, " ");
+  const m = fromLine.match(/^From:(.*)$/is);
+  if (!m) return { ok: false, reason: "header From không chuẩn" };
+  const fromValue = stripComments(m[1]);
+  if ((fromValue.match(/@/g) || []).length !== 1) return { ok: false, reason: "From không phải đúng một địa chỉ" };
+  const fromAddr = (mail.from?.address || "").toLowerCase();
+  if (!fromAddr || !fromValue.toLowerCase().includes(fromAddr)) return { ok: false, reason: "From không khớp" };
+  const domain = fromAddr.split("@")[1] || "";
+
+  const arLine = lines.find((h) => h.key === "authentication-results");
+  if (!arLine) return { ok: false, reason: "không có Authentication-Results" };
+  const ar = stripComments(arLine.line.replace(/\r?\n[ \t]+/g, " ").replace(/^[^:]*:/, ""));
+  const clauses = ar.split(";").map((c) => c.trim());
+  if (clauses.shift().toLowerCase() !== "mx.cloudflare.net") return { ok: false, reason: "A-R đầu tiên không phải của Cloudflare" };
+  const dmarc = clauses.find((c) => /^dmarc=/i.test(c));
+  if (!dmarc || !/^dmarc=pass(\s|$)/i.test(dmarc)) return { ok: false, reason: "DMARC không pass" };
+  const hf = dmarc.match(/(?:^|\s)header\.from=([^\s]+)/i);
+  if (!hf || hf[1].toLowerCase() !== domain) return { ok: false, reason: "DMARC header.from lệch domain From" };
+  return { ok: true, address: fromAddr };
+}
+
+export async function isAllowed(env, address, agent) {
+  const row = await env.DB.prepare(
+    `SELECT 1 FROM allowlist WHERE address = ?1 AND (agent = '*' OR agent = ?2) LIMIT 1`
+  ).bind(address, agent).first();
+  return !!row;
+}
+
+// Bỏ phần trích dẫn thư cũ ở CUỐI thư: dòng giới thiệu ("On ... wrote:", "Vào ... đã viết:", có thể bị gói
+// thành 2-3 dòng) cùng khối ">" phía sau, và chữ ký của bot. Dấu ">" giữa thư (trích lỗi, blockquote) được giữ.
+export function extractPrompt(text) {
+  let lines = (text || "").replace(/\r\n/g, "\n").split("\n");
+  // Bỏ khối ">" và dòng trống ở cuối thư.
+  let end = lines.length;
+  while (end > 0 && (lines[end - 1].startsWith(">") || !lines[end - 1].trim())) end--;
+  const hadQuote = lines.slice(end).some((l) => l.startsWith(">"));
+  if (!hadQuote) end = lines.length;
+  // Tìm dòng giới thiệu trích dẫn ngay trước khối vừa bỏ (gộp tối đa 3 dòng cuối).
+  for (let k = 1; hadQuote && k <= 3 && end - k >= 0; k++) {
+    const joined = lines.slice(end - k, end).join(" ").replace(/\s+/g, " ").trim();
+    if (/^(On|Vào|Le|Am|El)\b.*(wrote|đã viết|a écrit|schrieb|escribió)\s*:$/i.test(joined)) { end -= k; break; }
+  }
+  lines = lines.slice(0, end);
+  // Bỏ chữ ký bot ("-- " rồi "<agent>@ · job #") nếu người gửi dán lại.
+  const sig = lines.findIndex((l, i) => l === "-- " && /@ · job #\d+/.test(lines[i + 1] || ""));
+  if (sig >= 0) lines = lines.slice(0, sig);
+  return lines.join("\n").trim();
+}
+
+const msgIds = (s) => String(s || "").match(/<[^<>\s]+>/g) || [];
+
+function threadKey(sender, mail) {
+  const root = msgIds(mail.references)[0] || msgIds(mail.inReplyTo)[0] || msgIds(mail.messageId)[0]
+    || `<local-${crypto.randomUUID()}>`;
+  // Gắn người gửi để người khác biết Message-ID cũng không nối vào phiên của mình được.
+  return `${sender}|${root}`;
+}
+
+export async function createJob(env, { msgId, agent, sender, mail }) {
+  const now = new Date();
+  const hourAgo = new Date(now - 3600e3).toISOString();
+  const { n } = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM jobs WHERE sender = ?1 AND created_at > ?2 AND status != 'rate_limited'`
+  ).bind(sender, hourAgo).first();
+  const status = n >= RATE_PER_HOUR ? "rate_limited" : "pending";
+  const prompt = extractPrompt(mail.text || "") || (mail.subject || "").trim();
+  const res = await env.DB.prepare(
+    `INSERT INTO jobs (message_id, agent, sender, subject, prompt, rfc_message_id, references_hdr,
+       thread_key, status, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+  ).bind(msgId, agent, sender, (mail.subject || "").slice(0, 300), prompt,
+    msgIds(mail.messageId)[0] || "", msgIds(mail.references).join(" "),
+    threadKey(sender, mail), status, now.toISOString()).run();
+  const id = res.meta.last_row_id;
+  await env.DB.prepare(`DELETE FROM jobs WHERE id <= ?1 AND status NOT IN ('pending','running')`)
+    .bind(id - KEEP_JOBS).run();
+  return { id, status };
+}
+
+export async function wakeAgent(env) {
+  if (!env.WAKE_URL || !env.ADMIN_TOKEN) return;
+  try {
+    await fetch(env.WAKE_URL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.ADMIN_TOKEN}` },
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    // Laptop tắt hoặc hầm đứt: job vẫn nằm trong hàng đợi, agent sẽ tự kéo khi chạy lại.
+  }
+}
+
+// Lấy một job cho agent. Job "running" quá 30 phút (laptop chết giữa chừng) được chạy lại 1 lần;
+// treo lần nữa thì chuyển sang failed để không kẹt mãi.
+export async function claimJob(env, agents) {
+  const list = agents.filter((a) => AGENTS.includes(a));
+  if (!list.length) return null;
+  const now = new Date().toISOString();
+  const stale = new Date(Date.now() - 30 * 60e3).toISOString();
+  await env.DB.prepare(
+    `UPDATE jobs SET status = 'failed', finished_at = ?1, output = 'Quá thời gian sau 2 lần chạy'
+     WHERE status = 'running' AND claimed_at < ?2 AND attempts >= 2`
+  ).bind(now, stale).run();
+  const marks = list.map((_, i) => `?${i + 3}`).join(",");
+  const job = await env.DB.prepare(
+    `UPDATE jobs SET status = 'running', claimed_at = ?1, attempts = attempts + 1
+     WHERE id = (
+       SELECT id FROM jobs
+       WHERE agent IN (${marks})
+         AND (status = 'pending' OR (status = 'running' AND claimed_at < ?2 AND attempts < 2))
+       ORDER BY id LIMIT 1)
+     RETURNING *`
+  ).bind(now, stale, ...list).first();
+  if (!job) return null;
+  const thread = await env.DB.prepare(
+    `SELECT session_id FROM threads WHERE thread_key = ?1 AND agent = ?2`
+  ).bind(job.thread_key, job.agent).first();
+  const { results: attachments } = await env.DB.prepare(
+    `SELECT id, filename, mime_type, size, content_b64 IS NOT NULL AS stored
+     FROM attachments WHERE message_id = ?1 ORDER BY id`
+  ).bind(job.message_id).all();
+  const resume = SESSION_RE.test(thread?.session_id || "") ? thread.session_id : null;
+  return { ...job, resume_session: resume, attachments };
+}
+
+export async function finishJob(env, id, { ok, output, session_id }, send) {
+  const job = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?1`).bind(id).first();
+  if (!job) return { error: "not found" };
+  if (job.status !== "running") return { error: `job đang ở trạng thái ${job.status}` };
+  const now = new Date().toISOString();
+  const text = String(output || "").slice(0, 200_000);
+  const sid = SESSION_RE.test(session_id || "") ? session_id : null;
+  const domain = env.MAIL_DOMAIN || "xuanthieu.site";
+  const replyId = `<mailbot-${job.id}-${crypto.randomUUID()}@${domain}>`;
+  const stmts = [
+    env.DB.prepare(
+      `UPDATE jobs SET status = ?2, finished_at = ?3, exit_ok = ?4, output = ?5, session_id = ?6 WHERE id = ?1`
+    ).bind(id, ok ? "done" : "failed", now, ok ? 1 : 0, text, sid),
+  ];
+  if (sid && ok) {
+    // Lưu theo gốc chuỗi thư và theo Message-ID thư trả lời (cho client chỉ gửi In-Reply-To).
+    for (const key of [job.thread_key, `${job.sender}|${replyId}`]) {
+      stmts.push(
+        env.DB.prepare(
+          `INSERT INTO threads (thread_key, agent, session_id, updated_at) VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT (thread_key, agent) DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at`
+        ).bind(key, job.agent, sid, now)
+      );
+    }
+  }
+  await env.DB.batch(stmts);
+
+  const body = (ok ? text : `Lỗi khi chạy ${job.agent}:\n\n${text}`).trim() || "(không có nội dung trả về)";
+  const footer = `\n\n-- \n${job.agent}@ · job #${job.id}${sid ? ` · phiên ${sid}` : ""}\n` +
+    "Trả lời thư này để tiếp tục cùng phiên; gửi thư mới để bắt đầu phiên mới.";
+  try {
+    await send(job, body + footer, replyId);
+    await env.DB.prepare(`UPDATE jobs SET reply_status = 'sent' WHERE id = ?1`).bind(id).run();
+    return { ok: true, reply: "sent" };
+  } catch (err) {
+    const msg = String(err?.message || err).slice(0, 1000);
+    await env.DB.prepare(`UPDATE jobs SET reply_status = 'error', reply_error = ?2 WHERE id = ?1`).bind(id, msg).run();
+    return { ok: true, reply: "error", error: msg };
+  }
+}

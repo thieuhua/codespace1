@@ -8,6 +8,7 @@ Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm tro
 | --- | --- | --- |
 | [Agent Mailbox](agent-mailbox/) | Session và mailbox MCP cục bộ trên Windows cho Codex/Antigravity | [README](agent-mailbox/README.md) |
 | [VPS MCP Gateway](vps-mcp/) | MCP Server chạy trên VPS Debian 12; Codespace chỉ sửa mã nguồn | [README](vps-mcp/README.md) |
+| [Claude Mail](claude-mail/) | Địa chỉ `claude@xuanthieu.site` cho Claude nhận thư: Cloudflare Email Routing → Worker + D1 → MCP | [README](claude-mail/README.md) |
 | [Laptop Tunnel](laptop-tunnel/) | Đưa dịch vụ TCP/UDP trên laptop Windows ra Internet qua VPS bằng WireGuard (`laptop.xuanthieu.site`) | [README](laptop-tunnel/README.md) |
 | [Focus Monitor](focus-monitor/) | Demo nhận diện mất focus, trang bị ẩn, rời trang và dấu hiệu cần xem xét | [README](focus-monitor/README.md) |
 | [Anamorphic Screen](anamorphic-screen/) | Ứng dụng LAN bù góc nhìn bằng ảnh điện thoại, marker ArUco và CSS homography | [README](anamorphic-screen/README.md) |

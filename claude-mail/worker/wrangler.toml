@@ -1,0 +1,23 @@
+name = "claude-mail"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "claude-mail"
+database_id = "81d3e817-d855-4b24-aba7-8debb0b12600"
+
+# Gửi thư trả lời (Workers Free: chỉ tới địa chỉ đã xác minh trong Email Routing)
+[[send_email]]
+name = "EMAIL"
+
+[vars]
+MAIL_DOMAIN = "xuanthieu.site"
+# Agent trên laptop, qua nginx VPS + hầm wg-lap (lap-web add mailbot 20025)
+WAKE_URL = "https://mailbot.xuanthieu.site/wake"
+
+# Secrets (wrangler secret put ...):
+#   API_TOKEN   — MCP đọc inbox claude@
+#   ADMIN_TOKEN — agent trên laptop + quản lý whitelist (~/.claude-mail/agent.json)
