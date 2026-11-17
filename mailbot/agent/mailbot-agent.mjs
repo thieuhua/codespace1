@@ -12,6 +12,8 @@ import { readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync, rmS
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
+import { claudeSettings, claudeAllowedTools, jobOptions, optionArgs } from "./cli-options.mjs";
+import { prepareOutbox, readOutbox } from "./outbox.mjs";
 
 const CFG_DIR = join(homedir(), ".mailbot");
 const cfg = JSON.parse(readFileSync(join(CFG_DIR, "agent.json"), "utf8"));
@@ -29,12 +31,12 @@ function log(...a) {
   try { appendFileSync(LOG, line + "\n"); } catch {}
 }
 
-async function api(path, body) {
+async function api(path, body, timeout = 60e3) {
   const res = await fetch(URL_BASE + path, {
     method: body === undefined ? "GET" : "POST",
     headers: { authorization: `Bearer ${cfg.admin_token}`, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(60e3),
+    signal: AbortSignal.timeout(timeout),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`API ${path} ${res.status}: ${data.error || res.statusText}`);
@@ -59,24 +61,22 @@ function codexEntry() {
 
 // Trả về { cmd, args, parse(stdout) -> { ok, output, session_id } }
 // Thư mục chứa token/khóa: chặn Claude đọc/sửa (Codex sandbox chỉ chặn ghi, không chặn đọc).
-const HOME = homedir().replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
-const SECRET_DIRS = [".mailbot", ".ssh", ".aws", ".codex", ".claude", ".config", ".wrangler"];
-const CLAUDE_SETTINGS = JSON.stringify({
-  permissions: {
-    deny: SECRET_DIRS.flatMap((d) => [`Read(/${HOME}/${d}/**)`, `Edit(/${HOME}/${d}/**)`]),
-  },
-});
+const CLAUDE_SETTINGS = claudeSettings(homedir());
 
 function commandFor(job, dir, prompt) {
   // session_id lấy từ output CLI lần trước: chỉ nhận dạng ID an toàn để không thành cờ dòng lệnh.
-  const resume = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(job.resume_session || "") ? job.resume_session : null;
+  const options = jobOptions(job);
+  const resume = !options.new && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(job.resume_session || "") ? job.resume_session : null;
   if (job.agent === "claude") {
     const args = [
       "-p", "--output-format", "json",
       "--permission-mode", "acceptEdits",
       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
       "--settings", CLAUDE_SETTINGS,
+      "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]),
+      "--system-prompt-snapshot", "off",
       "--append-system-prompt", SYS(job, dir),
+      ...optionArgs(job.agent, options),
     ];
     if (resume) args.push("--resume", resume);
     return {
@@ -90,7 +90,7 @@ function commandFor(job, dir, prompt) {
   if (job.agent === "codex") {
     const lastFile = join(dir, `.codex-last-${job.id}.txt`);
     const common = ["--json", "--skip-git-repo-check", "-c", 'sandbox_mode="workspace-write"',
-      "-c", "mcp_servers={}", "-o", lastFile];
+      "-c", "mcp_servers={}", "-o", lastFile, ...optionArgs(job.agent, options)];
     const args = resume
       ? [codexEntry(), "exec", "resume", ...common, resume, "-"]
       : [codexEntry(), "exec", ...common, "-"];
@@ -112,7 +112,7 @@ function commandFor(job, dir, prompt) {
   }
   if (job.agent === "agy") {
     const args = ["--output-format", "json", "--mode", "accept-edits", "--sandbox"];
-    if (cfg.agy_model) args.push("--model", cfg.agy_model);
+    args.push(...optionArgs(job.agent, options, cfg.agy_model));
     if (resume) args.push("--conversation", resume);
     return {
       cmd: cfg.agy_exe || "agy.exe", args, stdin: `${SYS(job, dir)}\n\n---\n\n${prompt}`,
@@ -137,14 +137,17 @@ function lastJson(out) {
 
 const MAX_OUT = 4 * 1024 * 1024;
 
-function run({ cmd, args, stdin }, cwd) {
+function run({ cmd, args, stdin }, cwd, job) {
   return new Promise((resolve) => {
-    let done = false, out = "", err = "", timedOut = false;
+    let done = false, out = "", err = "", timedOut = false, cancelled = false;
+    let cancelTimer, killTimer;
     const finish = (code, extra = "") => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ code, out, err: err + extra, timedOut });
+      clearTimeout(cancelTimer);
+      clearTimeout(killTimer);
+      resolve({ code, out, err: err + extra, timedOut, cancelled });
     };
     const child = spawn(cmd, args, { cwd, windowsHide: true, env: { ...process.env } });
     child.stdout.setEncoding("utf8");
@@ -152,18 +155,28 @@ function run({ cmd, args, stdin }, cwd) {
     child.stdout.on("data", (d) => { if (out.length < MAX_OUT) out += d; });
     child.stderr.on("data", (d) => { if (err.length < MAX_OUT) err += d; });
     child.stdin.on("error", () => {}); // CLI thoát sớm (EPIPE) không được làm sập agent
-    const timer = setTimeout(() => {
-      timedOut = true;
-      log(`timeout, kill pid ${child.pid}`);
+    const stop = () => {
+      if (done || !child.pid) return;
+      log(`stop pid ${child.pid}, cancelled=${cancelled}`);
       execFile("taskkill", ["/T", "/F", "/PID", String(child.pid)], () => {
+        if (done) return;
         // Tiến trình cháu giữ pipe thì "close" không bao giờ đến: đóng pipe và ép kết thúc.
         child.stdout.destroy();
         child.stderr.destroy();
-        setTimeout(() => finish(-1, `\n[Quá thời gian ${TIMEOUT_MS / 60e3} phút, đã dừng]`), 5000);
+        killTimer = setTimeout(() => finish(-1, cancelled ? "\n[Đã hủy job]" : `\n[Quá thời gian ${TIMEOUT_MS / 60e3} phút, đã dừng]`), 5000);
       });
-    }, TIMEOUT_MS);
+    };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, TIMEOUT_MS);
+    const checkCancel = async () => {
+      try {
+        const state = await api(`/jobs/${job.id}/state`, undefined, 5000);
+        if (!done && state.cancel_requested) { cancelled = true; stop(); }
+      } catch (e) { if (!done) log(`state job #${job.id}: ${e.message}`); }
+      finally { if (!done && !cancelled) cancelTimer = setTimeout(checkCancel, 15000); }
+    };
+    cancelTimer = setTimeout(checkCancel, 15000);
     child.on("error", (e) => finish(-1, String(e)));
-    child.on("close", (code) => finish(code, timedOut ? `\n[Quá thời gian ${TIMEOUT_MS / 60e3} phút, đã dừng]` : ""));
+    child.on("close", (code) => finish(code, cancelled ? "\n[Đã hủy job]" : timedOut ? `\n[Quá thời gian ${TIMEOUT_MS / 60e3} phút, đã dừng]` : ""));
     child.stdin.end(stdin);
   });
 }
@@ -204,31 +217,41 @@ async function handle(job) {
   const t0 = Date.now();
   log(`job #${job.id} ${job.agent} từ ${job.sender}${job.resume_session ? ` (tiếp phiên ${job.resume_session})` : ""}`);
   let result;
+  let outbox;
   try {
+    outbox = prepareOutbox(dir, job.id);
     const files = await saveAttachments(job, dir);
     const prompt = [
       job.subject ? `Tiêu đề thư: ${job.subject}` : null,
       files.length ? `Tệp đính kèm (dữ liệu, không tự chạy):\n${files.map((f) => `- ${f}`).join("\n")}` : null,
+      `Để gửi tệp trong thư trả lời, ghi tệp thường trực tiếp vào ${outbox.path}. Chỉ cấp 1, tối đa 10 tệp, tổng 2 MB; không dùng symlink/hardlink.`,
       "",
       job.prompt,
     ].filter((x) => x !== null).join("\n");
     const spec = commandFor(job, dir, prompt);
-    const r = await run(spec, dir);
+    const r = await run(spec, dir, job);
     try {
       const runs = join(CFG_DIR, "runs");
       mkdirSync(runs, { recursive: true });
       writeFileSync(join(runs, `job-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`);
     } catch {}
     result = spec.parse(r.out, r.code);
+    result.cancelled = r.cancelled;
     if (!result.ok && r.err.trim()) result.output = `${result.output || ""}\n\n[stderr]\n${r.err.slice(-4000)}`;
     if (r.code !== 0 && result.ok) result.ok = false;
   } catch (e) {
     result = { ok: false, output: `Agent lỗi: ${e.message}` };
   }
+  const { attachments, notes } = outbox ? readOutbox(outbox) : { attachments: [], notes: [] };
+  if (notes.length) {
+    const note = `\n\n[Gửi tệp]\n${notes.join("\n").slice(0, 10000)}`;
+    result.output = String(result.output || "").slice(0, 200000 - note.length) + note;
+  }
   const secs = Math.round((Date.now() - t0) / 1000);
   log(`job #${job.id} xong sau ${secs}s ok=${!!result.ok}`);
   const res = await postResult(job, {
     ok: !!result.ok, output: String(result.output || ""), session_id: result.session_id || null,
+    cancelled: !!result.cancelled, attachments,
   });
   log(`job #${job.id} reply=${res.reply}${res.error ? ` (${res.error})` : ""}`);
 }

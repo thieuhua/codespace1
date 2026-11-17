@@ -20,7 +20,7 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
 | --- | --- |
 | Email Routing | MX `route1/2/3.mx.cloudflare.net`; luật literal `claude@`, `codex@`, `agy@` → Worker `mailbot` |
 | Worker | [`worker/src/`](worker/src/) (`index.js` định tuyến, `mailbot.js` whitelist/job, `send.js` gửi thư); [`worker/wrangler.toml`](worker/wrangler.toml) |
-| D1 | Database `mailbot`; schema `worker/schema.sql` + `worker/schema-v2.sql` |
+| D1 | Database `mailbot`; schema `worker/schema.sql` + `worker/schema-v2.sql` + `worker/schema-v3.sql` |
 | API | `https://mailbot.thieupro666.workers.dev`; secret `API_TOKEN` (đọc inbox), `ADMIN_TOKEN` (agent, whitelist) |
 | MCP | [`mcp/server.mjs`](mcp/server.mjs), stdio, đọc inbox `claude@` |
 | Agent laptop | [`agent/mailbot-agent.mjs`](agent/mailbot-agent.mjs), quản trị qua [`agent/mailbot-admin.mjs`](agent/mailbot-admin.mjs), cổng 20025, Scheduled Task `mailbot-agent`; cấu hình `~/.mailbot/agent.json` |
@@ -48,7 +48,7 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
   `/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/`.
 - **Quyền của CLI**: mỗi agent chạy trong `E:\mailbot-work\<agent>`:
   `claude -p --permission-mode acceptEdits`, không MCP, cấm `Read`/`Edit` các thư mục `~/.mailbot`, `~/.ssh`,
-  `~/.aws`, `~/.codex`, `~/.claude`… (lệnh shell bị từ chối vì không ai duyệt);
+  `~/.aws`, `~/.codex`, `~/.claude`…; shell chỉ được tự chạy theo allowlist bên dưới;
   `codex exec` sandbox `workspace-write`, tắt MCP (`-c mcp_servers={}`) — sandbox này **không chặn đọc** ngoài thư mục,
   nên Codex về lý thuyết đọc được token trong `~/.mailbot`; `agy --mode accept-edits --sandbox`.
   Tệp đính kèm lưu vào `inbox/job-<id>/<id>-<tên>`. Output thô mỗi lần chạy: `~/.mailbot/runs/job-<id>.out`.
@@ -61,6 +61,56 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
 Cài agent (một lần): tạo `~/.mailbot/agent.json` với `url`, `admin_token` (= secret `ADMIN_TOKEN`), `port`, `workdir`,
 `agents`; rồi `powershell -ExecutionPolicy Bypass -File agent/install-agent.ps1` (gỡ: thêm `-Uninstall`).
 `ssh thieuhua-vps1 lap-web add mailbot 20025` để mở subdomain.
+
+### Mailbot: lệnh tiêu đề, gửi tệp và shell
+
+Lệnh chỉ được xử lý sau khi DMARC và whitelist của đúng agent đích đã hợp lệ. Đặt các lệnh liên tiếp ở đầu tiêu đề;
+bot bỏ tiền tố `Re:`, `Fwd:`, `Fw:`, `Tr:` lặp lại, không phân biệt hoa thường. Phần còn lại là tiêu đề job.
+Ví dụ: `Re: /new /model=opus /effort=high Phân tích lỗi`. `/etc/fstab` là tiêu đề thường; lệnh sau chữ thường không được xử lý.
+
+| Lệnh | Hành vi |
+| --- | --- |
+| `/new` | Bỏ resume; nếu thành công, chuỗi thư dùng phiên mới |
+| `/model=<id>` | Chọn model cho lần chạy; thay thế `agy_model` nếu dùng agy |
+| `/effort=<low\|medium\|high\|xhigh\|max>` | Chọn effort; Codex đổi `max` thành `xhigh` |
+| `/status` | Không tạo job; trả job đang chờ/chạy và 5 job gần nhất của chính người gửi |
+| `/cancel` hoặc `/cancel=<id>` | Chỉ hủy job của chính người gửi, trên mọi agent; pending hủy ngay, running yêu cầu dừng |
+
+Mỗi thư chỉ có một lệnh `/status` hoặc `/cancel`, không ghép với các tùy chọn tạo job. Lệnh lạ/sai giá trị trả danh sách lệnh;
+không trả trợ giúp nếu người gửi đã chạm giới hạn 20 job/giờ. Agent kiểm tra yêu cầu hủy mỗi 15 giây (request timeout 5 giây),
+dừng cây tiến trình bằng `taskkill /T /F`, không lưu phiên của job hủy. Running đã yêu cầu hủy quá 30 phút chuyển sang `cancelled`, không claim lại.
+
+Để **gửi tệp trong thư trả lời**, yêu cầu CLI ghi tệp vào `<cwd>/outbox/job-<id>/`; đường dẫn cụ thể nằm trong prompt mỗi job,
+kể cả khi resume. Chỉ nhận tệp thường ở cấp 1, không symlink/junction/hardlink, tối đa 10 tệp và tổng 2 MB (`2 × 1024 × 1024` byte).
+Tệp vượt giới hạn hoặc không an toàn bị bỏ, kèm ghi chú cuối thư. Agent đọc xong dọn thư mục job; Worker gửi MIME multipart,
+chỉ lưu `{filename, size}` vào `jobs.outbox_json`, không lưu nội dung tệp đầu ra vào D1.
+
+Claude mặc định chỉ cho shell với `git status`, `git diff`, `git log`, `git show` qua các mẫu
+`Bash(git status:*)`, `Bash(git diff:*)`, `Bash(git log:*)`, `Bash(git show:*)`.
+Các mẫu deny chặn `--no-index`, `--output`, `--ext-diff`, `-c `, `core.*` và tên từng thư mục trong `SECRET_DIRS`;
+các deny Read/Edit và cấu hình tắt MCP vẫn được giữ.
+Test runner **không bật mặc định**. Chỉ thêm khi chủ máy chủ động cấu hình
+`projects.<tag>.claude_allowed_tools`, ví dụ `["Bash(npm test:*)"]`.
+**Bật test runner tương đương cho chạy mã tùy ý ngoài kiểm soát Read/Edit.** Đợt A chưa định tuyến project/tag hay tạo worktree;
+cấu hình theo project chỉ được dùng khi job có `project` tương ứng. Email hiện tại vẫn chạy trong thư mục riêng của agent.
+
+Cờ đã đối chiếu cục bộ bằng `claude --help`, `node E:\ENV_PATH\npm-global\node_modules\@openai\codex\bin\codex.js exec --help`,
+`agy --help`: các cờ model/effort cần dùng đều có; Codex dùng `-m` và `-c model_reasoning_effort="..."`.
+Claude có `--system-prompt-snapshot off` nên agent truyền cờ này. Không gọi model trong bước kiểm cờ.
+
+### Migrate schema v3 một lần
+
+Database đã có v2: chủ máy chạy **đúng một lần**, trước khi chạy Worker/agent phiên bản mới:
+
+```powershell
+cd worker
+npx wrangler d1 execute mailbot --remote --file=schema-v3.sql
+```
+
+SQLite không có `ADD COLUMN IF NOT EXISTS`; chạy lại v3 sẽ lỗi `duplicate column name`. Không dùng `npm run schema`
+để nâng cấp database đã có v3. Cài database mới thì `npm run schema` chạy cả ba schema theo thứ tự một lần.
+V3 có đủ cột dự phòng T1/T8, `threads.project` và trạng thái `cancelled`; job không xuất phát từ thư dùng `message_id = 0`.
+T1, T8 và MCP điều phối chưa được triển khai trong đợt A.
 
 ## Dùng hằng ngày
 
@@ -147,7 +197,7 @@ Các lệnh trên chỉ là hướng dẫn đăng ký, không tự thêm cấu h
 
 1. Chạy `npm install` trong cả `worker/` và `mcp/`.
 2. Trong `worker/`: `npx wrangler login`, rồi `npx wrangler d1 create mailbot`; thay `REPLACE_WITH_D1_ID` bằng ID mới trong `wrangler.toml` (binding vẫn là `DB`).
-3. Chạy `npm run schema` (áp dụng lần lượt `schema.sql` và `schema-v2.sql` trên D1 remote; xác nhận khi Wrangler hỏi), rồi `npx wrangler deploy`.
+3. Với database mới, chạy `npm run schema` (áp dụng lần lượt `schema.sql`, `schema-v2.sql`, `schema-v3.sql` trên D1 remote một lần; xác nhận khi Wrangler hỏi), rồi `npx wrangler deploy`.
 4. Tạo token ngẫu nhiên; chạy `npx wrangler secret put API_TOKEN`, nhập token và ghi cùng token vào cấu hình MCP ở trên.
 5. Bật Email Routing và tạo luật nhận thư:
 
@@ -160,11 +210,12 @@ npx wrangler email routing rules create xuanthieu.site --name "mailbot inbox" --
 
 ## Thử cục bộ
 
-Trong `worker/`, chạy cả hai schema:
+Trong `worker/`, với database local mới, chạy ba schema một lần:
 
 ```powershell
 npx wrangler d1 execute mailbot --local --file=schema.sql
 npx wrangler d1 execute mailbot --local --file=schema-v2.sql
+npx wrangler d1 execute mailbot --local --file=schema-v3.sql
 ```
 
 Tạo `.dev.vars` chứa `API_TOKEN=localtest`, rồi chạy `npx wrangler dev --port 8799`.
@@ -184,8 +235,18 @@ curl.exe -H "Authorization: Bearer localtest" "http://127.0.0.1:8799/messages"
 
 Các kết quả dưới đây được ghi nhận trước lần đổi tên dự án. Chưa kiểm thử lại dịch vụ triển khai tại URL mới hoặc D1 mới.
 Kiểm tra mã nguồn bằng `node --check <file>` cho mọi `.mjs`/`.js` trong `agent/`, `mcp/`, `worker/src/`.
-Trong `worker/`, có thể kiểm tra bundle bằng `npx wrangler deploy --dry-run` (cần dependency đã cài; không deploy).
+Trong cả `worker/` và `agent/`, chạy `npm test` (script `node --test`, không gọi mạng).
+Test worker dùng hàm từ `src/`, PostalMime và SQLite memory (`node:sqlite`, Node 26), không dùng D1 thật;
+test agent tạo tệp trong thư mục tạm hệ thống, thử hardlink, symlink, giới hạn tệp và dọn outbox. Symlink thiếu quyền thì skip.
+Nếu sandbox Windows chặn test runner tạo tiến trình con (`spawn EPERM`), chạy `node --test --test-isolation=none`.
+Trong `worker/`, kiểm tra bundle bằng `npx wrangler deploy --dry-run --outdir "$env:TEMP\mb-dry"` (cần dependency đã cài; không deploy).
 Hướng dẫn tiếp quản mã nguồn và các bất biến bảo mật: [`AGENTS.md`](AGENTS.md).
+
+Đợt A, 2026-11-18, offline: `node --check` qua 14 tệp; test với `--test-isolation=none` qua 15/15 worker và 10/10 agent, không skip.
+`node --test` mặc định và Wrangler dry-run bị sandbox chặn với `spawn EPERM`.
+Chưa kiểm chứng send_email thực, dừng cây CLI thực hay CPU trên Cloudflare Free; không deploy hoặc migrate database đang dùng.
+Message-ID thư kết quả ổn định theo job để retry sau khi lưu kết quả vẫn nối đúng phiên. Retry dùng output/status đã lưu,
+kiểm tra metadata đính kèm trùng khớp và chỉ gửi lại khi job kết thúc nhưng `reply_status IS NULL`.
 
 2026-11-18, cục bộ (`wrangler dev`): thư mẫu multipart có đính kèm được lưu đúng; `list_mail`, `read_mail`,
 `wait_for_mail` (hết giờ) và tải đính kèm qua MCP trả kết quả đúng; request không có token nhận 401.

@@ -1,4 +1,6 @@
 // Mailbot: thư từ người gửi trong whitelist tới <agent>@domain thành job chạy CLI trên laptop.
+import { parseSubject, COMMAND_HELP } from "./subject.js";
+import { validateAttachments } from "./mime.js";
 
 export const AGENTS = ["claude", "codex", "agy"];
 const RATE_PER_HOUR = 20;
@@ -93,21 +95,53 @@ function threadKey(sender, mail) {
   return `${sender}|${root}`;
 }
 
-export async function createJob(env, { msgId, agent, sender, mail }) {
+export async function createJob(env, { msgId, agent, sender, mail }, sendMail) {
   const now = new Date();
   const hourAgo = new Date(now - 3600e3).toISOString();
   const { n } = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM jobs WHERE sender = ?1 AND created_at > ?2 AND status != 'rate_limited'`
   ).bind(sender, hourAgo).first();
+  const parsed = parseSubject(mail.subject);
+  if (parsed.error || parsed.action) {
+    let text;
+    if (parsed.error) {
+      if (n >= RATE_PER_HOUR) return { status: "command_suppressed" };
+      text = `${parsed.error}\n\n${COMMAND_HELP}`;
+    } else if (parsed.action === "status") {
+      const { results: active } = await env.DB.prepare(
+        `SELECT id, agent, status, subject, cancel_requested FROM jobs WHERE sender = ?1 AND status IN ('pending','running') ORDER BY id`
+      ).bind(sender).all();
+      const { results: recent } = await env.DB.prepare(
+        `SELECT id, agent, status, subject, cancel_requested FROM jobs WHERE sender = ?1 ORDER BY id DESC LIMIT 5`
+      ).bind(sender).all();
+      const lines = (rows) => rows.map((j) => `#${j.id} ${j.agent} ${j.status}${j.cancel_requested ? ' (đã yêu cầu hủy)' : ''}: ${j.subject || ''}`).join("\n") || "(không có)";
+      text = `Job đang chờ/chạy:\n${lines(active)}\n\n5 job gần nhất:\n${lines(recent)}`;
+    } else {
+      const { results } = await env.DB.prepare(
+        `UPDATE jobs SET cancel_requested = 1,
+           status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END,
+           finished_at = CASE WHEN status = 'pending' THEN ?1 ELSE finished_at END
+         WHERE status IN ('pending','running') AND sender = ?2 AND (?3 IS NULL OR id = ?3)
+         RETURNING id, status`
+      ).bind(now.toISOString(), sender, parsed.cancelId).all();
+      text = results.length ? results.map((j) => `#${j.id}: ${j.status === 'cancelled' ? 'đã hủy' : 'đã yêu cầu dừng'}`).join("\n") : "Không có job phù hợp của bạn đang chờ/chạy.";
+    }
+    await sendMail(env, {
+      from: `${agent}@${env.MAIL_DOMAIN || "xuanthieu.site"}`, to: sender,
+      subject: `Re: ${parsed.subject || mail.subject || '(no subject)'}`, text,
+      inReplyTo: mail.messageId, references: mail.references,
+    });
+    return { status: "command" };
+  }
   const status = n >= RATE_PER_HOUR ? "rate_limited" : "pending";
-  const prompt = extractPrompt(mail.text || "") || (mail.subject || "").trim();
+  const prompt = extractPrompt(mail.text || "") || parsed.subject;
   const res = await env.DB.prepare(
     `INSERT INTO jobs (message_id, agent, sender, subject, prompt, rfc_message_id, references_hdr,
-       thread_key, status, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
-  ).bind(msgId, agent, sender, (mail.subject || "").slice(0, 300), prompt,
+       thread_key, status, created_at, options_json)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+  ).bind(msgId, agent, sender, parsed.subject.slice(0, 300), prompt,
     msgIds(mail.messageId)[0] || "", msgIds(mail.references).join(" "),
-    threadKey(sender, mail), status, now.toISOString()).run();
+    threadKey(sender, mail), status, now.toISOString(), JSON.stringify(parsed.options)).run();
   const id = res.meta.last_row_id;
   await env.DB.prepare(`DELETE FROM jobs WHERE id <= ?1 AND status NOT IN ('pending','running')`)
     .bind(id - KEEP_JOBS).run();
@@ -135,8 +169,12 @@ export async function claimJob(env, agents) {
   const now = new Date().toISOString();
   const stale = new Date(Date.now() - 30 * 60e3).toISOString();
   await env.DB.prepare(
+    `UPDATE jobs SET status = 'cancelled', finished_at = ?1, session_id = NULL
+     WHERE status = 'running' AND cancel_requested = 1 AND claimed_at < ?2`
+  ).bind(now, stale).run();
+  await env.DB.prepare(
     `UPDATE jobs SET status = 'failed', finished_at = ?1, output = 'Quá thời gian sau 2 lần chạy'
-     WHERE status = 'running' AND claimed_at < ?2 AND attempts >= 2`
+     WHERE status = 'running' AND cancel_requested = 0 AND claimed_at < ?2 AND attempts >= 2`
   ).bind(now, stale).run();
   const marks = list.map((_, i) => `?${i + 3}`).join(",");
   const job = await env.DB.prepare(
@@ -144,6 +182,7 @@ export async function claimJob(env, agents) {
      WHERE id = (
        SELECT id FROM jobs
        WHERE agent IN (${marks})
+         AND cancel_requested = 0
          AND (status = 'pending' OR (status = 'running' AND claimed_at < ?2 AND attempts < 2))
        ORDER BY id LIMIT 1)
      RETURNING *`
@@ -156,43 +195,52 @@ export async function claimJob(env, agents) {
     `SELECT id, filename, mime_type, size, content_b64 IS NOT NULL AS stored
      FROM attachments WHERE message_id = ?1 ORDER BY id`
   ).bind(job.message_id).all();
-  const resume = SESSION_RE.test(thread?.session_id || "") ? thread.session_id : null;
+  const options = JSON.parse(job.options_json || "{}");
+  const resume = !options.new && SESSION_RE.test(thread?.session_id || "") ? thread.session_id : null;
   return { ...job, resume_session: resume, attachments };
 }
 
-export async function finishJob(env, id, { ok, output, session_id }, send) {
-  const job = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?1`).bind(id).first();
-  if (!job) return { error: "not found" };
-  if (job.status !== "running") return { error: `job đang ở trạng thái ${job.status}` };
+export async function finishJob(env, id, { ok, output, session_id, cancelled, attachments = [] }, send) {
+  let job = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?1`).bind(id).first();
+  if (!job) return { error: "not found", code: 404 };
+  const retry = ['done', 'failed', 'cancelled'].includes(job.status) && job.reply_status === null;
+  if (job.status !== "running" && !retry) return { error: `job đang ở trạng thái ${job.status}` };
+  let files;
+  try { files = validateAttachments(attachments); }
+  catch (err) { return { error: err.message, code: 400 }; }
+  const metadata = JSON.stringify(files.map(({ filename, size }) => ({ filename, size })));
+  if (retry && metadata !== (job.outbox_json || "[]")) return { error: "attachments không khớp kết quả đã lưu", code: 400 };
   const now = new Date().toISOString();
-  const text = String(output || "").slice(0, 200_000);
-  const sid = SESSION_RE.test(session_id || "") ? session_id : null;
   const domain = env.MAIL_DOMAIN || "xuanthieu.site";
-  const replyId = `<mailbot-${job.id}-${crypto.randomUUID()}@${domain}>`;
-  const stmts = [
-    env.DB.prepare(
-      `UPDATE jobs SET status = ?2, finished_at = ?3, exit_ok = ?4, output = ?5, session_id = ?6 WHERE id = ?1`
-    ).bind(id, ok ? "done" : "failed", now, ok ? 1 : 0, text, sid),
-  ];
-  if (sid && ok) {
-    // Lưu theo gốc chuỗi thư và theo Message-ID thư trả lời (cho client chỉ gửi In-Reply-To).
-    for (const key of [job.thread_key, `${job.sender}|${replyId}`]) {
-      stmts.push(
-        env.DB.prepare(
-          `INSERT INTO threads (thread_key, agent, session_id, updated_at) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (thread_key, agent) DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at`
-        ).bind(key, job.agent, sid, now)
-      );
-    }
+  // ID ổn định: retry sau khi lưu kết quả vẫn nối đúng threads, không cần lưu nội dung tệp.
+  const replyId = `<mailbot-job-${job.id}@${domain}>`;
+  if (!retry) {
+    const text = String(output || "").slice(0, 200_000);
+    const sid = !cancelled && !job.cancel_requested && SESSION_RE.test(session_id || "") ? session_id : null;
+    // Kiểm tra cancel_requested tại thời điểm UPDATE để tránh cuộc đua với /cancel.
+    const updated = await env.DB.prepare(
+      `UPDATE jobs SET status = CASE WHEN cancel_requested = 1 OR ?2 = 1 THEN 'cancelled' WHEN ?3 = 1 THEN 'done' ELSE 'failed' END,
+       finished_at = ?4, exit_ok = CASE WHEN cancel_requested = 1 OR ?2 = 1 THEN 0 ELSE ?3 END,
+       output = ?5, session_id = CASE WHEN cancel_requested = 1 OR ?2 = 1 THEN NULL ELSE ?6 END,
+       outbox_json = ?7 WHERE id = ?1 AND status = 'running' RETURNING *`
+    ).bind(id, cancelled ? 1 : 0, ok ? 1 : 0, now, text, sid, metadata).first();
+    if (!updated) return { error: "job không còn running" };
+    job = updated;
   }
-  await env.DB.batch(stmts);
-
-  const body = (ok ? text : `Lỗi khi chạy ${job.agent}:\n\n${text}`).trim() || "(không có nội dung trả về)";
-  const footer = `\n\n-- \n${job.agent}@ · job #${job.id}${sid ? ` · phiên ${sid}` : ""}\n` +
+  // Khôi phục mapping nếu Worker đã chết sau UPDATE kết quả, trước batch threads.
+  if (SESSION_RE.test(job.session_id || '') && job.status === 'done') {
+    await env.DB.batch([job.thread_key, `${job.sender}|${replyId}`].map((key) => env.DB.prepare(
+      `INSERT INTO threads (thread_key, agent, session_id, updated_at) VALUES (?1, ?2, ?3, ?4)
+       ON CONFLICT (thread_key, agent) DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at`
+    ).bind(key, job.agent, job.session_id, now)));
+  }
+  const body = (job.status === 'cancelled' ? `Đã hủy job.\n\n${job.output || ''}` :
+    job.status === 'done' ? job.output : `Lỗi khi chạy ${job.agent}:\n\n${job.output || ''}`).trim() || "(không có nội dung trả về)";
+  const footer = `\n\n-- \n${job.agent}@ · job #${job.id}${job.session_id ? ` · phiên ${job.session_id}` : ""}\n` +
     "Trả lời thư này để tiếp tục cùng phiên; gửi thư mới để bắt đầu phiên mới.";
   try {
-    await send(job, body + footer, replyId);
-    await env.DB.prepare(`UPDATE jobs SET reply_status = 'sent' WHERE id = ?1`).bind(id).run();
+    await send(job, body + footer, replyId, files);
+    await env.DB.prepare(`UPDATE jobs SET reply_status = 'sent', reply_error = NULL WHERE id = ?1`).bind(id).run();
     return { ok: true, reply: "sent" };
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 1000);

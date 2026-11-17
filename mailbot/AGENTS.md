@@ -19,7 +19,10 @@
 
 ## Kiểm tra cục bộ
 - Chạy `node --check <file>` cho mọi `.mjs`/`.js` trong `agent/`, `mcp/`, `worker/src/`.
-- Trong `worker/`, chạy `npx wrangler deploy --dry-run` để kiểm tra bundle.
+- Trong cả `worker/` và `agent/`, chạy `node --test` hoặc `npm test` (Node 26, không mạng).
+- Test gồm `worker/test/*.test.mjs` (parser, MIME, SQLite memory) và `agent/test/*.test.mjs` (CLI options, outbox trong thư mục tạm hệ thống).
+- Nếu sandbox chặn spawn với `EPERM`, dùng `node --test --test-isolation=none`; ghi rõ cả lỗi lệnh gốc lẫn kết quả thay thế. Symlink thiếu quyền thì skip test đó.
+- Trong `worker/`, chạy `npx wrangler deploy --dry-run --outdir "$env:TEMP\mb-dry"` để kiểm tra bundle; không cài dependency nếu thiếu.
 - Chỉ dùng dependency sẵn có; không tự cài hay gọi mạng khi bị cấm.
 - Dry-run không chứng minh luồng email, CLI hay dịch vụ đang triển khai hoạt động.
 - Báo lệnh đã chạy, kết quả thật và phần chưa kiểm chứng.

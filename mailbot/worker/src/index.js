@@ -2,7 +2,7 @@
 // và biến thư từ người trong whitelist gửi tới claude@/codex@/agy@ thành job chạy CLI trên laptop.
 import PostalMime from "postal-mime";
 import { agentFor, senderAuth, isAllowed, createJob, wakeAgent, claimJob, finishJob, AGENTS } from "./mailbot.js";
-import { sendReply } from "./send.js";
+import { sendMail, sendReply } from "./send.js";
 
 const MAX_RAW = 20 * 1024 * 1024; // từ chối thư lớn hơn 20 MB
 const MAX_BODY = 256 * 1024; // cắt text/html mỗi phần ở 256 K ký tự
@@ -35,8 +35,8 @@ export default {
 
     const msgId = await storeMessage(env, message, mail);
     if (allowed) {
-      const job = await createJob(env, { msgId, agent, sender: auth.address, mail });
-      console.log(`job #${job.id} ${agent} từ ${auth.address}: ${job.status}`);
+      const job = await createJob(env, { msgId, agent, sender: auth.address, mail }, sendMail);
+      console.log(`${job.id ? `job #${job.id}` : 'command'} ${agent} từ ${auth.address}: ${job.status}`);
       if (job.status === "pending") ctx.waitUntil(wakeAgent(env));
     }
   },
@@ -193,8 +193,13 @@ async function jobsApi(request, env, url, parts) {
   }
   if (parts.length === 3 && parts[2] === "result" && request.method === "POST") {
     const body = await request.json();
-    const res = await finishJob(env, int(parts[1], -1), body, (job, text, replyId) => sendReply(env, job, text, replyId));
-    return json(res, res.error ? 409 : 200);
+    const res = await finishJob(env, int(parts[1], -1), body, (job, text, replyId, attachments) => sendReply(env, job, text, replyId, attachments));
+    return json(res, res.ok ? 200 : res.code || 409);
+  }
+  if (parts.length === 3 && parts[2] === "state" && request.method === "GET") {
+    const job = await env.DB.prepare(`SELECT id, status, cancel_requested FROM jobs WHERE id = ?1`)
+      .bind(int(parts[1], -1)).first();
+    return job ? json(job) : json({ error: "not found" }, 404);
   }
   return json({ error: "not found" }, 404);
 }
