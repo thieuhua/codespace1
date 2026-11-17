@@ -1,0 +1,11 @@
+{
+  "name": "mailbot-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" },
+  "bin": { "mailbot-mcp": "server.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "zod": "^3.25.0"
+  }
+}
