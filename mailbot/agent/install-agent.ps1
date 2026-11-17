@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File install-agent.ps1 -Uninstall
 param([switch]$Uninstall)
 $ErrorActionPreference = 'Stop'
-$TaskName = 'claude-mailbot-agent'
+$TaskName = 'mailbot-agent'
 
 function Stop-Agent {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -22,8 +22,8 @@ if ($Uninstall) {
 
 $node = (Get-Command node.exe).Source
 $script = Join-Path $PSScriptRoot 'mailbot-agent.mjs'
-if (-not (Test-Path (Join-Path $env:USERPROFILE '.claude-mail\agent.json'))) {
-    throw 'Missing ~/.claude-mail/agent.json'
+if (-not (Test-Path (Join-Path $env:USERPROFILE '.mailbot\agent.json'))) {
+    throw 'Missing ~/.mailbot/agent.json'
 }
 
 # conhost --headless: chạy tiến trình console không hiện cửa sổ.
@@ -39,4 +39,4 @@ Stop-Agent
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
     -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
-Write-Output "Installed and started $TaskName (log: ~/.claude-mail/agent.log)"
+Write-Output "Installed and started $TaskName (log: ~/.mailbot/agent.log)"

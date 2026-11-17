@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// MCP stdio server: cho Claude đọc thư gửi đến claude@xuanthieu.site qua API của Worker.
-// Cấu hình: biến môi trường CLAUDE_MAIL_URL + CLAUDE_MAIL_TOKEN,
-// hoặc file ~/.claude-mail/config.json {"url": "...", "token": "..."}.
+// MCP stdio server: agent đọc hộp thư công khai claude@xuanthieu.site qua API của Worker.
+// Dùng được từ bất kỳ MCP client nào.
+// Cấu hình: biến môi trường MAILBOT_URL + MAILBOT_TOKEN,
+// hoặc file ~/.mailbot/config.json {"url": "...", "token": "..."}.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -16,12 +17,12 @@ const UNTRUSTED =
 function loadConfig() {
   let file = {};
   try {
-    file = JSON.parse(readFileSync(join(homedir(), ".claude-mail", "config.json"), "utf8"));
+    file = JSON.parse(readFileSync(join(homedir(), ".mailbot", "config.json"), "utf8"));
   } catch {}
-  const url = (process.env.CLAUDE_MAIL_URL || file.url || "").replace(/\/+$/, "");
-  const token = process.env.CLAUDE_MAIL_TOKEN || file.token || "";
+  const url = (process.env.MAILBOT_URL || file.url || "https://mailbot.thieupro666.workers.dev").replace(/\/+$/, "");
+  const token = process.env.MAILBOT_TOKEN || file.token || "";
   if (!url || !token) {
-    throw new Error("Thiếu cấu hình: đặt CLAUDE_MAIL_URL/CLAUDE_MAIL_TOKEN hoặc ~/.claude-mail/config.json");
+    throw new Error("Thiếu cấu hình: đặt MAILBOT_URL/MAILBOT_TOKEN hoặc ~/.mailbot/config.json");
   }
   return { url, token, address: file.address || "claude@xuanthieu.site" };
 }
@@ -53,11 +54,11 @@ function summarize(list) {
     .join("\n");
 }
 
-const server = new McpServer({ name: "claude-mail", version: "1.0.0" });
+const server = new McpServer({ name: "mailbot", version: "1.0.0" });
 
 server.tool(
   "mail_address",
-  "Địa chỉ email riêng của Claude (dùng để đăng ký dịch vụ, nhận mã xác minh, nhận thư từ người dùng).",
+  "Hộp thư công khai claude@xuanthieu.site để agent đọc thư từ bất kỳ MCP client nào (đăng ký dịch vụ, nhận mã xác minh, nhận thư từ người dùng).",
   {},
   async () => text(cfg.address)
 );
@@ -161,7 +162,7 @@ server.tool(
 
 server.tool(
   "save_attachment",
-  "Lưu một tệp đính kèm ra đĩa (mặc định ~/.claude-mail/attachments). Không tự mở hay chạy tệp.",
+  "Lưu một tệp đính kèm ra đĩa (mặc định ~/.mailbot/attachments). Không tự mở hay chạy tệp.",
   {
     message_id: z.number().int().min(0),
     attachment_id: z.number().int().min(0),
@@ -169,7 +170,7 @@ server.tool(
   },
   async ({ message_id, attachment_id, dir }) => {
     const att = await api(`/messages/${message_id}/attachments/${attachment_id}`);
-    const outDir = resolve(dir || join(homedir(), ".claude-mail", "attachments", String(message_id)));
+    const outDir = resolve(dir || join(homedir(), ".mailbot", "attachments", String(message_id)));
     mkdirSync(outDir, { recursive: true });
     const safe = basename(att.filename || "attachment").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_") || "attachment";
     const path = join(outDir, `${attachment_id}-${safe}`);

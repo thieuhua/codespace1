@@ -1,10 +1,10 @@
 {
-  "name": "claude-mail-worker",
+  "name": "mailbot-worker",
   "private": true,
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "schema": "wrangler d1 execute claude-mail --remote --file=schema.sql",
+    "schema": "wrangler d1 execute mailbot --remote --file=schema.sql && wrangler d1 execute mailbot --remote --file=schema-v2.sql",
     "tail": "wrangler tail"
   },
   "dependencies": {

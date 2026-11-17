@@ -3,8 +3,8 @@
 // kéo job từ Worker, chạy CLI tương ứng trong thư mục làm việc riêng, gửi kết quả về Worker
 // (Worker gửi thư trả lời). Có poll dự phòng mỗi POLL_MS khi tín hiệu đánh thức bị lỡ.
 //
-// Cấu hình: ~/.claude-mail/agent.json
-//   { "url": "https://claude-mail....workers.dev", "admin_token": "...", "port": 20025,
+// Cấu hình: ~/.mailbot/agent.json
+//   { "url": "https://mailbot.thieupro666.workers.dev", "admin_token": "...", "port": 20025,
 //     "workdir": "E:\\mailbot-work", "agents": ["claude", "codex", "agy"] }
 import { createServer } from "node:http";
 import { spawn, execFile } from "node:child_process";
@@ -13,9 +13,9 @@ import { homedir } from "node:os";
 import { join, basename } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
 
-const CFG_DIR = join(homedir(), ".claude-mail");
+const CFG_DIR = join(homedir(), ".mailbot");
 const cfg = JSON.parse(readFileSync(join(CFG_DIR, "agent.json"), "utf8"));
-const URL_BASE = cfg.url.replace(/\/+$/, "");
+const URL_BASE = (cfg.url || "https://mailbot.thieupro666.workers.dev").replace(/\/+$/, "");
 const PORT = cfg.port || 20025;
 const WORKDIR = cfg.workdir || "E:\\mailbot-work";
 const ENABLED = cfg.agents || ["claude", "codex", "agy"];
@@ -60,7 +60,7 @@ function codexEntry() {
 // Trả về { cmd, args, parse(stdout) -> { ok, output, session_id } }
 // Thư mục chứa token/khóa: chặn Claude đọc/sửa (Codex sandbox chỉ chặn ghi, không chặn đọc).
 const HOME = homedir().replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
-const SECRET_DIRS = [".claude-mail", ".ssh", ".aws", ".codex", ".claude", ".config", ".wrangler"];
+const SECRET_DIRS = [".mailbot", ".ssh", ".aws", ".codex", ".claude", ".config", ".wrangler"];
 const CLAUDE_SETTINGS = JSON.stringify({
   permissions: {
     deny: SECRET_DIRS.flatMap((d) => [`Read(/${HOME}/${d}/**)`, `Edit(/${HOME}/${d}/**)`]),
@@ -119,7 +119,7 @@ function commandFor(job, dir, prompt) {
       parse(out) {
         const j = lastJson(out);
         const output = (j?.response || "").trim() ||
-          `(agy không trả nội dung; status=${j?.status ?? "?"}; output thô lưu tại ~/.claude-mail/runs/job-${job.id}.out)`;
+          `(agy không trả nội dung; status=${j?.status ?? "?"}; output thô lưu tại ~/.mailbot/runs/job-${job.id}.out)`;
         return { ok: j?.status === "SUCCESS", output, session_id: j?.conversation_id };
       },
     };

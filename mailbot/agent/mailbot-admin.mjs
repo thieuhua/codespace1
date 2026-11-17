@@ -9,8 +9,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const cfg = JSON.parse(readFileSync(join(homedir(), ".claude-mail", "agent.json"), "utf8"));
-const base = cfg.url.replace(/\/+$/, "");
+const cfg = JSON.parse(readFileSync(join(homedir(), ".mailbot", "agent.json"), "utf8"));
+const base = (cfg.url || "https://mailbot.thieupro666.workers.dev").replace(/\/+$/, "");
 
 async function api(method, path, body) {
   const res = await fetch(base + path, {

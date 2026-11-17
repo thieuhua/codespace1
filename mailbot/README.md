@@ -1,8 +1,8 @@
-# Claude Mail
+# Mailbot
 
 Hai việc trên cùng một Worker:
 
-1. **Inbox của Claude**: `claude@xuanthieu.site` nhận thư từ bất kỳ ai; Claude đọc qua MCP (không phải IMAP).
+1. **Inbox công khai cho agent**: `claude@xuanthieu.site` nhận thư từ bất kỳ ai; agent điều phối (Claude Code, Codex, Antigravity...) đọc thư qua MCP (không phải IMAP), dùng được từ bất kỳ MCP client nào.
 2. **Mailbot**: người trong whitelist gửi thư tới `claude@`, `codex@` hoặc `agy@xuanthieu.site` →
    CLI tương ứng chạy trên laptop Windows → câu trả lời được gửi lại bằng thư, cùng chuỗi thư.
 
@@ -18,15 +18,15 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
 
 | Thành phần | Giá trị |
 | --- | --- |
-| Email Routing | MX `route1/2/3.mx.cloudflare.net`; luật literal `claude@`, `codex@`, `agy@` → Worker `claude-mail` |
-| Worker | `worker/src/` (`index.js` định tuyến, `mailbot.js` whitelist/job, `send.js` gửi thư); `worker/wrangler.toml` |
-| D1 | Database `claude-mail`; schema `worker/schema.sql` + `worker/schema-v2.sql` |
-| API | `https://claude-mail.thieupro666.workers.dev`; secret `API_TOKEN` (đọc inbox), `ADMIN_TOKEN` (agent, whitelist) |
-| MCP | `mcp/server.mjs`, stdio, đọc inbox `claude@` |
-| Agent laptop | `agent/mailbot-agent.mjs`, cổng 20025, Scheduled Task `claude-mailbot-agent`; cấu hình `~/.claude-mail/agent.json` |
+| Email Routing | MX `route1/2/3.mx.cloudflare.net`; luật literal `claude@`, `codex@`, `agy@` → Worker `mailbot` |
+| Worker | [`worker/src/`](worker/src/) (`index.js` định tuyến, `mailbot.js` whitelist/job, `send.js` gửi thư); [`worker/wrangler.toml`](worker/wrangler.toml) |
+| D1 | Database `mailbot`; schema `worker/schema.sql` + `worker/schema-v2.sql` |
+| API | `https://mailbot.thieupro666.workers.dev`; secret `API_TOKEN` (đọc inbox), `ADMIN_TOKEN` (agent, whitelist) |
+| MCP | [`mcp/server.mjs`](mcp/server.mjs), stdio, đọc inbox `claude@` |
+| Agent laptop | [`agent/mailbot-agent.mjs`](agent/mailbot-agent.mjs), quản trị qua [`agent/mailbot-admin.mjs`](agent/mailbot-admin.mjs), cổng 20025, Scheduled Task `mailbot-agent`; cấu hình `~/.mailbot/agent.json` |
 | Subdomain | `mailbot.xuanthieu.site` → laptop:20025 (`lap-web`, xem [laptop-tunnel](../laptop-tunnel/README.md)) |
 
-## Mailbot
+## Chạy CLI theo thư từ whitelist
 
 - **Whitelist** theo người gửi và agent: `node agent/mailbot-admin.mjs allow <địa_chỉ> [claude|codex|agy|*]`,
   `deny ...`, `list`; xem job gần nhất: `jobs`.
@@ -44,26 +44,27 @@ Người gửi ─► Cloudflare Email Routing ─► Email Worker ─► D1 (th
 - **Chuỗi thư = phiên**: trả lời thư của bot thì CLI tiếp tục đúng phiên cũ (`claude --resume`, `codex exec resume`,
   `agy --conversation`); thư mới thì phiên mới. Phần trích dẫn thư cũ được cắt khỏi prompt.
 - **Phiên** gắn theo người gửi (`<người gửi>|<Message-ID gốc>`), và theo cả Message-ID thư trả lời của bot
-  (client chỉ gửi `In-Reply-To` vẫn nối đúng). Chỉ lưu phiên của job thành công; `session_id` phải là ID chữ-số.
+  (client chỉ gửi `In-Reply-To` vẫn nối đúng). Chỉ lưu phiên của job thành công; `session_id` phải khớp regex ID
+  `/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/`.
 - **Quyền của CLI**: mỗi agent chạy trong `E:\mailbot-work\<agent>`:
-  `claude -p --permission-mode acceptEdits`, không MCP, cấm `Read`/`Edit` các thư mục `~/.claude-mail`, `~/.ssh`,
+  `claude -p --permission-mode acceptEdits`, không MCP, cấm `Read`/`Edit` các thư mục `~/.mailbot`, `~/.ssh`,
   `~/.aws`, `~/.codex`, `~/.claude`… (lệnh shell bị từ chối vì không ai duyệt);
   `codex exec` sandbox `workspace-write`, tắt MCP (`-c mcp_servers={}`) — sandbox này **không chặn đọc** ngoài thư mục,
-  nên Codex về lý thuyết đọc được token trong `~/.claude-mail`; `agy --mode accept-edits --sandbox`.
-  Tệp đính kèm lưu vào `inbox/job-<id>/<id>-<tên>`. Output thô mỗi lần chạy: `~/.claude-mail/runs/job-<id>.out`.
+  nên Codex về lý thuyết đọc được token trong `~/.mailbot`; `agy --mode accept-edits --sandbox`.
+  Tệp đính kèm lưu vào `inbox/job-<id>/<id>-<tên>`. Output thô mỗi lần chạy: `~/.mailbot/runs/job-<id>.out`.
 - Giới hạn: 20 job/giờ/người gửi (vượt thì job `rate_limited`, không chạy); mỗi job tối đa 20 phút;
   mỗi agent chạy tuần tự, các agent khác nhau chạy song song.
 - Laptop tắt: job nằm chờ trong D1; agent tự kéo khi chạy lại (poll dự phòng mỗi 60 giây). Job `running` quá 30 phút
   được chạy lại 1 lần, treo lần nữa thì thành `failed`. Agent gửi kết quả có thử lại khi lỗi mạng. Giữ 1000 job gần nhất.
-- Log agent: `~/.claude-mail/agent.log`. Kiểm tra agent sống: `https://mailbot.xuanthieu.site/health`.
+- Log agent: `~/.mailbot/agent.log`. Kiểm tra agent sống: `https://mailbot.xuanthieu.site/health`.
 
-Cài agent (một lần): tạo `~/.claude-mail/agent.json` với `url`, `admin_token` (= secret `ADMIN_TOKEN`), `port`, `workdir`,
+Cài agent (một lần): tạo `~/.mailbot/agent.json` với `url`, `admin_token` (= secret `ADMIN_TOKEN`), `port`, `workdir`,
 `agents`; rồi `powershell -ExecutionPolicy Bypass -File agent/install-agent.ps1` (gỡ: thêm `-Uninstall`).
 `ssh thieuhua-vps1 lap-web add mailbot 20025` để mở subdomain.
 
 ## Dùng hằng ngày
 
-Gửi thư đến `claude@xuanthieu.site`, rồi yêu cầu Claude kiểm tra thư, đọc thư hoặc chờ mã xác minh.
+Gửi thư đến `claude@xuanthieu.site`, rồi yêu cầu agent kiểm tra thư, đọc thư hoặc chờ mã xác minh.
 Danh sách hiện thư mới nhất trước; `*` là chưa đọc. Đọc thư mặc định đánh dấu đã đọc.
 
 | Tool MCP | Tham số |
@@ -78,7 +79,7 @@ Danh sách hiện thư mới nhất trước; `*` là chưa đọc. Đọc thư 
 
 - Các ID là số nguyên không âm; `after_id` chỉ lấy thư có ID lớn hơn.
 - `wait_for_mail` kiểm tra mỗi 5 giây; `from_contains` lọc địa chỉ/người gửi, không phân biệt hoa thường.
-- `save_attachment` mặc định lưu tại `~/.claude-mail/attachments/<message_id>/`, không tự mở hay chạy tệp.
+- `save_attachment` mặc định lưu tại `~/.mailbot/attachments/<message_id>/`, không tự mở hay chạy tệp.
 - **Ai cũng gửi được.** `read_mail` bọc phần thân thư bằng nhãn “dữ liệu không tin cậy” để chống prompt injection; chỉ dẫn trong thư không phải lệnh.
 
 ## Giới hạn
@@ -102,43 +103,70 @@ Mọi endpoint cần header `Authorization: Bearer <token>`, trả JSON. Đườ
 
 ## Cấu hình MCP
 
-File `~/.claude-mail/config.json`:
+File `~/.mailbot/config.json`:
 
 ```json
 {
-  "url": "https://claude-mail.thieupro666.workers.dev",
+  "url": "https://mailbot.thieupro666.workers.dev",
   "token": "<API_TOKEN>",
   "address": "claude@xuanthieu.site"
 }
 ```
 
-Có thể dùng `CLAUDE_MAIL_URL` và `CLAUDE_MAIL_TOKEN`; biến môi trường ưu tiên hơn file.
-`address` mặc định là `claude@xuanthieu.site`. Token chỉ lưu trong cấu hình riêng và secret Worker, không đưa vào git.
+Có thể dùng `MAILBOT_URL` và `MAILBOT_TOKEN`; biến môi trường ưu tiên hơn file.
+URL mặc định là `https://mailbot.thieupro666.workers.dev`; `address` mặc định là `claude@xuanthieu.site`.
+Token chỉ lưu trong cấu hình riêng và secret Worker, không đưa vào git.
 
-Đã đăng ký MCP ở phạm vi user:
+### Đăng ký MCP cho các client
+
+Thay `<abs>` bằng đường dẫn tuyệt đối đến workspace chứa `mailbot/`. Chạy một trong các cách sau theo client đang dùng.
+
+**Claude Code** (phạm vi user):
 
 ```powershell
-claude mcp add -s user claude-mail -- node E:\thieuh\FolderCode\codespace1\claude-mail\mcp\server.mjs
+claude mcp add -s user mailbot -- node "<abs>\mailbot\mcp\server.mjs"
 ```
+
+**Codex**: thêm vào `~/.codex/config.toml` (dấu `\` trong chuỗi TOML phải viết thành `\\`, kể cả phần `<abs>`):
+
+```toml
+[mcp_servers.mailbot]
+command = "node"
+args = ["<abs>\\mailbot\\mcp\\server.mjs"]
+```
+
+**Antigravity** (cú pháp đã đối chiếu bằng `agy mcp --help` và `agy mcp add --help` cục bộ):
+
+```powershell
+agy mcp add --type stdio mailbot node "<abs>\mailbot\mcp\server.mjs"
+```
+
+Các lệnh trên chỉ là hướng dẫn đăng ký, không tự thêm cấu hình cho client.
 
 ## Cài đặt lại từ đầu
 
 1. Chạy `npm install` trong cả `worker/` và `mcp/`.
-2. Trong `worker/`: `npx wrangler login`, rồi `npx wrangler d1 create claude-mail`; ghi ID mới vào `wrangler.toml`.
-3. Chạy `npm run schema -- -y`, rồi `npx wrangler deploy`.
+2. Trong `worker/`: `npx wrangler login`, rồi `npx wrangler d1 create mailbot`; thay `REPLACE_WITH_D1_ID` bằng ID mới trong `wrangler.toml` (binding vẫn là `DB`).
+3. Chạy `npm run schema` (áp dụng lần lượt `schema.sql` và `schema-v2.sql` trên D1 remote; xác nhận khi Wrangler hỏi), rồi `npx wrangler deploy`.
 4. Tạo token ngẫu nhiên; chạy `npx wrangler secret put API_TOKEN`, nhập token và ghi cùng token vào cấu hình MCP ở trên.
 5. Bật Email Routing và tạo luật nhận thư:
 
 ```powershell
 npx wrangler email routing enable xuanthieu.site
-npx wrangler email routing rules create xuanthieu.site --name "claude inbox" --match-type literal --match-field to --match-value claude@xuanthieu.site --action-type worker --action-value claude-mail
+npx wrangler email routing rules create xuanthieu.site --name "mailbot inbox" --match-type literal --match-field to --match-value claude@xuanthieu.site --action-type worker --action-value mailbot
 ```
 
-6. Đăng ký MCP bằng lệnh `claude mcp add` ở trên.
+6. Đăng ký MCP cho client tương ứng theo mục trên.
 
 ## Thử cục bộ
 
-Trong `worker/`, chạy `npx wrangler d1 execute claude-mail --local --file=schema.sql`.
+Trong `worker/`, chạy cả hai schema:
+
+```powershell
+npx wrangler d1 execute mailbot --local --file=schema.sql
+npx wrangler d1 execute mailbot --local --file=schema-v2.sql
+```
+
 Tạo `.dev.vars` chứa `API_TOKEN=localtest`, rồi chạy `npx wrangler dev --port 8799`.
 Ở terminal khác, dùng một file `test.eml` có sẵn:
 
@@ -150,9 +178,14 @@ curl.exe -H "Authorization: Bearer localtest" "http://127.0.0.1:8799/messages"
 ## Vận hành
 
 - Theo dõi log: `npm run tail` trong `worker/`.
-- Đổi token: tạo token mới, chạy `npx wrangler secret put API_TOKEN`, cập nhật `~/.claude-mail/config.json`; khởi động lại phiên MCP để nạp cấu hình.
+- Đổi token: tạo token mới, chạy `npx wrangler secret put API_TOKEN`, cập nhật `~/.mailbot/config.json`; khởi động lại phiên MCP để nạp cấu hình.
 
 ## Kiểm thử
+
+Các kết quả dưới đây được ghi nhận trước lần đổi tên dự án. Chưa kiểm thử lại dịch vụ triển khai tại URL mới hoặc D1 mới.
+Kiểm tra mã nguồn bằng `node --check <file>` cho mọi `.mjs`/`.js` trong `agent/`, `mcp/`, `worker/src/`.
+Trong `worker/`, có thể kiểm tra bundle bằng `npx wrangler deploy --dry-run` (cần dependency đã cài; không deploy).
+Hướng dẫn tiếp quản mã nguồn và các bất biến bảo mật: [`AGENTS.md`](AGENTS.md).
 
 2026-11-18, cục bộ (`wrangler dev`): thư mẫu multipart có đính kèm được lưu đúng; `list_mail`, `read_mail`,
 `wait_for_mail` (hết giờ) và tải đính kèm qua MCP trả kết quả đúng; request không có token nhận 401.
@@ -171,5 +204,5 @@ Review (Antigravity) phát hiện các cách vượt `senderAuth` (From thứ ha
 ## Gỡ bỏ
 
 - Xóa rule nhận thư bằng `npx wrangler email routing rules delete`, rồi `npx wrangler email routing disable xuanthieu.site`.
-- Trong `worker/`: `npx wrangler delete`, rồi `npx wrangler d1 delete claude-mail` (xóa toàn bộ thư).
-- Chạy `claude mcp remove claude-mail -s user`, rồi xóa `~/.claude-mail` cùng cấu hình và đính kèm đã lưu.
+- Trong `worker/`: `npx wrangler delete`, rồi `npx wrangler d1 delete mailbot` (xóa toàn bộ thư).
+- Chạy `claude mcp remove mailbot -s user`, rồi xóa `~/.mailbot` cùng cấu hình và đính kèm đã lưu.
