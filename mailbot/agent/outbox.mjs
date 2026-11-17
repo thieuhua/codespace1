@@ -23,7 +23,7 @@ export function prepareOutbox(cwd, id) {
   mkdirSync(parent, { recursive: true });
   directory(parent);
   if (!same(real(parent), parent)) throw new Error("Outbox nằm ngoài cwd");
-  const path = join(parent, `job-${id}`);
+  const path = join(parent, `run-${id}`);
   mkdirSync(path, { recursive: true });
   directory(path);
   if (!same(real(path), path)) throw new Error("Outbox nằm ngoài cwd");
@@ -39,7 +39,7 @@ export function readOutbox({ path, root }, { discard = false } = {}) {
     directory(root);
     directory(join(root, 'outbox'));
     if (!same(real(root), root) || !same(real(join(root, 'outbox')), join(root, 'outbox')) ||
-      !same(path, join(root, 'outbox', path.split(sep).at(-1))) || !/^job-\d+$/.test(path.split(sep).at(-1))) {
+      !same(path, join(root, 'outbox', path.split(sep).at(-1))) || !/^run-\d+$/.test(path.split(sep).at(-1))) {
       throw new Error("Đường dẫn outbox đã thay đổi");
     }
     // rmSync trên symlink lá chỉ xóa link; không đi theo link.

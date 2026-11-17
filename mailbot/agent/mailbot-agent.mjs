@@ -15,11 +15,13 @@ import { timingSafeEqual, createHash } from "node:crypto";
 import { claudeSettings, claudeAllowedTools, claudeIsolationArgs, jobOptions, optionArgs } from "./cli-options.mjs";
 import { prepareOutbox } from "./outbox.mjs";
 import { prepareWorktree, lockWorktree } from './worktrees.mjs';
-import { JOB_TOOLS, jobMcp, codexMcpArgs, cliEnv } from './job-mcp.mjs';
+import { RUN_TOOLS, runMcp, codexMcpArgs, cliEnv } from './run-mcp.mjs';
 import { saveInboxAttachment } from './inbox.mjs';
 import { readLastOutput } from './cli-output.mjs';
 import { codexInventoryCache, inspectCli, verifyAgyMcp } from './mcp-isolation.mjs';
 import { finalizeFiles } from './job-finalize.mjs';
+import { buildRunPrompt } from './run-prompt.mjs';
+import { prepareTaskDirectory, recordTaskUse, pruneTaskDirectories } from './task-files.mjs';
 
 const CFG_DIR = join(homedir(), ".mailbot");
 const cfg = JSON.parse(readFileSync(join(CFG_DIR, "agent.json"), "utf8"));
@@ -72,7 +74,7 @@ const CLAUDE_SETTINGS = claudeSettings(homedir(), WORKDIR);
 const codexInventory = codexInventoryCache();
 
 async function commandFor(job, dir, prompt) {
-  const mcp = jobMcp(job, URL_BASE);
+  const mcp = runMcp(job, URL_BASE);
   // session_id lấy từ output CLI lần trước: chỉ nhận dạng ID an toàn để không thành cờ dòng lệnh.
   const options = jobOptions(job);
   const resume = !options.new && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(job.resume_session || "") ? job.resume_session : null;
@@ -81,9 +83,9 @@ async function commandFor(job, dir, prompt) {
       "-p", "--output-format", "json",
       "--permission-mode", "acceptEdits",
       ...claudeIsolationArgs(),
-      "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: mcp ? { 'mailbot-job': mcp } : {} }),
+      "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: mcp ? { 'mailbot-run': mcp } : {} }),
       "--settings", CLAUDE_SETTINGS,
-      "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]), ...(mcp ? JOB_TOOLS : []),
+      "--allowedTools", ...claudeAllowedTools(cfg.projects?.[job.project]), ...(mcp ? RUN_TOOLS : []),
       "--system-prompt-snapshot", "off",
       "--append-system-prompt", SYS(job, dir),
       ...optionArgs(job.agent, options, cfg.claude_model ?? "opus"),
@@ -133,7 +135,7 @@ async function commandFor(job, dir, prompt) {
       parse(out) {
         const j = lastJson(out);
         const output = (j?.response || "").trim() ||
-          `(agy không trả nội dung; status=${j?.status ?? "?"}; output thô lưu tại ~/.mailbot/runs/job-${job.id}.out)`;
+          `(agy không trả nội dung; status=${j?.status ?? "?"}; output thô lưu tại ~/.mailbot/runs/run-${job.id}.out)`;
         return { ok: j?.status === "SUCCESS", output, session_id: j?.conversation_id };
       },
     };
@@ -183,7 +185,7 @@ function run({ cmd, args, stdin }, cwd, job) {
     const timer = setTimeout(() => { timedOut = true; stop(); }, TIMEOUT_MS);
     const checkCancel = async () => {
       try {
-        const state = await api(`/jobs/${job.id}/state`, undefined, 5000);
+        const state = await api(`/runs/${job.id}/state`, undefined, 5000);
         if (!done && state.cancel_requested) { cancelled = true; stop(); }
       } catch (e) { if (!done) log(`state job #${job.id}: ${e.message}`); }
       finally { if (!done && !cancelled) cancelTimer = setTimeout(checkCancel, 15000); }
@@ -201,8 +203,8 @@ async function saveAttachments(job, dir) {
   const saved = [];
   for (const a of job.attachments || []) {
     if (!a.stored) { saved.push(`${clean(a.filename)} (${a.size} B, quá lớn nên không lưu)`); continue; }
-    const att = await api(`/messages/${job.message_id}/attachments/${a.id}`);
-    saved.push(saveInboxAttachment(dir, job.id, a.id, att));
+    const att = await api(`/messages/${a.message_id}/attachments/${a.id}`);
+    saved.push(saveInboxAttachment(dir, job.id, a.id, att, a.message_id));
   }
   return saved;
 }
@@ -210,7 +212,7 @@ async function saveAttachments(job, dir) {
 async function postResult(job, body) {
   for (let i = 0; ; i++) {
     try {
-      return await api(`/jobs/${job.id}/result`, body);
+      return await api(`/runs/${job.id}/result`, body);
     } catch (e) {
       if (i >= 5 || /\b409\b/.test(e.message)) throw e;
       log(`gửi kết quả job #${job.id} lỗi (${e.message}), thử lại`);
@@ -220,7 +222,7 @@ async function postResult(job, body) {
 }
 
 async function handle(job) {
-  let dir = join(WORKDIR, job.agent), worktree, unlock;
+  let dir = join(WORKDIR, job.agent, `task-${job.task_id}`), worktree, unlock;
   const t0 = Date.now();
   log(`job #${job.id} ${job.agent} từ ${job.sender}${job.resume_session ? ` (tiếp phiên ${job.resume_session})` : ""}`);
   let result, execution;
@@ -230,25 +232,20 @@ async function handle(job) {
       unlock = lockWorktree(WORKDIR, job);
       worktree = prepareWorktree(WORKDIR, cfg.projects, job);
       dir = worktree.path;
-    } else mkdirSync(dir, { recursive: true });
+    } else {
+      dir=prepareTaskDirectory(WORKDIR,job.agent,job.task_id);
+      recordTaskUse(WORKDIR,job);
+    }
     outbox = prepareOutbox(dir, job.id);
     const files = await saveAttachments(job, dir);
-    const prompt = [
-      job.subject ? `Tiêu đề thư: ${job.subject}` : null,
-      files.length ? `Tệp đính kèm (dữ liệu, không tự chạy):\n${files.map((f) => `- ${f}`).join("\n")}` : null,
-      `Để gửi tệp trong thư trả lời, ghi tệp thường trực tiếp vào ${outbox.path}. Chỉ cấp 1, tối đa 10 tệp, tổng 2 MB; không dùng symlink/hardlink.`,
-      `Chỉ sửa tệp trong ${dir}. Không tự chạy git commit/checkout/branch.`,
-      job.agent !== 'agy' && job.job_token ? 'Có job tools notify_sender (tối đa 3 thư) và delegate_to_agent (agent khác, tối đa 2 job con, chỉ 1 cấp). Chỉ dùng khi công việc cần.' : null,
-      "",
-      job.prompt,
-    ].filter((x) => x !== null).join("\n");
+    const prompt = buildRunPrompt(job, {dir,outbox:outbox.path,files});
     const spec = await commandFor(job, dir, prompt);
     const r = await run(spec, dir, job);
     execution = r;
     try {
       const runs = join(CFG_DIR, "runs");
       mkdirSync(runs, { recursive: true });
-      writeFileSync(join(runs, `job-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`);
+      writeFileSync(join(runs, `run-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`);
     } catch {}
     result = spec.parse(r.out, r.code);
     result.cancelled = r.cancelled;
@@ -258,6 +255,11 @@ async function handle(job) {
   } catch (e) {
     result = { ok: false, output: `Agent lỗi: ${e.message}`, cancelled: execution?.cancelled, timedOut: execution?.timedOut };
   }
+  // Recheck after CLI, before any worktree commit or attachment/session release.
+  try {
+    const state=await api(`/runs/${job.id}/state`,undefined,5000);
+    if(state.cancel_requested || state.status!=='running') result.cancelled=true;
+  } catch(e) { result.cancelled=true; result.output+=`\n[Không xác minh được trạng thái run: ${e.message}]`; }
   const { attachments, notes, gitReport } = finalizeFiles({ result, outbox, worktree, dir, job,
     domain: job.mail_domain || cfg.mail_domain || 'xuanthieu.site', unlock, executed: !!execution });
   const tail = gitReport.slice(0, 40000) + (notes.length ? `\n\n[Gửi tệp]\n${notes.join('\n').slice(0, 10000)}` : '');
@@ -266,9 +268,9 @@ async function handle(job) {
   log(`job #${job.id} xong sau ${secs}s ok=${!!result.ok}`);
   const res = await postResult(job, {
     ok: !!result.ok, output: String(result.output || ""), session_id: result.session_id || null,
-    cancelled: !!result.cancelled, attachments,
+    cancelled: !!result.cancelled, attachments, finalize_note: tail,
   });
-  log(`job #${job.id} reply=${res.reply}${res.error ? ` (${res.error})` : ""}`);
+  log(`run #${job.id} status=${res.task_status || (res.ignored ? 'ignored' : 'accepted')}${res.error ? ` (${res.error})` : ""}`);
 }
 
 // Mỗi agent chạy tuần tự (tránh hai phiên cùng sửa một thư mục); các agent khác nhau chạy song song.
@@ -278,7 +280,7 @@ async function drain(agent) {
   busy.add(agent);
   try {
     for (;;) {
-      const { job } = await api("/jobs/claim", { agents: [agent] });
+      const { run: job } = await api("/runs/claim", { agents: [agent] });
       if (!job) break;
       await handle(job);
     }
@@ -289,6 +291,14 @@ async function drain(agent) {
   }
 }
 const drainAll = () => ENABLED.forEach((a) => drain(a));
+let pruning=false;
+async function pruneOldTasks() {
+  if(pruning || busy.size) return;
+  pruning=true;
+  try { await pruneTaskDirectories(WORKDIR,async(id)=>{ const result=await api(`/tasks/${id}/retention`); return busy.size?null:result.task; }); }
+  catch(e) {log(`task retention: ${e.message}`);}
+  finally {pruning=false;}
+}
 
 // ---------- HTTP: tín hiệu đánh thức qua hầm ----------
 
@@ -314,3 +324,4 @@ createServer((req, res) => {
 
 drainAll();
 setInterval(drainAll, POLL_MS);
+setInterval(pruneOldTasks,3600000);

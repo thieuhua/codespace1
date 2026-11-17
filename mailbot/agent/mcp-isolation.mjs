@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { codexDisableArgs, verifyCodexDisabled, cliEnv } from './job-mcp.mjs';
+import { codexDisableArgs, verifyCodexDisabled, cliEnv } from './run-mcp.mjs';
 
 // No model calls, no config writes. Never include raw inventory/config in errors.
 export function inspectCli(cmd, args, cwd) {

@@ -14,27 +14,28 @@ export function createOrchestrator(config, fetchImpl, sleep = (ms) => new Promis
   const api = apiClient({ url: config.url, token: config.admin_token }, fetchImpl);
   const server = new McpServer({ name: 'mailbot-orchestrator', version: '1.0.0' });
   const id = z.number().int().positive();
-  server.tool('list_jobs', 'Liệt kê job gần nhất.', { limit: z.number().int().min(1).max(100).default(20) },
-    toolCall(({ limit }) => api(`/jobs?limit=${limit}`)));
-  server.tool('get_job', 'Đọc prompt, output, trạng thái và metadata outbox của job.', { id },
-    toolCall(({ id }) => api(`/jobs/${id}`)));
-  server.tool('submit_job', 'Gửi job cho agent từ owner cấu hình; có thể đợi tối đa 50 giây.', {
+  const ownerQuery=`owner=${encodeURIComponent(config.owner.toLowerCase())}`;
+  server.tool('list_tasks', 'Liệt kê task của owner cấu hình.', { limit: z.number().int().min(1).max(100).default(20) },
+    toolCall(({ limit }) => api(`/tasks?${ownerQuery}&limit=${limit}`)));
+  server.tool('get_task', 'Đọc task và timeline events/runs/outbound.', { id },
+    toolCall(({ id }) => api(`/tasks/${id}?${ownerQuery}`)));
+  server.tool('submit_task', 'Gửi task cho agent từ owner cấu hình; có thể đợi tối đa 50 giây.', {
     agent: z.enum(['claude', 'codex', 'agy']), prompt: z.string().min(1).max(200000),
     project: z.string().regex(/^[a-z0-9-]{1,32}$/).optional(), wait_seconds: z.number().int().min(0).max(50).default(0),
   }, toolCall(async ({ agent, prompt, project, wait_seconds }) => {
-    let result = await api('/jobs', { agent, prompt, project, reply_to: config.owner });
+    let result = await api('/tasks', { agent, prompt, project, owner: config.owner.toLowerCase() });
     const deadline = now() + wait_seconds * 1000;
-    while (now() < deadline && ['pending', 'running'].includes(result.job?.status)) {
+    while (now() < deadline && ['active', 'waiting'].includes(result.task?.status)) {
       await sleep(Math.min(deadline - now(), 2000));
       const remaining = deadline - now();
       if (remaining <= 0) break;
-      try { result = await api(`/jobs/${result.job.id}`, undefined, Math.min(10000, Math.max(1, Math.floor(remaining)))); }
+      try { result = await api(`/tasks/${result.task.id}?${ownerQuery}`, undefined, Math.min(10000, Math.max(1, Math.floor(remaining)))); }
       catch (e) { return { ...result, wait_error: e.message }; } // Job was submitted; retain its ID on polling failure.
     }
     return result;
   }));
-  server.tool('cancel_job', 'Hủy job pending hoặc yêu cầu dừng job running.', { id },
-    toolCall(({ id }) => api(`/jobs/${id}/cancel`, {})));
+  server.tool('cancel_task', 'Hủy đồng bộ task và cây con, thu hồi token ngay.', { id },
+    toolCall(({ id }) => api(`/tasks/${id}/cancel?${ownerQuery}`, {})));
   server.tool('allowlist_list', 'Đọc whitelist, không sửa whitelist.', {}, toolCall(() => api('/allowlist')));
   return server;
 }

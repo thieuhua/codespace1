@@ -1,12 +1,12 @@
 import { fileURLToPath } from 'node:url';
 
-export const JOB_TOOLS = ['mcp__mailbot-job__notify_sender', 'mcp__mailbot-job__delegate_to_agent'];
+export const RUN_TOOLS = ['reply', 'spawn', 'await', 'notify', 'ask_user'].map((name) => `mcp__mailbot-run__${name}`);
 
 // Token lives only in this MCP's env config; never in the CLI process environment.
-export function jobMcp(job, url, entry = fileURLToPath(new URL('../mcp/job-tools.mjs', import.meta.url))) {
-  if (!job.job_token || job.agent === 'agy') return null;
+export function runMcp(job, url, entry = fileURLToPath(new URL('../mcp/run-tools.mjs', import.meta.url))) {
+  if (!job.run_token || job.agent === 'agy') return null;
   return { command: process.execPath.replaceAll('\\', '/'), args: [entry.replaceAll('\\', '/')],
-    env: { MAILBOT_URL: url, MAILBOT_JOB_TOKEN: job.job_token } };
+    env: { MAILBOT_URL: url, MAILBOT_RUN_TOKEN: job.run_token } };
 }
 
 export function codexDisableArgs(servers) {
@@ -25,14 +25,14 @@ export function codexMcpArgs(server, servers = []) {
   const args = codexDisableArgs(servers);
   if (server) {
     const tomlString = (s) => JSON.stringify(s);
-    args.push('-c', 'mcp_servers.mailbot-job.enabled=true',
-      '-c', `mcp_servers.mailbot-job.command=${tomlString(server.command)}`,
-      '-c', `mcp_servers.mailbot-job.args=[${server.args.map(tomlString).join(',')}]`,
-      '-c', `mcp_servers.mailbot-job.env={${Object.entries(server.env).map(([k,v]) => `${k}=${tomlString(v)}`).join(',')}}`);
+    args.push('-c', 'mcp_servers.mailbot-run.enabled=true',
+      '-c', `mcp_servers.mailbot-run.command=${tomlString(server.command)}`,
+      '-c', `mcp_servers.mailbot-run.args=[${server.args.map(tomlString).join(',')}]`,
+      '-c', `mcp_servers.mailbot-run.env={${Object.entries(server.env).map(([k,v]) => `${k}=${tomlString(v)}`).join(',')}}`);
   }
   return args;
 }
 
 export function cliEnv(env = process.env) {
-  return Object.fromEntries(Object.entries(env).filter(([key]) => !/^(MAILBOT_JOB_TOKEN|MAILBOT_TOKEN|MAILBOT_ADMIN_TOKEN)$/i.test(key)));
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !/^(MAILBOT_RUN_TOKEN|MAILBOT_JOB_TOKEN|MAILBOT_TOKEN|MAILBOT_ADMIN_TOKEN)$/i.test(key)));
 }

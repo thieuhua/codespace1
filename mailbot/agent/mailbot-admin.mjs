@@ -48,10 +48,10 @@ switch (cmd) {
     for (const r of allowlist) console.log(`${r.address}\t${r.agent}\t${r.added_at}`);
     break;
   }
-  case "jobs": {
-    const { jobs } = await api("GET", `/jobs?limit=${Number(a1) || 10}`);
-    for (const j of jobs) {
-      console.log(`#${j.id} ${j.agent} ${j.status}${j.reply_status ? `/${j.reply_status}` : ""} ${j.created_at} ${j.sender} | ${j.subject || ""}`);
+  case "tasks": {
+    const { tasks } = await api("GET", `/tasks?owner=${encodeURIComponent(cfg.owner || "")}&limit=${Number(a1) || 10}`);
+    for (const j of tasks) {
+      console.log(`#${j.id} ${j.agent} ${j.status}${j.reply_status ? `/${j.reply_status}` : ""} ${j.created_at} ${j.owner} | ${j.title || ""}`);
       if (j.reply_error) console.log(`    reply_error: ${j.reply_error}`);
     }
     break;

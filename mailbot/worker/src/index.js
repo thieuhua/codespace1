@@ -1,9 +1,9 @@
 // Email Worker: nhận thư từ Cloudflare Email Routing, lưu vào D1 (inbox của claude@),
 // và biến thư từ người trong whitelist gửi tới claude@/codex@/agy@ thành job chạy CLI trên laptop.
 import PostalMime from "postal-mime";
-import { agentFor, rejectRecipient, readerScope, senderAuth, isAllowed, createJob, wakeAgent, claimJob, finishJob, AGENTS } from "./mailbot.js";
-import { jobForToken, notifySender, delegateJob, submitJob, cancelJob, publicJob } from './job-api.js';
-import { sendMail, sendReply } from "./send.js";
+import { agentFor, rejectRecipient, readerScope, senderAuth, isAllowed, wakeAgent, AGENTS } from "./mailbot.js";
+import { receiveTaskMail, claimRun, finishRun, runForToken, runTool, submitTask, cancelTask, getTask, cronTick, liveMessages } from './tasks.js';
+import { sendMail } from "./send.js";
 
 const MAX_RAW = 20 * 1024 * 1024; // từ chối thư lớn hơn 20 MB
 const MAX_BODY = 256 * 1024; // cắt text/html mỗi phần ở 256 K ký tự
@@ -38,9 +38,9 @@ export default {
 
     const msgId = await storeMessage(env, message, mail);
     if (allowed) {
-      const job = await createJob(env, { msgId, agent, tag, sender: auth.address, mail }, sendMail);
-      console.log(`${job.id ? `job #${job.id}` : 'command'} ${agent} từ ${auth.address}: ${job.status}`);
-      if (job.status === "pending") ctx.waitUntil(wakeAgent(env));
+      const task = await receiveTaskMail(env, { msgId, agent, tag, sender: auth.address, mail }, sendMail);
+      console.log(`${task.id ? `task #${task.id}` : 'command'} ${agent}: ${task.status}`);
+      if (task.status === 'active' || task.status === 'command') ctx.waitUntil(wakeAgent(env));
     }
   },
 
@@ -48,26 +48,29 @@ export default {
     const url = new URL(request.url);
     const parts = url.pathname.split("/").filter(Boolean);
     try {
-      if (parts[0] === 'job-api') {
-        const job = await jobForToken(env, request.headers.get('X-Job-Token'));
-        if (!job) return json({ error: 'invalid job token' }, 401);
+      if (parts[0] === 'run-api') {
+        const run = await runForToken(env, request.headers.get('X-Run-Token'));
+        if (!run) return json({ error: 'invalid run token' }, 401);
         if (request.method !== 'POST' || parts.length !== 2) return json({ error: 'not found' }, 404);
         const body = await request.json();
-        const result = parts[1] === 'notify' ? await notifySender(env, job, body, sendMail)
-          : parts[1] === 'delegate' ? await delegateJob(env, job, body) : { error: 'not found', code: 404 };
-        if (result.job) await wakeAgent(env);
+        const result = await runTool(env, run, parts[1], body, sendMail);
+        if (result.task_id) await wakeAgent(env);
         return json(result, result.code || 200);
       }
       const role = await roleOf(request, env);
       if (!role) return json({ error: "unauthorized" }, 401);
       if (parts[0] === "messages") return await messagesApi(request, env, url, parts, role);
       if (role !== "admin") return json({ error: "forbidden" }, 403);
-      if (parts[0] === "jobs") return await jobsApi(request, env, url, parts);
+      if (parts[0] === 'runs') return await runsApi(request, env, parts);
+      if (parts[0] === 'tasks') return await tasksApi(request, env, url, parts);
       if (parts[0] === "allowlist") return await allowlistApi(request, env, parts);
       return json({ error: "not found" }, 404);
     } catch (err) {
       return json({ error: String(err?.message || err) }, 500);
     }
+  },
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil((async () => { await cronTick(env, sendMail); await wakeAgent(env); })());
   },
 };
 
@@ -115,7 +118,7 @@ async function storeMessage(env, message, mail) {
     );
   }
   // Dọn thư cũ, trừ thư còn job đang chờ/chạy.
-  const live = `(SELECT message_id FROM jobs WHERE status IN ('pending','running'))`;
+  const live = `(${liveMessages})`;
   stmts.push(
     env.DB.prepare(`DELETE FROM attachments WHERE message_id <= ?1 AND message_id NOT IN ${live}`).bind(msgId - KEEP),
     env.DB.prepare(`DELETE FROM messages WHERE id <= ?1 AND id NOT IN ${live}`).bind(msgId - KEEP)
@@ -161,12 +164,12 @@ async function messagesApi(request, env, url, parts, role) {
   }
   if (parts.length === 2 && request.method === "DELETE") {
     const live = await env.DB.prepare(
-      `SELECT 1 FROM jobs WHERE message_id = ?1 AND status IN ('pending','running')`
+      `SELECT 1 FROM events e LEFT JOIN runs r ON r.id=e.run_id WHERE e.message_id=?1 AND (e.run_id IS NULL OR r.status IN ('pending','running'))`
     ).bind(id).first();
-    if (live) return json({ error: "thư đang có job chờ/chạy" }, 409);
+    if (live) return json({ error: 'thư có event chưa xử lý hoặc run chờ/chạy' }, 409);
     await env.DB.batch([
-      env.DB.prepare(`DELETE FROM attachments WHERE message_id = ?1`).bind(id),
-      env.DB.prepare(`DELETE FROM messages WHERE id = ?1`).bind(id),
+      env.DB.prepare(`DELETE FROM attachments WHERE message_id = ?1 AND message_id NOT IN (${liveMessages})`).bind(id),
+      env.DB.prepare(`DELETE FROM messages WHERE id = ?1 AND id NOT IN (${liveMessages})`).bind(id),
     ]);
     return json({ ok: true });
   }
@@ -187,46 +190,47 @@ async function messagesApi(request, env, url, parts, role) {
   return json({ error: "not found" }, 404);
 }
 
-async function jobsApi(request, env, url, parts) {
-  if (parts.length === 1 && request.method === 'POST') {
-    const result = await submitJob(env, await request.json());
-    if (result.job) await wakeAgent(env);
-    return json(result, result.code || 200);
+async function runsApi(request, env, parts) {
+  if (parts.length===2 && parts[1]==='claim' && request.method==='POST') {
+    const body=await request.json();
+    return json({run:await claimRun(env,body.agents)});
   }
-  if (parts.length === 1 && request.method === "GET") {
-    const limit = Math.min(int(url.searchParams.get("limit"), 20), 100);
-    const { results } = await env.DB.prepare(
-      `SELECT id, agent, sender, subject, status, attempts, created_at, claimed_at, finished_at,
-         exit_ok, session_id, reply_status, reply_error, project, parent_id, root_id, depth, outbox_json,
-         substr(prompt, 1, 200) AS prompt_preview
-       FROM jobs ORDER BY id DESC LIMIT ?1`
-    ).bind(limit).all();
-    return json({ jobs: results });
+  const id=Number(parts[1]);
+  if(!Number.isSafeInteger(id)||id<1) return json({error:'bad id'},400);
+  if(parts.length===3 && parts[2]==='state' && request.method==='GET') {
+    const run=await env.DB.prepare('SELECT id,status,cancel_requested FROM runs WHERE id=?1').bind(id).first();
+    return run?json(run):json({error:'not found'},404);
   }
-  if (parts.length === 2 && parts[1] === "claim" && request.method === "POST") {
-    const body = await request.json().catch(() => ({}));
-    const job = await claimJob(env, Array.isArray(body.agents) ? body.agents : AGENTS);
-    return json({ job });
+  if(parts.length===3 && parts[2]==='result' && request.method==='POST') {
+    const result=await finishRun(env,id,await request.json(),sendMail);
+    if(result.ok) await wakeAgent(env);
+    return json(result,result.code||200);
   }
-  if (parts.length === 3 && parts[2] === "result" && request.method === "POST") {
-    const body = await request.json();
-    const res = await finishJob(env, int(parts[1], -1), body, (job, text, replyId, attachments) => sendReply(env, job, text, replyId, attachments));
-    return json(res, res.ok ? 200 : res.code || 409);
+  return json({error:'not found'},404);
+}
+
+async function tasksApi(request, env, url, parts) {
+  if(parts.length===1 && request.method==='POST') {
+    const result=await submitTask(env,await request.json());
+    if(result.task) await wakeAgent(env);
+    return json(result,result.code||200);
   }
-  if (parts.length === 3 && parts[2] === "state" && request.method === "GET") {
-    const job = await env.DB.prepare(`SELECT id, status, cancel_requested FROM jobs WHERE id = ?1`)
-      .bind(int(parts[1], -1)).first();
-    return job ? json(job) : json({ error: "not found" }, 404);
+  if(parts.length===3 && parts[2]==='retention' && request.method==='GET') {
+    const task=await env.DB.prepare('SELECT id,agent,project,status,finished_at FROM tasks WHERE id=?1').bind(int(parts[1],-1)).first();
+    return task?json({task}):json({error:'not found'},404);
   }
-  if (parts.length === 3 && parts[2] === 'cancel' && request.method === 'POST') {
-    const result = await cancelJob(env, int(parts[1], -1));
-    return json(result, result.code || 200);
+  const owner=url.searchParams.get('owner');
+  if(!owner) return json({error:'owner required'},400);
+  if(parts.length===1 && request.method==='GET') {
+    const {results}=await env.DB.prepare('SELECT id,root_id,parent_id,agent,owner,project,title,status,wait_json,run_count,created_at,updated_at FROM tasks WHERE owner=?1 ORDER BY id DESC LIMIT ?2')
+      .bind(owner,Math.min(int(url.searchParams.get('limit'),20),100)).all();
+    return json({tasks:results});
   }
-  if (parts.length === 2 && request.method === 'GET') {
-    const job = await env.DB.prepare(`SELECT * FROM jobs WHERE id = ?1`).bind(int(parts[1], -1)).first();
-    return job ? json({ job: publicJob(job) }) : json({ error: 'not found' }, 404);
-  }
-  return json({ error: "not found" }, 404);
+  const id=Number(parts[1]);
+  if(!Number.isSafeInteger(id)||id<1) return json({error:'bad id'},400);
+  const result=parts.length===2&&request.method==='GET'?await getTask(env,id,owner):
+    parts.length===3&&parts[2]==='cancel'&&request.method==='POST'?await cancelTask(env,id,owner):{error:'not found',code:404};
+  return json(result,result.code||200);
 }
 
 async function allowlistApi(request, env, parts) {

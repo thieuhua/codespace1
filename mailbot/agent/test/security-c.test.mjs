@@ -7,7 +7,7 @@ import { readLastOutput } from '../cli-output.mjs';
 import { finalizeFiles } from '../job-finalize.mjs';
 import { prepareOutbox } from '../outbox.mjs';
 import { saveInboxAttachment } from '../inbox.mjs';
-import { codexDisableArgs, codexMcpArgs } from '../job-mcp.mjs';
+import { codexDisableArgs, codexMcpArgs } from '../run-mcp.mjs';
 import { agyEnabledServers, verifyAgyMcp, codexInventoryCache } from '../mcp-isolation.mjs';
 import { claudeSettings, claudeIsolationArgs } from '../cli-options.mjs';
 
@@ -63,12 +63,12 @@ for (const flag of ['cancelled', 'timedOut']) test(`C4/C7 ${flag}: no commit or 
 });
 
 test('C5/A pure Codex args disable plugins and every inherited MCP, quote TOML keys, then enable only job MCP', () => {
-  const servers = [{ name: 'admin', enabled: true }, { name: 'a.b "quoted"', enabled: false }, { name: 'mailbot-job', enabled: true }];
-  const args = codexMcpArgs({ command: 'node', args: ['job.mjs'], env: { MAILBOT_JOB_TOKEN: 'scoped' } }, servers);
+  const servers = [{ name: 'admin', enabled: true }, { name: 'a.b "quoted"', enabled: false }, { name: 'mailbot-run', enabled: true }];
+  const args = codexMcpArgs({ command: 'node', args: ['job.mjs'], env: { MAILBOT_RUN_TOKEN: 'scoped' } }, servers);
   assert.deepEqual(args.slice(0, 2), ['--disable', 'plugins']);
   assert.ok(args.includes('mcp_servers.admin.enabled=false'));
   assert.ok(args.includes('mcp_servers."a.b \\"quoted\\"".enabled=false'));
-  assert.ok(args.indexOf('mcp_servers.mailbot-job.enabled=false') < args.indexOf('mcp_servers.mailbot-job.enabled=true'));
+  assert.ok(args.indexOf('mcp_servers.mailbot-run.enabled=false') < args.indexOf('mcp_servers.mailbot-run.enabled=true'));
   assert.ok(!args.includes('mcp_servers={}'));
   assert.throws(() => codexDisableArgs([{ name: 'x' }]));
 });
