@@ -155,10 +155,16 @@ export async function claimRun(env, agents) {
     SELECT a.id,a.message_id,a.filename,a.mime_type,a.size,a.content_b64 IS NOT NULL AS stored
     FROM attachments a WHERE a.message_id IN (SELECT e.message_id FROM events e JOIN source_runs s ON s.id=e.run_id
       JOIN runs r ON r.id=s.id WHERE r.task_id=?2) ORDER BY a.message_id,a.id`, run.id,run.task_id).all();
+  // Only the run consuming the mail that superseded a wait receives this note.
+  // Read our durable finish decision, never a role/source label in mail payloads.
+  const { results: skipped_waits } = await stmt(env, `SELECT r.id AS run_id,json_extract(r.outcome_json,'$.skipped_wait.mode') AS mode
+    FROM runs r JOIN events e ON e.id=json_extract(r.outcome_json,'$.skipped_wait.mail_event_id')
+    WHERE r.task_id=?2 AND e.task_id=r.task_id AND e.run_id=?1 AND e.kind='mail'
+      AND json_extract(r.outcome_json,'$.skipped_wait.mode') IN ('user','timer') ORDER BY r.id`,run.id,run.task_id).all();
   return { ...publicRun(run), agent: task.agent, sender: task.owner, project: task.project, subject: task.title,
     parent_id: task.parent_id, deliver: task.deliver, options_json: task.options_json,
     run_token: token, mail_domain: domain(env), resume_session: SID.test(task.session_id || '') ? task.session_id : null,
-    events: bounded, attachments };
+    events: bounded, attachments, skipped_waits };
 }
 
 export async function runForToken(env, token) {
@@ -184,13 +190,18 @@ export async function runTool(env, run, tool, body, send) {
     const wait=asking?{mode:'user',run_id:run.id,until}:{mode:'timer',until};
     const changed=await stmt(env,`UPDATE runs SET outcome_json=json_set(
       CASE WHEN ?4 IS NULL THEN outcome_json ELSE json_set(outcome_json,'$.reply_text',?4) END,'$.wait',json(?3))
-      WHERE id=?1 AND ${runGuard} AND (?4 IS NOT NULL OR COALESCE(json_extract(outcome_json,'$.wait.mode'),'')!='user')
+      WHERE id=?1 AND ${runGuard}
+      AND json_extract(outcome_json,'$.wait') IS NULL AND COALESCE(json_array_length(outcome_json,'$.spawned'),0)=0
+      AND NOT EXISTS(SELECT 1 FROM tasks c WHERE c.spawn_run_id=runs.id AND c.parent_id=runs.task_id)
       AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=runs.task_id AND (?5 IS NULL OR ?5<=t.expires_at)
-        ${asking?"AND t.parent_id IS NULL AND t.deliver='email' AND t.question_count<5 AND t.mail_count<14 AND t.run_count<t.max_runs":''})`,
+        AND t.run_count<t.max_runs
+        AND NOT EXISTS(SELECT 1 FROM json_each(t.wait_json,'$.ids') j JOIN tasks c ON c.id=j.value
+          WHERE json_extract(t.wait_json,'$.mode') IN ('all','any') AND c.parent_id=t.id AND c.status NOT IN ${TERMINAL})
+        ${asking?"AND t.parent_id IS NULL AND t.deliver='email' AND t.question_count<5 AND t.mail_count<14":''})`,
       run.id,run.token_hash,JSON.stringify(wait),asking?body.question:null,until).run();
     return changed.meta.changes?{ok:true}:fail(asking?
-      'ask_user: root email task only; question/mail/run budget exhausted, timeout exceeds expires_at, or inactive run':
-      'await: timeout exceeds expires_at, ask_user already set, or inactive run',409);
+      'ask_user: root email task only; spawned children, wait already set or live children still awaited; question/mail/run budget exhausted, timeout exceeds expires_at, or inactive run':
+      'await: spawned children, wait already set or live children still awaited; run budget exhausted, timeout exceeds expires_at, or inactive run',409);
   }
   if (tool === 'spawn') return spawnTask(env, run, body);
   if (tool === 'reply') {
@@ -306,14 +317,24 @@ export async function finishRun(env, id, body, send) {
       resultSql:body.ok&&!body.cancelled?`(SELECT COALESCE(json_extract(outcome_json,'$.reply_text')||COALESCE(json_extract(outcome_json,'$.finalize_note'),''),output) FROM runs WHERE id=${Number(id)})`:'?3',
       key,guard:`${doneGuard} AND ((NOT EXISTS(SELECT 1 FROM events WHERE task_id=tasks.id AND run_id IS NULL)
         OR (parent_id IS NULL AND NOT EXISTS(SELECT 1 FROM events WHERE task_id=tasks.id AND run_id IS NULL AND kind!='mail')))
-        AND wait_json IS NULL OR ${body.ok&&!body.cancelled?'0':'1'}=1)`});
+        AND wait_json IS NULL AND NOT EXISTS(SELECT 1 FROM runs WHERE id=${Number(id)} AND json_extract(outcome_json,'$.skipped_wait') IS NOT NULL)
+        OR ${body.ok&&!body.cancelled?'0':'1'}=1)`});
     await env.DB.batch([
       stmt(env,`UPDATE runs SET status=CASE WHEN ?2=1 THEN 'cancelled' WHEN ?3=1 THEN 'done' ELSE 'failed' END,
         output=?4,session_id=?5,outbox_json=?6,result_hash=?7,finish_key=?8,token_hash=NULL,finished_at=?9,outcome_json=json_set(outcome_json,'$.finalize_note',?10)
         WHERE id=?1 AND status='running' AND cancel_requested=0 AND EXISTS(SELECT 1 FROM tasks WHERE id=runs.task_id AND status IN ${LIVE} AND expires_at>?9)`,
         id,body.cancelled?1:0,body.ok?1:0,output,sid,metadata,hash,key,now,note),
+      // Mail received during this run supersedes its question/timer. Persist the
+      // decision with finish_key so retries cannot reserve/send that question,
+      // even after schedule has consumed the mail. Keep the original wait for audit.
+      stmt(env,`UPDATE runs SET outcome_json=json_set(outcome_json,'$.skipped_wait',json_object(
+          'mode',json_extract(outcome_json,'$.wait.mode'),
+          'mail_event_id',(SELECT MIN(id) FROM events WHERE task_id=runs.task_id AND run_id IS NULL AND kind='mail')))
+        WHERE id=?1 AND finish_key=?2 AND status='done' AND json_extract(outcome_json,'$.wait.mode') IN ('user','timer')
+          AND EXISTS(SELECT 1 FROM events WHERE task_id=runs.task_id AND run_id IS NULL AND kind='mail')`,id,key),
       stmt(env,`UPDATE tasks SET session_id=?3,lost_count=0,updated_at=?4,
-        wait_json=CASE WHEN ?5=0 THEN NULL ELSE COALESCE((SELECT json_extract(outcome_json,'$.wait') FROM runs WHERE id=?2),wait_json,
+        wait_json=CASE WHEN ?5=0 THEN NULL ELSE COALESCE((SELECT json_extract(outcome_json,'$.wait') FROM runs WHERE id=?2
+          AND json_extract(outcome_json,'$.skipped_wait') IS NULL),wait_json,
           (SELECT json_object('mode','all','ids',json_group_array(id)) FROM tasks c WHERE c.spawn_run_id=?2 AND c.parent_id=tasks.id HAVING COUNT(*)>0)) END
         WHERE id=?1 AND EXISTS(SELECT 1 FROM runs WHERE id=?2 AND finish_key=?6)`,old.task_id,id,sid,now,body.ok&&!body.cancelled?1:0,key),
       stmt(env,`UPDATE tasks SET status=CASE WHEN wait_json IS NULL THEN 'active' ELSE 'waiting' END
@@ -353,10 +374,12 @@ export async function finishRun(env, id, body, send) {
   const {results:parents}=await stmt(env,`SELECT DISTINCT c.parent_id FROM tasks c JOIN tasks p ON p.id=c.parent_id
     WHERE c.completion_key=?1 AND p.status IN ${LIVE}`,saved.finish_key).all();
   for(const p of parents) await schedule(env,p.parent_id,send);
-  await deliverOutbound(env,`reply:run:${id}`,files,send);
-  await deliverOutbound(env,`question:run:${id}`,[],send);
-  const {results:terminalMails}=await stmt(env,`SELECT dedupe_key FROM outbound_mails WHERE task_id=?1 AND dedupe_key LIKE ?2`,old.task_id,`terminal:${saved.finish_key}:%`).all();
-  for(const mail of terminalMails) await deliverOutbound(env,mail.dedupe_key,[],send);
+  try {await deliverOutbound(env,`reply:run:${id}`,files,send);} catch(e) {
+    // Attachment bytes live only in the executor request; keep its retry path.
+    if(files.length) throw e;
+  }
+  try {await deliverOutbound(env,`question:run:${id}`,[],send);} catch {/* durable text error; cron retries */}
+  await deliverCompletion(env,saved.finish_key,send);
   return {ok:true,task_status:(await stmt(env,'SELECT status FROM tasks WHERE id=?1',old.task_id).first())?.status};
 }
 

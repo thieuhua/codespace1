@@ -14,14 +14,14 @@ export function createRunTools(config, fetchImpl) {
   server.tool('spawn','Tạo task con ở agent khác, kế thừa project/owner; kết quả trả về cha.',{
     agent:z.enum(['claude','codex','agy']),prompt:text,
   },toolCall((b)=>api('/run-api/spawn',b)));
-  server.tool('await','Chờ con bằng ids/mode HOẶC hẹn giờ bằng seconds (60..86400, không vượt TTL). Không dùng sau ask_user. Áp dụng lúc finish.',{
+  server.tool('await','Chờ con bằng ids/mode HOẶC hẹn giờ bằng seconds (60..86400, không vượt TTL). Không dùng sau ask_user. Hẹn giờ từ chối nếu đã spawn, đã đặt wait, đang chờ con còn sống hoặc ở lượt cuối. Áp dụng lúc finish.',{
     ids:z.array(z.number().int().positive()).min(1).max(3).optional(),mode:z.enum(['all','any']).optional(),
     seconds:z.number().int().min(60).max(86400).optional(),
   },toolCall((b)=>api('/run-api/await',b)));
   server.tool('notify','Gửi tiến độ ngay, chỉ task gốc; chỉ text, tối đa 3/run.',{
     text:z.string().min(1).max(64000),
   },toolCall((b)=>api('/run-api/notify',b)));
-  server.tool('ask_user','Hỏi owner, chỉ task gốc email, tối đa 5 câu hỏi/task. Chỉ gửi sau finalize thành công; ghi đè câu hỏi cùng run. Sau đó không spawn/await/reply.',{
+  server.tool('ask_user','Hỏi owner, chỉ task gốc email, tối đa 5 câu hỏi/task. Từ chối nếu đã spawn, đã đặt wait, đang chờ con còn sống hoặc ở lượt cuối. Chỉ gửi sau finalize thành công. Sau đó không spawn/await/reply.',{
     question:text,timeout_seconds:z.number().int().min(60).max(86400).optional(),
   },toolCall((b)=>api('/run-api/ask_user',b)));
   return server;

@@ -23,19 +23,19 @@ function fixture(t) {
   return {DB,sqlite,env,sent,send,create,claim,tool,finish,row,incoming,due};
 }
 
-test('P4 root ask only updates outcome; last question wins; blocks reply/spawn/await; finish and retries send once',async t=>{
+test('P4 root ask only updates outcome; repeated wait rejected; blocks reply/spawn/await; finish and retries send once',async t=>{
   const f=fixture(t),task=await f.create(),run=await f.claim();
   assert.equal((await f.tool(run,'ask_user',{question:'first',timeout_seconds:60})).ok,true);
-  assert.equal((await f.tool(run,'ask_user',{question:'last'})).ok,true);
+  assert.equal((await f.tool(run,'ask_user',{question:'last'})).code,409);
   assert.equal(f.sent.length,0);assert.equal(f.row(task.id).status,'active');assert.equal(f.row(task.id).question_count,0);
   for(const [name,args] of [['reply',{text:'no'}],['spawn',{agent:'codex',prompt:'no'}],['await',{seconds:60}],['await',{ids:[1]}]]) {
     assert.equal((await f.tool(run,name,args)).code,409);
   }
   await Promise.all([f.finish(run,{finalize_note:' finalized'}),f.finish(run,{finalize_note:' finalized'})]);
   await f.finish(run,{finalize_note:' finalized'});
-  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/last finalized/);assert.doesNotMatch(f.sent[0].text,/first/);
+  assert.equal(f.sent.length,1);assert.match(f.sent[0].text,/first finalized/);assert.doesNotMatch(f.sent[0].text,/last/);
   assert.equal(f.row(task.id).status,'waiting');assert.equal(JSON.parse(f.row(task.id).wait_json).mode,'user');
-  assert.equal(f.row(task.id).wait_until,null);assert.equal(f.row(task.id).question_count,1);assert.equal(f.row(task.id).mail_count,1);
+  assert.ok(f.row(task.id).wait_until);assert.equal(f.row(task.id).question_count,1);assert.equal(f.row(task.id).mail_count,1);
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) n FROM outbound_mails WHERE kind='question'").get().n,1);
 });
 
@@ -167,11 +167,11 @@ test('P4 stale cron timer snapshot is guarded against owner mail arriving before
   assert.equal(f.sqlite.prepare("SELECT COUNT(*) n FROM events WHERE kind='timer'").get().n,0);
 });
 
-test('P4 atomic five-question budget, overwrites/retries do not spend extra, mail slot reserved for final answer',async t=>{
+test('P4 atomic five-question budget, rejected duplicates/retries do not spend extra, mail slot reserved for final answer',async t=>{
   const f=fixture(t),task=await f.create();let run=await f.claim();
   for(let i=0;i<5;i++) {
     const replies=await Promise.all([f.tool(run,'ask_user',{question:`q${i}`}),f.tool(run,'ask_user',{question:`q${i} updated`})]);
-    assert.ok(replies.every(r=>r.ok));await f.finish(run);await f.finish(run);
+    assert.equal(replies.filter(r=>r.ok).length,1);assert.equal(replies.filter(r=>r.code===409).length,1);await f.finish(run);await f.finish(run);
     await f.incoming(task,{msgId:100+i,inReplyTo:f.sent.at(-1).messageId});run=await f.claim();
   }
   assert.equal(f.row(task.id).question_count,5);assert.equal(f.row(task.id).mail_count,5);
@@ -229,7 +229,10 @@ test('P4 answer_task validates owner/root/state; concurrent dedupe spends one ow
   const f=fixture(t),task=await f.create(),run=await f.claim();
   assert.equal((await answerTask(f.env,task.id,task.owner,{text:'early'},f.send)).code,409);
   const {task_id:child}=await f.tool(run,'spawn',{agent:'codex',prompt:'child'});
-  await f.tool(run,'ask_user',{question:'choose?',timeout_seconds:60});await f.finish(run);
+  assert.equal((await f.tool(run,'ask_user',{question:'cannot replace child wait'})).code,409);
+  await f.finish(run);await f.finish(await f.claim('codex'));
+  const summary=await f.claim();
+  await f.tool(summary,'ask_user',{question:'choose?',timeout_seconds:60});await f.finish(summary);
   assert.equal((await answerTask(f.env,child,task.owner,{text:'x'},f.send)).code,409);
   assert.equal((await answerTask(f.env,task.id,'b@example.com',{text:'x'},f.send)).code,409);
   assert.equal((await answerTask(f.env,task.id,task.owner,{text:'',owner:'b@example.com'},f.send)).code,400);
