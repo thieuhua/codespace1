@@ -19,6 +19,9 @@ export function createOrchestrator(config, fetchImpl, sleep = (ms) => new Promis
     toolCall(({ limit }) => api(`/tasks?${ownerQuery}&limit=${limit}`)));
   server.tool('get_task', 'Đọc task và timeline events/runs/outbound.', { id },
     toolCall(({ id }) => api(`/tasks/${id}?${ownerQuery}`)));
+  server.tool('answer_task', 'Trả lời task gốc của owner cấu hình đang chờ user; tính ngân sách owner.', {
+    id, text:z.string().min(1).max(200000),
+  },toolCall(({id,text})=>api(`/tasks/${id}/answer?${ownerQuery}`,{text})));
   server.tool('submit_task', 'Gửi task cho agent từ owner cấu hình; có thể đợi tối đa 50 giây.', {
     agent: z.enum(['claude', 'codex', 'agy']), prompt: z.string().min(1).max(200000),
     project: z.string().regex(/^[a-z0-9-]{1,32}$/).optional(), wait_seconds: z.number().int().min(0).max(50).default(0),

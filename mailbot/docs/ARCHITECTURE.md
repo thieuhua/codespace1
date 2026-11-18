@@ -1,23 +1,23 @@
 # Kiến trúc xử lý: Task → Run → Event
 
-Đặc tả đợt D, giai đoạn 1 + 2 + 3. Tích hợp 12 mục archreview và các điểm còn liên quan của joinreview. Quyết định trực tiếp trong brief đợt D thay phần reclaim, reply giữa lượt, project do spawn chọn và cancel bằng event. Các bất biến bảo mật tại [AGENTS.md](../AGENTS.md) vẫn áp dụng.
+Đặc tả đợt D, giai đoạn 1 + 2 + 3 + 4. Tích hợp 12 mục archreview và các điểm còn liên quan của joinreview. Quyết định trực tiếp trong brief đợt D thay phần reclaim, reply giữa lượt, project do spawn chọn và cancel bằng event. Các bất biến bảo mật tại [AGENTS.md](../AGENTS.md) vẫn áp dụng.
 
 ## Phạm vi
 
 Worker lập lịch, D1 giữ trạng thái, executor chuẩn bị cwd → chạy CLI → finalize worktree/outbox → nộp kết quả. MCP run có token riêng; reader inbox và orchestrator tách biệt. Không chuyển dữ liệu jobs/threads cũ; chỉ giữ bảng để tra cứu. `/jobs`, `/job-api`, MCP mailbot-job không còn phục vụ. Các hàm/test legacy còn trong source, không được router mới gọi.
 
-Giai đoạn 1 + 2 triển khai schema v5, email/task, scheduler, executor run, reply/spawn/await/notify, completeTask, cancel cây, cron lost/TTL/rate-limit/retention. Giai đoạn 3 triển khai executor song song theo run: mặc định tối đa 3 run tổng, 2 run/agent; chỉ claim khi có chỗ, không giữ hàng đợi run đã claim trên laptop. Giai đoạn 4 mới ask_user, timer, send_event; ask_user hiện trả chưa hỗ trợ, không giả thành công.
+Giai đoạn 1 + 2 triển khai schema v5, email/task, scheduler, executor run, reply/spawn/await/notify, completeTask, cancel cây, cron lost/TTL/rate-limit/retention. Giai đoạn 3 triển khai executor song song theo run: mặc định tối đa 3 run tổng, 2 run/agent; chỉ claim khi có chỗ, không giữ hàng đợi run đã claim trên laptop. Giai đoạn 4 triển khai ask_user, await theo giờ và answer_task qua MCP điều phối, schema v6.
 
 ## Schema và chỉ mục
 
-`worker/schema-v5.sql` chạy MỘT LẦN sau v4; chạy lại lỗi CREATE TABLE. Không chạy lại v3. Database mới: schema.sql → v2 → v3 → v4 → v5.
+`worker/schema-v6.sql` chạy MỘT LẦN sau v5; thêm tasks.question_count và trigger tăng khi INSERT outbound kind=question. Chạy lại lỗi duplicate column. Không chạy lại v3/v5. Database mới: schema.sql → v2 → v3 → v4 → v5 → v6.
 
 | Bảng | Trường chính |
 | --- | --- |
-| tasks | id; creation_key UNIQUE; root_id (gốc tự trỏ id); parent_id; spawn_run_id; depth 0..2; agent/owner/project/title; status active/waiting/done/failed/cancelled; deliver email/parent; session_id; options_json; wait_json/wait_until; rfc_message_id/references_hdr; run_count/max_runs; child_count/tree_count/mail_count/lost_count; result; completion_key; created/updated/expires/finished_at |
+| tasks | id; creation_key UNIQUE; root_id (gốc tự trỏ id); parent_id; spawn_run_id; depth 0..2; agent/owner/project/title; status active/waiting/done/failed/cancelled; deliver email/parent; session_id; options_json; wait_json/wait_until; rfc_message_id/references_hdr; run_count/max_runs; child_count/tree_count/mail_count/question_count/lost_count; result; completion_key; created/updated/expires/finished_at |
 | runs | id/task_id; schedule_key UNIQUE; status pending/running/done/failed/cancelled; created/claimed/finished_at; token_hash/cancel_requested; output/session_id; outcome_json/outbox_json; result_hash/finish_key; notify_count; boundary |
-| events | id/task_id; kind start/mail/child_result/run_lost (timer dự phòng); message_id (messages.id); rfc_message_id; payload_json; dedupe_key UNIQUE; run_id NULL khi chưa tiêu thụ; created_at |
-| outbound_mails | task_id/run_id; dedupe_key/message_id UNIQUE; kind reply/notify/terminal; status pending/sending/sent/error; text/subject/in_reply_to/references_hdr; outbox_json metadata; send_key/error; created/sent_at |
+| events | id/task_id; kind start/mail/child_result/run_lost/timer; message_id (messages.id); rfc_message_id; payload_json; dedupe_key UNIQUE; run_id NULL khi chưa tiêu thụ; created_at |
+| outbound_mails | task_id/run_id; dedupe_key/message_id UNIQUE; kind reply/question/notify/terminal; status pending/sending/sent/error; text/subject/in_reply_to/references_hdr; outbox_json metadata; send_key/error; created/sent_at |
 
 Chỉ mục: unique một phần runs(task_id) WHERE pending/running; queue(status,id), stale(status,claimed_at), budget(created_at,task_id), token_hash unique khi khác NULL. Events: (task_id,run_id,id), (message_id,run_id), (rfc_message_id,task_id). Tasks: owner/id, root, parent/spawn_run, RFC, status/expires_at, status/wait_until. Outbound: task/id, status/id.
 
@@ -30,6 +30,7 @@ AFTER INSERT trigger đặt root_id cho gốc, tăng child_count của cha và t
 | Lượt/task | 8; done mở lại: max_runs = run_count + 8 |
 | Độ sâu/con trực tiếp/tổng cây | 2 / 3 / 8, tính cả gốc |
 | Notify/run; thư/root | 3; 15 (lỗi gửi vẫn tiêu quota) |
+| Câu hỏi/root; hẹn giờ | 5 câu hỏi đã giữ chỗ thư; 60..86400 giây, không vượt expires_at |
 | CLI timeout; run_lost | 20 phút; 30 phút sau claim |
 | Task TTL | 24 giờ, done mở lại cấp 24 giờ mới |
 | Owner | 30 runs + command_receipts/giờ, gồm mọi con |
@@ -40,7 +41,7 @@ Tạo gốc/spawn giữ chỗ first run trong cùng batch; hết ngân sách gi�
 ## Nhận thư và lệnh
 
 1. Giữ senderAuth: chỉ Authentication-Results đầu của mx.cloudflare.net; DMARC pass, header.from đúng domain; đúng một From chuẩn và khớp PostalMime. Whitelist theo agent đích, kể cả +tag. Chỉ claude không tag nhận công khai; thư lạ chỉ vào inbox.
-2. Sau xác thực chặn mọi Auto-Submitted khác no, X-Auto-Response-Suppress khác none/no, cả thư thường/lệnh; không event hay auto-reply.
+2. Sau xác thực chặn mọi Auto-Submitted khác no, mọi X-Auto-Response-Suppress (kể cả none/no), Precedence bulk/auto_reply/list, cả thư thường/lệnh; không event hay auto-reply. Thư vẫn có thể được lưu trong inbox.
 3. Parse lệnh đầu subject sau Re/Fwd/Fw/Tr. /status, /cancel, help không tạo task; receipt giữ quota trước gửi. Cancel vẫn hiệu lực nếu hết quota trả thư. /cancel không ID hủy mọi task active/waiting của owner trên mọi agent, không suy diễn theo thread. /cancel=ID hủy subtree đúng owner. Status liệt kê 20 task gần nhất, gồm waiting/wait_json.
 4. /new luôn tạo task/session/cwd mới. Không /new: ưu tiên In-Reply-To rồi References mới → cũ, dedupe tối đa 30 candidate; mỗi candidate tìm root đúng owner + agent qua task RFC, event RFC hoặc outbound Message-ID. Không cho người khác/agent khác/task con dùng alias để nối phiên.
 5. +tag khác project → task mới với tag mới. Không tag → kế thừa project khi reply đúng task. failed/cancelled hoặc task còn sống hết TTL → task mới; done mở lại cùng task/session với 8 lượt/24 giờ mới. Gốc đã dùng 15 thư → task mới để còn trả lời được. /new dùng project của envelope, không ngầm kế thừa thread cũ.
@@ -52,7 +53,7 @@ Attachment gắn messages.id trong event. Claim trả metadata kèm message_id; 
 
 schedule(task_id) dùng batch D1 và schedule_key UUID riêng mỗi lời gọi:
 
-1. INSERT run SELECT task với guard SQL: active/waiting, TTL còn, run_count < max_runs, có event NULL, không live run, còn quota owner. Waiting thức khi có mail/run_lost; all thỏa khi mọi con terminal; any thỏa khi có child_result chưa giao thuộc tập IDs.
+1. Batch bỏ timer chưa giao đã lỗi thời (wait_until/điều kiện chờ không còn khớp), rồi INSERT run SELECT task với guard SQL: active/waiting, TTL còn, run_count < max_runs, có event NULL, không live run, còn quota owner. Waiting thức khi có mail/run_lost hoặc timer đến hạn khớp wait_until hiện tại và mode user/timer; all thỏa khi mọi con terminal; any thỏa khi có child_result chưa giao thuộc tập IDs.
 2. Gán event chỉ vào run tìm bởi schedule_key vừa tạo. INSERT 0 hàng thì không key để gán. Không dùng last_insert_rowid sau INSERT 0 hàng; không gán vào live run sẵn có. Tối đa 128 event cũ nhất/run; phần còn lại giữ NULL cho lượt sau.
 3. Cập nhật task active/xóa wait/tăng run_count chỉ khi key tồn tại. Unique live-run index là chốt cuối. Run/event/task được commit trước claim.
 4. Cùng batch, completionBatch xử lý hết ngân sách nếu không live run; con kết thúc thì schedule cha sau commit.
@@ -67,11 +68,12 @@ Event tới lúc run running giữ NULL. finish cập nhật run + session + wai
 | GET /tasks?owner=...&limit=... | ADMIN_TOKEN, owner bắt buộc; limit <=100 |
 | GET /tasks/:id?owner=... | ADMIN_TOKEN, owner khớp; task + timeline events/runs/outbound, không token_hash |
 | POST /tasks/:id/cancel?owner=... | ADMIN_TOKEN, cancel subtree đồng bộ |
+| POST /tasks/:id/answer?owner=... | ADMIN_TOKEN; {text}; đúng owner, root deliver=email đang waiting mode=user, TTL còn; event mail dedupe và receipt quota cùng batch |
 | GET /tasks/:id/retention | ADMIN_TOKEN; chỉ metadata project/status/finished_at cho executor GC |
 | POST /runs/claim | ADMIN_TOKEN; {agents:[...]}; UPDATE pending→running RETURNING nguyên tử, không reclaim |
 | GET /runs/:id/state | ADMIN_TOKEN; status/cancel_requested |
 | POST /runs/:id/result | ADMIN_TOKEN; {ok,output,session_id,cancelled,attachments,finalize_note}; 2 pha idempotent |
-| POST /run-api/{reply,spawn,await,notify,ask_user} | X-Run-Token; running + task sống + không cancel; ask_user hiện 501 |
+| POST /run-api/{reply,spawn,await,notify,ask_user} | X-Run-Token; running + task sống + không cancel |
 
 Token ngẫu nhiên 32 byte; D1 chỉ SHA-256. Chỉ nằm trong MCP config env, không CLI env. Token run không thay thế reader/admin. API_TOKEN vẫn chỉ đọc envelope exact claude@domain, không +tag và không tasks/runs/allowlist.
 
@@ -82,9 +84,10 @@ outcome ban đầu `{spawned:[],notifications:[]}`, thêm reply_text/wait/finali
 - reply(text): không files/path, lần cuối thắng. Chỉ ghi outcome; không gửi giữa lượt. Không reply thì stdout là reply. Khi có reply riêng, vẫn ghép báo cáo finalize. Lượt chờ hoặc còn event chưa xử lý không gửi email; chỉ root done gửi thư tổng hợp cuối.
 - spawn(agent,prompt): không project, khác agent cha, whitelist owner theo đích. SQL kế thừa owner/project/root, depth+1, spawn_run_id. Guard token/running/trạng thái cha và gốc/direct/tree/depth/rate trong batch tạo con + start + first run + ghi spawned. Agent ông có thể xuất hiện lại ở cháu nhưng luôn cwd khác task.
 - await(ids,mode=all): 1..3 ID duy nhất, chỉ con trực tiếp chưa có child_result.run_id khác NULL. Từ chối tập chứa ID đã giao (kể cả prompt hiện tại), ID lạ, mình/cha. all chờ mọi con terminal, any chờ ít nhất một result chưa giao. Lần hợp lệ cuối thắng, áp dụng lúc finish.
+- await({seconds}): biến thể riêng, không kèm ids/mode; seconds nguyên 60..86400, now+seconds <= expires_at, không tự cắt xuống TTL. Ghi outcome.wait={mode:timer,until}; finish thành công đặt tasks.wait_until. Thư owner thức sớm và xóa wait user/timer; wait con còn lại vẫn được giữ như trước.
 - Auto-await chỉ con spawn trong run hiện tại, kể cả con đã xong sớm. Không ép cha chờ con cũ sau await(any). Cha done/failed hủy mọi hậu duệ còn sống, revoke token ngay.
 - notify(text): root-only, text <=64000, giữ quota/outbound trước send, ghi ID vào outcome; 3/run và 15/root, không attachment.
-- ask_user giai đoạn 4: root-only; reply_text=question, wait(user), mail sau finalize; sau đó từ chối spawn/await, reply không được xóa wait(user). Con thiếu thông tin kết thúc với câu hỏi dạng kết quả. Đợt D luôn trả chưa hỗ trợ.
+- ask_user(question,timeout_seconds?): chỉ root deliver=email. Chỉ cập nhật outcome.reply_text và wait={mode:user,run_id,until}; gọi lại ghi đè, bỏ timeout ở lần sau thì bỏ hẹn cũ. Sau đó spawn/await/reply đều bị từ chối bằng guard SQL, notify vẫn chịu quota và giữ chỗ câu hỏi. Timeout nguyên 60..86400, không vượt expires_at. Tool kiểm question_count<5 và còn chỗ câu hỏi + thư kết quả cuối. Hết ngân sách trả lỗi để agent tự kết thúc. Chỉ finish thành công giữ outbound question:run:ID, trigger tăng mail_count/question_count nguyên tử; retry không tăng lại. Hủy/lost/timeout/lỗi finalize không tạo thư câu hỏi. Thư câu hỏi chỉ text, có finalize_note, không đính kèm outbox; con thiếu thông tin kết thúc bằng câu hỏi trong kết quả cho cha.
 
 Con không gửi email. Prompt yêu cầu kết quả văn bản, không hứa gửi outbox. Nếu vẫn tạo tệp, executor validate rồi run/child_result chỉ lưu tên/kích thước; kết quả ghi chú metadata-only. Bytes không chuyển cha, không vào D1. Chia sẻ binary giữa task cần kho artifact riêng ở đợt sau; không mở quyền đọc fs cho MCP.
 
@@ -98,7 +101,7 @@ Mọi terminal đi qua completeTask hoặc completionBatch cùng lớp, kể c�
 4. INSERT OR IGNORE child_result cho từng con, dedupe child:<task_id>; status/agent/text/outbox metadata. Text tối đa 4000 ký tự để JSON <=32768 ngay cả ký tự điều khiển escape 6 lần. Full output giữ trong runs.output.
 5. Root failed/cancelled giữ terminal outbound trước send. Sau commit schedule cha, kể cả con lỗi qua cron/hủy riêng; cancel cây không tạo run cho cha đã cancelled.
 
-finishRun pha 1: chỉ run running + chưa cancel + task sống nhận kết quả. Batch lưu run terminal/token NULL/output/result_hash/outbox metadata/session khi ok; tính wait bằng outcome SQL hoặc auto-await; cập nhật task/session; terminal builder nếu cần; tạo outbound reply duy nhất reply:run:<id> khi root done. Không cửa sổ schedule giữa run và task/session. Nếu cancel/lost thắng, nộp muộn trả ignored, không session/tệp.
+finishRun pha 1: chỉ run running + chưa cancel + task sống còn TTL nhận kết quả. Batch lưu run terminal/token NULL/output/result_hash/outbox metadata/session khi ok; tính wait bằng outcome SQL hoặc auto-await, đặt wait_until từ wait.until; cập nhật task/session; giữ outbound question duy nhất khi waiting user; terminal builder nếu cần; tạo outbound reply duy nhất reply:run:<id> khi root done. Không cửa sổ schedule giữa run và task/session. Nếu cancel/lost/TTL thắng, nộp muộn trả ignored, không session/tệp.
 
 Pha 2: luôn schedule task/cha, độc lập gửi thư. Retry phải khớp hash kết quả và metadata outbox; bỏ pha 1, không tăng quota lần nữa. Message-ID ổn định <mailbot-run-ID@domain>. UPDATE pending/error → sending với send_key giành quyền gửi; sent không gửi lại. Send lỗi ghi error; executor retry mang lại bytes attachment, cron chỉ retry text không attachment.
 
@@ -120,11 +123,11 @@ D1 và EMAIL.send không có giao dịch chung hay idempotency key phía nhà cu
 
 ## Cron và retention
 
-`wrangler.toml` khai báo `* * * * *`; index export scheduled. Mỗi tick tối đa 1 lost, 1 TTL, 2 task queue, 1 outbound text và 1 cây retention. Chọn thấp hơn ví dụ 5 của review để chừa D1 subrequests/CPU cho cascade/schedule cha; chưa đo Cloudflare Free.
+`wrangler.toml` khai báo `* * * * *`; index export scheduled. Mỗi tick tối đa 1 lost, 1 TTL, 2 timer, 2 task queue, 1 outbound text và 1 cây retention. Chọn thấp hơn ví dụ 5 của review để chừa D1 subrequests/CPU cho cascade/schedule cha; chưa đo Cloudflare Free.
 
 Lost: không reclaim ID. Batch đánh run quá 30 phút failed, xóa token/cancel_requested=1, thêm run_lost dedupe lost:run_id chứa outcome đã ghi (spawn/notify/reply/wait), tăng lost_count. Lần đầu schedule run ID mới, tính budget; lần 2 liên tiếp hoặc hết run budget → completeTask(failed). Run được nộp bình thường reset chuỗi lost. Recovery phải xem outcome để tránh lặp tool; không replay event start/mail cũ. Session bị xóa khi lost vì chưa chắc trạng thái CLI; operator có thể xem timeline đầy đủ nếu cần khôi phục prompt. Executor cũ nộp muộn ignored.
 
-TTL dùng completeTask(failed), revoke cây, ghi child_result/outbound TRƯỚC send. Queue sweep cứu continuation bị rate-limit; pending run không reclaim. Cron wake executor sau cập nhật. Timer/wait_until có schema/index nhưng chưa bật trước giai đoạn 4.
+TTL dùng completeTask(failed), revoke cây, ghi child_result/outbound TRƯỚC send. Queue sweep cứu continuation bị rate-limit; pending run không reclaim. Cron wake executor sau cập nhật. Timer dùng chỉ mục tasks(status,wait_until), event dedupe timer:<task>:<wait_until>; INSERT kiểm lại status/mode/wait_until/TTL để snapshot cron cũ không đánh thức điều kiện chờ mới. Scheduler kiểm lại điều kiện timer trước gán event. Timer cũ chưa giao được bỏ; timer đã giao giữ trong timeline. Không lặp admission khi timer đã có event mà đang kẹt quota. Ask timeout có text chính xác "người dùng chưa trả lời"; timer thường "đã đến giờ hẹn"; source=system. TTL thắng nếu thời điểm hết chờ trùng expires_at.
 
 D1 giữ 1000 root mới nhất; mỗi tick xóa <=1 cây terminal cũ hơn 7 ngày, không con sống/outbound chưa sent, theo batch outbound/events/runs/tasks. Giữ sending/error để điều tra. Dọn command_receipts quá một giờ.
 
@@ -132,7 +135,11 @@ Executor ghi task-state ngoài cwd. Mỗi giờ khi agent rảnh, xét <=1 ứng
 
 ## Giai đoạn 4
 
-ask_user chỉ root, outcome và thư sau finalize. send_event orchestrator luôn gắn owner cấu hình, Worker kiểm owner khớp + parent_id NULL + giữ quota 30/giờ; không backchannel cha/con. Timer có giới hạn seconds/TTL, cron tạo event dedupe và schedule sau cập nhật. Không endpoint/tool giả thành công.
+MCP điều phối có answer_task {id,text}, thay tên dự kiến send_event để chỉ cho phép trả lời câu hỏi. Owner lấy cố định từ config, không từ caller; không thêm đọc inbox. Worker kiểm owner/root/deliver=email/waiting user/TTL trong INSERT event mail, dedupe answer:<task>:<question run>. Cùng transaction giữ một command_receipt cho answer mới, rồi xóa wait/wait_until và schedule. Answer tính một receipt; run tiếp tục vẫn tính một run trong quota chung 30/giờ. Hết quota trả 429, giữ nguyên trạng thái chờ và timer. Gọi khi sai trạng thái/owner trả 409; retry đồng thời trong cùng wait không tạo hai event/receipt, gọi lại sau khi đã thức trả 409. /status và get_task trả wait_json (user/timer/all/any và IDs), wait_until khi có thời hạn. Câu trả lời mail và answer_task được bọc trong boundary ngẫu nhiên của prompt như mọi event; chỉ dẫn ngoài block ghi rõ timer do hệ thống tạo.
+
+Kiểm thử giai đoạn 4 dùng SQLite transaction, MCP transport in-memory và fetch/process giả: root/child ask, ghi đè, hủy/lost/TTL/lỗi, retry/concurrent finish, năm câu hỏi, quota thư/owner, owner/RFC, chặn auto-mail, giới hạn seconds/TTL, timer đến hạn/cũ/race/thư sớm, cron bounded/index, admin answer và hỏi → trả lời → tổng hợp. Chưa xác minh email/D1/cron/model trên dịch vụ thật.
+
+Chốt triển khai bổ sung: ask_user từ chối ở run_count=max_runs để còn lượt xử lý câu trả lời, và ở mail_count>=14 để giữ thư kết quả cuối theo ngân sách hiện có. Mail owner vẫn nối cùng root chờ user/timer ở mail_count=14. Timeout tính từ lúc gọi tool; nếu lượt kết thúc sau hạn hẹn, cron kế tiếp xử lý timer sau khi finish đặt waiting. Câu hỏi chỉ text để không gửi outbox trung gian trước lượt tổng hợp. Các lựa chọn này không đổi phạm vi API của brief giai đoạn 4.
 
 ## Đối chiếu review
 

@@ -5,14 +5,14 @@
 - Mailbot trung tính, nhiều coding agent bảo trì. Giữ địa chỉ thư và CLI claude/codex/agy.
 - Hộp thư công khai claude@ đọc qua MCP; thư whitelist tạo Task → Event → Run.
 - Đọc [README](README.md), [đặc tả](docs/ARCHITECTURE.md); giữ công việc hiện có, không deploy/đổi credential nếu chưa được giao.
-- worker/src/index.js: SMTP/API/auth; mailbot.js: senderAuth/whitelist/wake (có hàm legacy không được router gọi); tasks.js: scheduler/run/tool/terminal/cron. worker/schema-v5.sql chạy một lần sau v4.
+- worker/src/index.js: SMTP/API/auth; mailbot.js: senderAuth/whitelist/wake (có hàm legacy không được router gọi); tasks.js: scheduler/run/tool/terminal/cron. worker/schema-v6.sql chạy một lần sau v5, trước Worker giai đoạn 4.
 - agent/mailbot-agent.mjs: executor; job-handler.mjs: khóa cwd/nộp kết quả; run-pool.mjs: điều phối theo run, cli-runner.mjs: child/timer từng run; run-mcp.mjs: MCP scoped; worktrees.mjs/outbox.mjs/inbox.mjs/task-files.mjs: filesystem. mcp/server.mjs: reader, mcp/orchestrator.mjs: admin riêng, mcp/run-tools.mjs: tool run không filesystem.
 
 ## Kiểm tra
 
 - node --check mọi JS/MJS trong agent/, mcp/, worker/src/ và test (bỏ node_modules/cache).
 - npm test trong worker/agent/mcp, Node 26, offline. Nếu spawn EPERM dùng npm test -- --test-isolation=none, ghi cả lỗi gốc và kết quả thay thế. Symlink không quyền thì skip rõ.
-- Test D1 dùng node:sqlite và worker/test-support/d1.mjs, batch phải BEGIN/COMMIT/ROLLBACK thật; cập nhật v5 ở fixture. Legacy tests chỉ bảo vệ hành vi cũ, không chứng minh API cũ còn hoạt động.
+- Test D1 dùng node:sqlite và worker/test-support/d1.mjs, batch phải BEGIN/COMMIT/ROLLBACK thật; fixture chạy đến v6. Legacy tests chỉ bảo vệ hành vi cũ, không chứng minh API cũ còn hoạt động.
 - TEMP/TMP đặt trong mailbot/<package>/.test-tmp; không đọc cấu hình/credential thật hay chạy CLI model. Chỉ dùng dependency sẵn có.
 - Wrangler dry-run phải offline/local binary, tắt telemetry và chỉ output trong mailbot; không cài package. Dry-run không chứng minh email/CLI/D1/cron thật.
 - Báo file sửa, lệnh/kết quả thật, giả định, việc chưa kiểm chứng.
@@ -24,7 +24,7 @@
 - +tag và codex/agy cần senderAuth + whitelist đúng agent; chỉ claude không tag là công khai. Catch-all từ chối ngoài agent/domain.
 - Reader API_TOKEN chỉ thấy envelope exact claude@MAIL_DOMAIN, không +tag/agent khác; tasks/runs/allowlist chỉ ADMIN_TOKEN. Không cấp admin/orchestrator cho CLI email.
 - session_id chỉ /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/ trước lưu/resume. Không dùng threads/jobs cũ cho task mới.
-- Orchestrator tách reader; submit/list/get/cancel luôn gắn owner cấu hình, caller không chọn owner. Không ghép admin tools vào phiên đọc thư lạ khi không cần. send_event giai đoạn 4 cũng cố định owner, root-only, tính quota.
+- Orchestrator tách reader; submit/list/get/cancel/answer luôn gắn owner cấu hình, caller không chọn owner. Không ghép admin tools vào phiên đọc thư lạ khi không cần. answer_task chỉ root deliver=email đang waiting user, event mail dedupe theo question run + receipt quota nguyên tử; không đọc inbox hay backchannel con.
 
 ## Bất biến CLI và filesystem
 
@@ -55,9 +55,11 @@
 - spawn không project, khác agent cha, whitelist đích, kế thừa owner/project qua SQL. Batch kiểm token/live/depth<2/direct<3/tree<8/rate rồi tạo con+first run; trigger tăng bộ đếm khi INSERT thành công. Không bỏ guard khi retry.
 - await chỉ con trực tiếp chưa giao kết quả; chặn con đã có child_result.run_id kể cả prompt hiện tại. Auto-await chỉ con spawn trong run hiện tại. Cha done/failed hủy con cũ còn sống.
 - Con chỉ trả văn bản cho cha, không email. Con cần làm rõ phải kết thúc nêu câu hỏi. Outbox con chỉ metadata và ghi chú rõ; không hứa chuyển bytes.
-- reply ghi đè outcome, không mail giữa lượt; finalize xong và root done mới gửi một thư tổng hợp. notify root-only/text-only, 3/run; 15 thư/root. ask_user root-only dành giai đoạn 4, hiện lỗi chưa hỗ trợ.
+- reply ghi đè outcome, không mail giữa lượt; finalize xong và root done mới gửi một thư tổng hợp. notify root-only/text-only, 3/run; 15 thư/root. ask_user chỉ root deliver=email, chỉ ghi outcome; sau đó cấm spawn/await/reply bằng guard SQL. Gọi lại ghi đè. Finish thành công giữ thư question:run:ID và trigger tăng question_count/mail_count cùng transaction; tối đa 5 câu hỏi/root, giữ một chỗ thư cuối. Cancel/lost/timeout/lỗi không gửi câu hỏi; retry không giữ chỗ/gửi trùng. Câu hỏi text-only, kèm finalize_note.
+- await({seconds}) riêng với await({ids,mode}); seconds/ask timeout nguyên 60..86400 và không vượt expires_at. Finish đặt waiting và wait_until; cron tối đa 2 timer/tick qua idx_tasks_timer, dedupe theo task+wait_until, INSERT/scheduler kiểm mode và thời điểm hiện tại. Timer cũ chưa giao bị bỏ; mail owner/answer hợp lệ xóa wait user/timer và hủy timer. Event timer source=system, prompt ghi rõ nguồn; câu trả lời vẫn trong boundary không tin cậy.
+- ask_user cần run_count<max_runs để còn lượt xử lý câu trả lời; mail owner vẫn nối root chờ user/timer ở mail_count=14 để dùng thư kết quả cuối. Không nới quota khi hỏi hoặc trả lời.
 - Ngân sách 30 runs + command_receipts/owner/giờ, 8 runs/task, 24h TTL. Gốc/spawn reserve first run cùng transaction; tiếp tục bị rate limit giữ event để cron vét. Không treo cha vì con kết thúc lỗi/hủy/quá hạn.
-- Map thư bắt buộc owner/agent/root, In-Reply-To rồi References mới→cũ. /new/đổi tag/failed/cancelled/task sống quá hạn tạo mới; done mở lại thêm 8 runs/24h. Chặn auto-reply ở mọi thư; status/cancel/help reserve receipt trước send.
+- Map thư bắt buộc owner/agent/root, In-Reply-To rồi References mới→cũ. /new/đổi tag/failed/cancelled/task sống quá hạn tạo mới; done mở lại thêm 8 runs/24h. Chặn Auto-Submitted khác no, mọi X-Auto-Response-Suppress và Precedence bulk/auto_reply/list ở mọi thư, không event/task mới; status/cancel/help reserve receipt trước send. Câu trả lời user ở mail_count=14 vẫn nối root chờ hỏi để dùng chỗ thư cuối.
 - child_result JSON <=32768 ký tự, tổng event text/run <=150000 và 128 event; email text <=64000. Cắt trong SQL trước đọc để giữ CPU; full output tối đa 200000 trong runs.
 - outbound_mails và quota ghi trước send; stable Message-ID, sending reservation chống gửi đồng thời. Retry finish hash/metadata khớp, không đổi trạng thái/count lần 2. sending không rõ kết quả không tự gửi lại; D1+email không bảo đảm exactly-once bên ngoài.
 - Cron * * * * * ngay đợt D, bounded lost/TTL/queue/send/retention. Bảo vệ messages/attachments có event chưa xử lý hoặc run pending/running. Không xóa tree còn sống hoặc outbound chưa sent.

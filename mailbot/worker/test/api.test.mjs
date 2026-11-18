@@ -68,6 +68,27 @@ test('admin/run APIs separate auth; old job APIs removed; owner fixed; finish re
   const results=await (await api('/tasks?owner=a%40example.com')).json();assert.equal(results.tasks.length,1);
 });
 
+test('P4 admin answer endpoint enforces auth/owner/state and delivers answer as mail event',async t=>{
+  const {api,sqlite}=setup(t);
+  const {task}=await (await api('/tasks','admin',{agent:'claude',prompt:'work',owner:'a@example.com'})).json();
+  const path=`/tasks/${task.id}/answer?owner=a%40example.com`;
+  assert.equal((await api(path,'reader',{text:'answer'})).status,403);
+  assert.equal((await api(path,'admin',{text:'answer'})).status,409);
+  const {run}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  const headers={'X-Run-Token':run.run_token};
+  assert.equal((await api('/run-api/ask_user','',{question:'choose?',timeout_seconds:60},headers)).status,200);
+  await api(`/runs/${run.id}/result`,'admin',{ok:true,output:'waiting'});
+  const list=await (await api('/tasks?owner=a%40example.com')).json();
+  assert.equal(JSON.parse(list.tasks[0].wait_json).mode,'user');assert.ok(list.tasks[0].wait_until);
+  assert.equal((await api(`/tasks/${task.id}/answer`,'admin',{text:'answer'})).status,400);
+  assert.equal((await api(`/tasks/${task.id}/answer?owner=b%40example.com`,'admin',{text:'answer'})).status,409);
+  assert.equal((await api(path,'admin',{text:'blue'})).status,200);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) n FROM events WHERE kind='mail'").get().n,1);
+  const {run:next}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  assert.equal(next.task_id,task.id);assert.match(next.events[0].payload_json,/blue/);
+  assert.equal((await api(path,'admin',{text:'late'})).status,409);
+});
+
  test('mail events protect incoming attachments from deletion until their run finishes',async t=>{
   const {api,email,sqlite}=setup(t);
   await email('claude@example.com');
