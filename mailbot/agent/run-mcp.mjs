@@ -29,6 +29,9 @@ export function codexMcpArgs(server, servers = []) {
       '-c', `mcp_servers.mailbot-run.command=${tomlString(server.command)}`,
       '-c', `mcp_servers.mailbot-run.args=[${server.args.map(tomlString).join(',')}]`,
       '-c', `mcp_servers.mailbot-run.env={${Object.entries(server.env).map(([k,v]) => `${k}=${tomlString(v)}`).join(',')}}`);
+    // Headless exec cannot prompt; approve only the explicitly granted run tools.
+    for (const tool of RUN_TOOLS)
+      args.push('-c', `mcp_servers.mailbot-run.tools.${tool.slice('mcp__mailbot-run__'.length)}.approval_mode="approve"`);
   }
   return args;
 }

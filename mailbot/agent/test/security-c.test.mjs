@@ -7,7 +7,7 @@ import { readLastOutput } from '../cli-output.mjs';
 import { finalizeFiles } from '../job-finalize.mjs';
 import { prepareOutbox } from '../outbox.mjs';
 import { saveInboxAttachment } from '../inbox.mjs';
-import { codexDisableArgs, codexMcpArgs } from '../run-mcp.mjs';
+import { RUN_TOOLS, codexDisableArgs, codexMcpArgs } from '../run-mcp.mjs';
 import { agyEnabledServers, verifyAgyMcp, codexInventoryCache } from '../mcp-isolation.mjs';
 import { claudeSettings, claudeIsolationArgs } from '../cli-options.mjs';
 
@@ -69,8 +69,27 @@ test('C5/A pure Codex args disable plugins and every inherited MCP, quote TOML k
   assert.ok(args.includes('mcp_servers.admin.enabled=false'));
   assert.ok(args.includes('mcp_servers."a.b \\"quoted\\"".enabled=false'));
   assert.ok(args.indexOf('mcp_servers.mailbot-run.enabled=false') < args.indexOf('mcp_servers.mailbot-run.enabled=true'));
+  const overrides = args.filter((_, i) => args[i - 1] === '-c');
+  assert.deepEqual(overrides.filter(value => /approval|sandbox/.test(value)), [
+    'mcp_servers.mailbot-run.tools.reply.approval_mode="approve"',
+    'mcp_servers.mailbot-run.tools.spawn.approval_mode="approve"',
+    'mcp_servers.mailbot-run.tools.await.approval_mode="approve"',
+    'mcp_servers.mailbot-run.tools.notify.approval_mode="approve"',
+    'mcp_servers.mailbot-run.tools.ask_user.approval_mode="approve"',
+  ]);
+  assert.equal(overrides.filter(value => value.endsWith('.approval_mode="approve"')).length, RUN_TOOLS.length);
+  assert.deepEqual(overrides.filter(value => value.endsWith('.enabled=true')), ['mcp_servers.mailbot-run.enabled=true']);
+  assert.ok(!args.some(value => /bypass|approve-for-me|ask-for-approval/.test(value)));
   assert.ok(!args.includes('mcp_servers={}'));
   assert.throws(() => codexDisableArgs([{ name: 'x' }]));
+});
+
+test('Codex without run MCP only disables inherited servers and grants no tool approvals', () => {
+  const servers = [{ name: 'admin', enabled: true }, { name: 'mailbot-run', enabled: true }];
+  assert.deepEqual(codexMcpArgs(null, servers), [
+    '--disable', 'plugins', '-c', 'mcp_servers.admin.enabled=false',
+    '-c', 'mcp_servers.mailbot-run.enabled=false',
+  ]);
 });
 
 test('C5/A Codex inventory verifies each run, verifies disabled inventory, fails closed on bad results', async () => {
