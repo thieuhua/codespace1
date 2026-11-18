@@ -10,7 +10,7 @@ Giai đoạn 1 + 2 triển khai schema v5, email/task, scheduler, executor run, 
 
 ## Schema và chỉ mục
 
-`worker/schema-v6.sql` chạy MỘT LẦN sau v5; thêm tasks.question_count và trigger tăng khi INSERT outbound kind=question. Chạy lại lỗi duplicate column. Không chạy lại v3/v5. Database mới: schema.sql → v2 → v3 → v4 → v5 → v6.
+`worker/schema-v6.sql` chạy MỘT LẦN sau v5; thêm tasks.question_count và trigger tăng khi INSERT outbound kind=question. Chạy lại lỗi duplicate column. `worker/schema-v7.sql` chạy sau v6, trước Worker có QA sink; thêm qa_outbox/qa_outbox_parts. Không chạy lại migration đã áp dụng. Database mới: schema.sql → v2 → v3 → v4 → v5 → v6 → v7.
 
 | Bảng | Trường chính |
 | --- | --- |
@@ -18,6 +18,7 @@ Giai đoạn 1 + 2 triển khai schema v5, email/task, scheduler, executor run, 
 | runs | id/task_id; schedule_key UNIQUE; status pending/running/done/failed/cancelled; created/claimed/finished_at; token_hash/cancel_requested; output/session_id; outcome_json/outbox_json; result_hash/finish_key; notify_count; boundary |
 | events | id/task_id; kind start/mail/child_result/run_lost/timer; message_id (messages.id); rfc_message_id; payload_json; dedupe_key UNIQUE; run_id NULL khi chưa tiêu thụ; created_at |
 | outbound_mails | task_id/run_id; dedupe_key/message_id UNIQUE; kind reply/question/notify/terminal; status pending/sending/sent/error; text/subject/in_reply_to/references_hdr; outbox_json metadata; send_key/error; created/sent_at |
+| qa_outbox / qa_outbox_parts | QA sink: id tăng dần; capture_key/message_id UNIQUE; recipient/subject/created_at; MIME nguyên vẹn chia phần theo (mail_id,part) để mỗi hàng dưới giới hạn D1 |
 
 Chỉ mục: unique một phần runs(task_id) WHERE pending/running; queue(status,id), stale(status,claimed_at), budget(created_at,task_id), token_hash unique khi khác NULL. Events: (task_id,run_id,id), (message_id,run_id), (rfc_message_id,task_id). Tasks: owner/id, root, parent/spawn_run, RFC, status/expires_at, status/wait_until. Outbound: task/id, status/id.
 
@@ -73,6 +74,7 @@ Event tới lúc run running giữ NULL. finish cập nhật run + session + wai
 | POST /runs/claim | ADMIN_TOKEN; {agents:[...]}; UPDATE pending→running RETURNING nguyên tử, không reclaim |
 | GET /runs/:id/state | ADMIN_TOKEN; status/cancel_requested |
 | POST /runs/:id/result | ADMIN_TOKEN; {ok,output,session_id,cancelled,attachments,finalize_note}; 2 pha idempotent |
+| GET /api/qa/outbox?after_id=0&limit=20 | ADMIN_TOKEN; `{mails:[{id,to,subject,message_id,raw,created_at}]}` tăng dần theo id; after_id nguyên không âm, limit nguyên dương tối đa 100; reader/run token không được đọc |
 | POST /run-api/{reply,spawn,await,notify,ask_user} | X-Run-Token; running + task sống + không cancel |
 
 Token ngẫu nhiên 32 byte; D1 chỉ SHA-256. Chỉ nằm trong MCP config env, không CLI env. Token run không thay thế reader/admin. API_TOKEN vẫn chỉ đọc envelope exact claude@domain, không +tag và không tasks/runs/allowlist.
@@ -111,6 +113,14 @@ Pha 2: luôn schedule task/cha, độc lập gửi thư. Retry phải khớp has
 
 D1 và EMAIL.send không có giao dịch chung hay idempotency key phía nhà cung cấp. Chết sau gửi trước ghi sent, hoặc sau giữ sending trước gửi, để lại sending: không tự gửi lại; chủ máy đối chiếu email/log rồi xử lý. Không thể cam kết exactly-once delivery trong cửa sổ này. Send ném lỗi cũng có thể không rõ thư đã phát; retry error ưu tiên khả năng gửi lại với cùng Message-ID, không bảo đảm provider dedupe. Test chứng minh idempotency D1, retry đồng thời/tuần tự và lỗi giả trước gửi; không chứng minh exactly-once của email thật.
 
+## QA sink
+
+`send.js` dựng MIME bằng `buildMail` đúng một lần rồi kiểm `QA_SINK_DOMAINS` (mặc định chuỗi rỗng; wrangler đặt `qa.xuanthieu.site`). Domain phân tách bằng phẩy/chấm phẩy/khoảng trắng, so khớp chính xác không phân biệt hoa/thường; không khớp subdomain. Chỉ domain trong danh sách bỏ qua `EMAIL.send`; domain khác giữ luồng gửi cũ. Sink bao phủ mọi caller của send.js, kể cả thư lệnh chỉ có command_receipt.
+
+`deliverOutbound` vẫn giữ chỗ pending/error → sending với send_key trước gửi và truyền reservation cho send.js. Với sink, batch D1 ghi qa_outbox + các phần MIME + sent_at/status=sent, guard đúng id/send_key; lỗi batch rollback cả MIME lẫn sent rồi ghi error theo luồng cũ. Message-ID UNIQUE giữ bản MIME đầu tiên khi retry; phần MIME chỉ được thêm cho capture_key vừa INSERT, không nhân đôi khi concurrent retry. Các phần tối đa 256 Ki ký tự UTF-16, không tách surrogate pair; endpoint ghép nguyên thứ tự thành raw. Thư không có Message-ID dùng ID thực do buildMail sinh, không tạo ID thứ hai khi lưu.
+
+outbound_mails/outbox_json vẫn chỉ chứa metadata; riêng QA sink lưu đầy đủ MIME, bao gồm bytes đính kèm dạng base64 để phục vụ kiểm thử. Dữ liệu QA độc lập với retention cây task và hiện chưa tự dọn. Migrate v7 trước khi bật Worker; kiểm thử SQLite/mock EMAIL không chứng minh email/D1 triển khai thật.
+
 ## Executor và giới hạn dữ liệu
 
 - `agent/run-pool.mjs` điều phối run độc lập, nhận claim/execute qua injection. `agent.json`: `max_parallel` mặc định 3, `max_per_agent` mặc định 2; thiếu dùng mặc định, giá trị không phải số nguyên dương an toàn dùng mặc định và ghi log tên trường. Một vòng lấp chỗ single-flight, round-robin từng agent còn chỗ; giữ chỗ đồng bộ tổng/per-agent TRƯỚC await claim. Claim nguyên tử hiện có nhận `[agent]`; không đổi Worker/schema và không claim cho agent đầy.
@@ -119,7 +129,7 @@ D1 và EMAIL.send không có giao dịch chung hay idempotency key phía nhà cu
 - Cwd `<workdir>/<agent>/task-<task_id>` kiểm directory thực, không junction/symlink. Worktree theo `(tag,agent,task_id)`, path worktrees/<tag>/<agent>-task-ID, branch mailbot/<tag>/<agent>-task-ID; không dùng root/session. Prune đọc được state hash thread lịch sử nhưng executor mới không dùng lại.
 - Task thường dùng khóa mkdir nguyên tử `task-state/locks/<agent>-task-ID.lock`, worktree giữ khóa hiện có trong worktree-state. Lấy khóa trước khi chuẩn bị/đọc/dọn exchange; task thường chờ khóa tối đa khoảng 2s bằng timer (80 lần thử cách 25ms), worktree trùng khóa fail ngay. Không dọn dữ liệu của run giữ khóa hoặc khi chưa xác định cwd. `job-handler.mjs` giữ khóa xuyên CLI + finalize, nhả trong finally trước POST result (Worker có thể schedule lượt sau trước response); lỗi unlock chỉ log, vẫn nộp kết quả; semaphore vẫn giữ tới hết POST/retry. Retention dùng cùng khóa task, không xóa cwd đang dùng. Prepare/prune xếp hàng Promise trong tiến trình theo repo canonical (không phân biệt hoa/thường trên Windows) trước lấy khóa file dùng chung với admin. Chờ khóa file retry khoảng 2s bằng timer; Git prepare/prune chạy bất đồng bộ để không chặn wake/cancel; các API này phải await. Không giữ khóa repo qua CLI. Không tự phá khóa cũ sau crash; chủ máy đối chiếu trước xử lý.
 - Inbox `inbox/run-ID/message_id-attachment_id-name`, outbox `outbox/run-ID`; dọn mọi run. Giữ lstat/fstat/realpath/nlink=1, 10 tệp/2 MiB, b64_lines CRLF/76; Worker validate tuyến tính một lần, WeakSet không nhận cờ JSON để bỏ validate.
-- Claude restricted/permission-prompts none, deny SECRET_DIRS/Git metadata, shell allowlist, mặc định model opus. Codex disable plugins và từng MCP kế thừa + xác minh disabled trước bật mailbot-run. Agy fail-closed inventory, không MCP run, stdout làm reply; vẫn spawn làm con. Không sửa global config.
+- Claude restricted/permission-prompts none, deny SECRET_DIRS/Git metadata, shell allowlist, mặc định model opus. Codex disable plugins và từng MCP kế thừa + xác minh disabled trước bật mailbot-run. Chỉ reply/spawn/await/notify/ask_user được tự chấp thuận bằng override từng lượt `mcp_servers.mailbot-run.tools.<tên>.approval_mode="approve"`, để exec không cần hỏi duyệt MCP; giữ sandbox workspace-write và approval policy hiện có. Khóa đã được CLI 0.166.0 chấp nhận qua `mcp list --json`, giá trị sai bị từ chối theo enum; chưa kiểm model/email thật. Agy fail-closed inventory, không MCP run, stdout làm reply; vẫn spawn làm con. Không sửa global config.
 - Codex kiểm kê + xác minh isolation single-flight theo `(entry,cwd)`, chỉ chia sẻ kiểm tra đang chạy; không cache kết quả/lỗi qua lượt sau vì CLI có thể thêm MCP project-local vào cwd ghi được. Mỗi lượt kiểm trạng thái cwd mới rồi disable toàn bộ server kế thừa trước cấp mailbot-run. Agy chỉ chia sẻ inventory đang chạy theo `(entry,cwd)`, mỗi caller kiểm allowlist riêng; không cache kết quả/lỗi qua lượt sau. Log chung append đồng bộ mỗi dòng; `runs/` mkdir recursive, output riêng `run-ID.out` tạo độc quyền `wx`, trùng ID không ghi đè và ghi log lỗi.
 - Kiểm state sau CLI trước finalize. Hủy/timeout/lỗi/không xác minh state: không commit/session/attachments. Verify worktree trước đọc outbox; commit không hook/filter/gitattributes lạ, giữ khóa xuyên CLI+commit. Kiểm hậu kỳ thất bại xóa attachments đã đọc.
 - Boundary ngẫu nhiên mỗi run; loại boundary trùng trong dữ liệu. Subject, filename, mail/child_result đều trong block không tin cậy; system/tool/cwd ở ngoài. Đây là giảm injection, không bảo đảm model miễn nhiễm.

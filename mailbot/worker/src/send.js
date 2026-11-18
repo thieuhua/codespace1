@@ -1,9 +1,15 @@
 // Workers Free: người nhận phải là địa chỉ đã xác minh trong Email Routing.
 import { EmailMessage } from "cloudflare:email";
 import { buildMail } from "./mime.js";
+import { captureQaMail, isQaRecipient } from "./qa-outbox.js";
 
-export async function sendMail(env, mail) {
-  await env.EMAIL.send(new EmailMessage(mail.from, mail.to, buildMail(mail)));
+export async function sendMail(env, mail, reservation) {
+  const raw = buildMail(mail);
+  if (isQaRecipient(env, mail.to)) {
+    await captureQaMail(env, mail, raw, reservation);
+    return;
+  }
+  await env.EMAIL.send(new EmailMessage(mail.from, mail.to, raw));
 }
 
 export async function sendReply(env, job, text, messageId, attachments = []) {

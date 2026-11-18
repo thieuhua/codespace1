@@ -18,6 +18,7 @@ name = "EMAIL"
 
 [vars]
 MAIL_DOMAIN = "xuanthieu.site"
+QA_SINK_DOMAINS = "qa.xuanthieu.site"
 # Agent trên laptop, qua nginx VPS + hầm wg-lap (lap-web add mailbot 20025)
 WAKE_URL = "https://mailbot.xuanthieu.site/wake"
 
