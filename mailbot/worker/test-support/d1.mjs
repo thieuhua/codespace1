@@ -5,7 +5,7 @@ export function database(t) {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec('PRAGMA foreign_keys=ON');
   t.after(() => sqlite.close());
-  for (const f of ['schema.sql', 'schema-v2.sql', 'schema-v3.sql', 'schema-v4.sql', 'schema-v5.sql', 'schema-v6.sql']) sqlite.exec(readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
+  for (const f of ['schema.sql', 'schema-v2.sql', 'schema-v3.sql', 'schema-v4.sql', 'schema-v5.sql', 'schema-v6.sql', 'schema-v7.sql']) sqlite.exec(readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
   const DB = {
     prepare(sql) {
       const statement = sqlite.prepare(sql.replace(/\?(\d+)/g, '$p$1'));

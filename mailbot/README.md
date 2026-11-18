@@ -17,7 +17,7 @@ Cron mỗi phút: run_lost, TTL, timer, queue bị rate-limit, outbound text, re
 | --- | --- |
 | Thiết kế đầy đủ | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [bất biến AGENTS](AGENTS.md) |
 | Worker | [index.js](worker/src/index.js): SMTP/API; [tasks.js](worker/src/tasks.js): scheduler/tool/terminal/cron; [mailbot.js](worker/src/mailbot.js): senderAuth/whitelist/wake |
-| D1 | [schema-v6.sql](worker/schema-v6.sql), sau schema.sql/v2/v3/v4/v5; giữ jobs/threads cũ để tra cứu |
+| D1 | [schema-v7.sql](worker/schema-v7.sql), sau schema.sql/v2/v3/v4/v5/v6; giữ jobs/threads cũ để tra cứu |
 | Executor | [mailbot-agent.mjs](agent/mailbot-agent.mjs), pool [run-pool.mjs](agent/run-pool.mjs), CLI [cli-runner.mjs](agent/cli-runner.mjs), [mailbot-admin.mjs](agent/mailbot-admin.mjs); Scheduled Task mailbot-agent, cổng 20025 |
 | MCP reader | [server.mjs](mcp/server.mjs), token API_TOKEN, chỉ inbox claude không tag |
 | MCP điều phối | [orchestrator.mjs](mcp/orchestrator.mjs), ADMIN_TOKEN + owner cố định, không tool đọc inbox |
@@ -35,7 +35,7 @@ cd mailbot/worker
 npx wrangler d1 execute mailbot --remote --file=schema-v6.sql
 ```
 
-3. Deploy Worker mới cùng `wrangler.toml` có `[triggers] crons = ["* * * * *"]`; kiểm tra Cron Trigger đã đăng ký. Không chạy lại v3/v5/v6. Database mới hoàn toàn dùng `npm run schema` (schema.sql → v2 → v3 → v4 → v5 → v6).
+3. Trước Worker có QA sink, chạy thêm `schema-v7.sql` sau v6 (database đã v6 chỉ chạy v7). Deploy Worker mới cùng `wrangler.toml` có `[triggers] crons = ["* * * * *"]`; kiểm tra Cron Trigger đã đăng ký. Không chạy lại migration đã áp dụng. Database mới hoàn toàn dùng `npm run schema` (schema.sql → v2 → v3 → v4 → v5 → v6 → v7).
 4. Cập nhật executor và thư mục mcp cùng phiên bản, rồi khởi động lại Scheduled Task mailbot-agent. Giữ cấu hình hiện có; owner của orchestrator do chủ máy cấu hình. Mặc định Claude model opus vẫn giữ.
 5. Khởi động lại MCP client điều phối để refresh tool `answer_task`. Reader MCP `mailbot` không đổi tên/entry. MCP mailbot-run do executor cấp tự động cho Claude/Codex, không đăng ký global; không cấp orchestrator/admin hay MCP run cho agy.
 6. Chủ máy kiểm end-to-end hỏi → reply email/answer_task → tổng hợp; ask timeout, await timer, reply sớm hủy timer, /status, cancel, hai con + một thư tổng hợp. Kiểm log cron/D1 và thư câu hỏi không trùng. Offline tests không thay bước này.
@@ -43,6 +43,10 @@ npx wrangler d1 execute mailbot --remote --file=schema-v6.sql
 Không có migrate/deploy/đăng ký MCP hay thay cấu hình/credential thật nào được chạy trong đợt sửa mã này.
 
 ## Cấu hình và vận hành
+
+QA sink: `QA_SINK_DOMAINS` mặc định rỗng trong code; `worker/wrangler.toml` đặt `"qa.xuanthieu.site"`. Danh sách domain phân tách bằng dấu phẩy, chấm phẩy hoặc khoảng trắng, khớp chính xác không phân biệt hoa/thường, không bao gồm subdomain. Thư tới domain này được lưu nguyên MIME thay vì gọi `EMAIL.send`; các domain khác vẫn gửi như cũ. Sink áp dụng cả reply/question/notify/terminal và thư lệnh. Thư task vẫn giữ quota/reservation và chuyển `sending` → `sent`; sink không thay whitelist/xác thực thư vào.
+
+Đọc bằng `GET /api/qa/outbox?after_id=0&limit=20`, Bearer **ADMIN_TOKEN**; trả `{mails:[{id,to,subject,message_id,raw,created_at}]}` theo id tăng dần. `after_id` nguyên không âm, `limit` nguyên dương (tối đa 100). API_TOKEN/run token không được đọc. Cần áp dụng schema v7 trước khi dùng; dữ liệu QA giữ riêng trong D1, gồm cả nội dung đính kèm trong MIME, hiện chưa tự dọn. Chưa migrate/deploy hoặc thử thư thật trong thay đổi này.
 
 Cấu hình executor do chủ máy quản lý tại `~/.mailbot/agent.json`:
 

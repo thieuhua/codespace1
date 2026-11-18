@@ -288,10 +288,11 @@ export async function deliverOutbound(env, key, files, send) {
   const task=await stmt(env,'SELECT agent,owner,project FROM tasks WHERE id=?1',mail.task_id).first();
   try {
     await send(env,{from:`${task.agent}${task.project?'+'+task.project:''}@${domain(env)}`,to:task.owner,subject:mail.subject,
-      text:mail.text.slice(0,64000),messageId:mail.message_id,inReplyTo:mail.in_reply_to,references:mail.references_hdr,attachments:files});
-    await stmt(env,`UPDATE outbound_mails SET status='sent',sent_at=?3 WHERE id=?1 AND send_key=?2`,mail.id,sendKey,nowISO()).run();
+      text:mail.text.slice(0,64000),messageId:mail.message_id,inReplyTo:mail.in_reply_to,references:mail.references_hdr,attachments:files},
+      {outboundId:mail.id,sendKey});
+    await stmt(env,`UPDATE outbound_mails SET status='sent',sent_at=?3 WHERE id=?1 AND send_key=?2 AND status='sending'`,mail.id,sendKey,nowISO()).run();
   } catch (e) {
-    await stmt(env,`UPDATE outbound_mails SET status='error',error=?3 WHERE id=?1 AND send_key=?2`,mail.id,sendKey,String(e.message||e).slice(0,1000)).run();
+    await stmt(env,`UPDATE outbound_mails SET status='error',error=?3 WHERE id=?1 AND send_key=?2 AND status='sending'`,mail.id,sendKey,String(e.message||e).slice(0,1000)).run();
     throw e;
   }
 }

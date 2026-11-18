@@ -4,6 +4,7 @@ import PostalMime from "postal-mime";
 import { agentFor, rejectRecipient, readerScope, senderAuth, isAllowed, wakeAgent, AGENTS } from "./mailbot.js";
 import { receiveTaskMail, claimRun, finishRun, runForToken, runTool, submitTask, cancelTask, getTask, answerTask, cronTick, liveMessages } from './tasks.js';
 import { sendMail } from "./send.js";
+import { listQaOutbox } from "./qa-outbox.js";
 
 const MAX_RAW = 20 * 1024 * 1024; // từ chối thư lớn hơn 20 MB
 const MAX_BODY = 256 * 1024; // cắt text/html mỗi phần ở 256 K ký tự
@@ -61,6 +62,12 @@ export default {
       if (!role) return json({ error: "unauthorized" }, 401);
       if (parts[0] === "messages") return await messagesApi(request, env, url, parts, role);
       if (role !== "admin") return json({ error: "forbidden" }, 403);
+      if (url.pathname === '/api/qa/outbox' && request.method === 'GET') {
+        const after = url.searchParams.get('after_id') || '0', limit = url.searchParams.get('limit') || '20';
+        if (!/^\d+$/.test(after) || !Number.isSafeInteger(Number(after)) ||
+            !/^\d+$/.test(limit) || !Number.isSafeInteger(Number(limit)) || Number(limit) < 1) return json({ error: 'bad pagination' }, 400);
+        return json({ mails: await listQaOutbox(env, Number(after), Math.min(Number(limit), 100)) });
+      }
       if (parts[0] === 'runs') return await runsApi(request, env, parts);
       if (parts[0] === 'tasks') return await tasksApi(request, env, url, parts);
       if (parts[0] === "allowlist") return await allowlistApi(request, env, parts);
