@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { database } from '../test-support/d1.mjs';
+import { cronTick } from '../src/tasks.js';
 
 // Cloudflare-only constructor, without network or a Worker runtime.
 const hooks = registerHooks({ resolve(specifier, context, next) {
@@ -25,8 +26,33 @@ function setup(t) {
     await worker.email({ from: 'a@example.com', to, rawSize: raw.length, raw: new Blob([raw]).stream(), headers: new Headers(), setReject(s) { rejected = s; } }, env, { waitUntil() {} });
     return rejected;
   };
-  return { sqlite, sent, api, email };
+  return { sqlite, sent, api, email, env };
 }
+
+for(const kind of ['question','reply','failed','cancelled']) test(`review 4: ${kind} text send failure returns HTTP 200; cron retries same outbound`,async t=>{
+  const {api,sqlite,env,sent}=setup(t);
+  const {task}=await (await api('/tasks','admin',{agent:'claude',prompt:'work',owner:'a@example.com'})).json();
+  const {run}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  if(kind==='question') assert.equal((await api('/run-api/ask_user','',{question:'choose?'},{'X-Run-Token':run.run_token})).status,200);
+  let attempts=0;
+  env.EMAIL.send=async()=>{attempts++;throw new Error('temporary send failure');};
+  const body={ok:kind!=='failed',cancelled:kind==='cancelled',output:'finished'};
+  const response=await api(`/runs/${run.id}/result`,'admin',body);
+  assert.equal(response.status,200);assert.equal((await response.json()).ok,true);assert.equal(attempts,1);
+  const outbound=sqlite.prepare('SELECT * FROM outbound_mails WHERE task_id=?').get(task.id);
+  assert.equal(outbound.status,'error');assert.equal(outbound.outbox_json,'[]');assert.match(outbound.error,/temporary send failure/);
+  if(kind==='question') {
+    const waiting=sqlite.prepare('SELECT * FROM tasks WHERE id=?').get(task.id);
+    assert.equal(waiting.status,'waiting');assert.equal(waiting.wait_until,null);assert.equal(waiting.question_count,1);
+  }
+  assert.equal((await api(`/runs/${run.id}/result`,'admin',body)).status,200);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM outbound_mails').get().n,1);
+  const delivered=[];
+  await cronTick(env,async(_env,mail)=>delivered.push(mail));
+  assert.equal(delivered.length,1);assert.equal(delivered[0].messageId,outbound.message_id);
+  assert.equal(sqlite.prepare('SELECT status FROM outbound_mails WHERE id=?').get(outbound.id).status,'sent');
+  assert.equal((await api(`/runs/${run.id}/result`,'admin',body)).status,200);assert.equal(sent.length,0);
+});
 
 test('SMTP handler rejects unknown/unauthenticated tagged recipients; bare claude remains public', async (t) => {
   const { email, sqlite, api } = setup(t);
@@ -66,6 +92,27 @@ test('admin/run APIs separate auth; old job APIs removed; owner fixed; finish re
   assert.equal((await api('/run-api/notify','',{text:'late'},headers)).status,401);
   assert.equal((await api(`/tasks/${task.id}?owner=other%40example.com`)).status,404);
   const results=await (await api('/tasks?owner=a%40example.com')).json();assert.equal(results.tasks.length,1);
+});
+
+test('P4 admin answer endpoint enforces auth/owner/state and delivers answer as mail event',async t=>{
+  const {api,sqlite}=setup(t);
+  const {task}=await (await api('/tasks','admin',{agent:'claude',prompt:'work',owner:'a@example.com'})).json();
+  const path=`/tasks/${task.id}/answer?owner=a%40example.com`;
+  assert.equal((await api(path,'reader',{text:'answer'})).status,403);
+  assert.equal((await api(path,'admin',{text:'answer'})).status,409);
+  const {run}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  const headers={'X-Run-Token':run.run_token};
+  assert.equal((await api('/run-api/ask_user','',{question:'choose?',timeout_seconds:60},headers)).status,200);
+  await api(`/runs/${run.id}/result`,'admin',{ok:true,output:'waiting'});
+  const list=await (await api('/tasks?owner=a%40example.com')).json();
+  assert.equal(JSON.parse(list.tasks[0].wait_json).mode,'user');assert.ok(list.tasks[0].wait_until);
+  assert.equal((await api(`/tasks/${task.id}/answer`,'admin',{text:'answer'})).status,400);
+  assert.equal((await api(`/tasks/${task.id}/answer?owner=b%40example.com`,'admin',{text:'answer'})).status,409);
+  assert.equal((await api(path,'admin',{text:'blue'})).status,200);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) n FROM events WHERE kind='mail'").get().n,1);
+  const {run:next}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  assert.equal(next.task_id,task.id);assert.match(next.events[0].payload_json,/blue/);
+  assert.equal((await api(path,'admin',{text:'late'})).status,409);
 });
 
  test('mail events protect incoming attachments from deletion until their run finishes',async t=>{

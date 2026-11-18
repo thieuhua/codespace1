@@ -2,7 +2,7 @@
 // và biến thư từ người trong whitelist gửi tới claude@/codex@/agy@ thành job chạy CLI trên laptop.
 import PostalMime from "postal-mime";
 import { agentFor, rejectRecipient, readerScope, senderAuth, isAllowed, wakeAgent, AGENTS } from "./mailbot.js";
-import { receiveTaskMail, claimRun, finishRun, runForToken, runTool, submitTask, cancelTask, getTask, cronTick, liveMessages } from './tasks.js';
+import { receiveTaskMail, claimRun, finishRun, runForToken, runTool, submitTask, cancelTask, getTask, answerTask, cronTick, liveMessages } from './tasks.js';
 import { sendMail } from "./send.js";
 
 const MAX_RAW = 20 * 1024 * 1024; // từ chối thư lớn hơn 20 MB
@@ -222,12 +222,17 @@ async function tasksApi(request, env, url, parts) {
   const owner=url.searchParams.get('owner');
   if(!owner) return json({error:'owner required'},400);
   if(parts.length===1 && request.method==='GET') {
-    const {results}=await env.DB.prepare('SELECT id,root_id,parent_id,agent,owner,project,title,status,wait_json,run_count,created_at,updated_at FROM tasks WHERE owner=?1 ORDER BY id DESC LIMIT ?2')
+    const {results}=await env.DB.prepare('SELECT id,root_id,parent_id,agent,owner,project,title,status,wait_json,wait_until,run_count,created_at,updated_at FROM tasks WHERE owner=?1 ORDER BY id DESC LIMIT ?2')
       .bind(owner,Math.min(int(url.searchParams.get('limit'),20),100)).all();
     return json({tasks:results});
   }
   const id=Number(parts[1]);
   if(!Number.isSafeInteger(id)||id<1) return json({error:'bad id'},400);
+  if(parts.length===3&&parts[2]==='answer'&&request.method==='POST') {
+    const result=await answerTask(env,id,owner,await request.json(),sendMail);
+    if(result.ok) await wakeAgent(env);
+    return json(result,result.code||200);
+  }
   const result=parts.length===2&&request.method==='GET'?await getTask(env,id,owner):
     parts.length===3&&parts[2]==='cancel'&&request.method==='POST'?await cancelTask(env,id,owner,sendMail):{error:'not found',code:404};
   return json(result,result.code||200);

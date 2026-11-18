@@ -216,9 +216,9 @@ test('untrusted data caps, child outbox metadata and unsupported/root-only tools
   const f=setup(t),root=await f.create(),r=await f.claim();
   assert.equal((await f.tool(r,'reply',{text:'hello',files:['secret']})).code,400);
   assert.equal((await f.tool(r,'spawn',{agent:'codex',prompt:'x',project:'other'})).code,400);
-  assert.equal((await f.tool(r,'ask_user',{question:'q'})).code,501);
   await f.tool(r,'spawn',{agent:'codex',prompt:'x'});await f.finish(r);
   const child=await f.claim('codex');
+  assert.equal((await f.tool(child,'ask_user',{question:'q'})).code,409);
   await f.finish(child,{output:'\u0000'.repeat(200000),attachments:[{filename:'child.txt',mime_type:'text/plain',b64_lines:'YQ=='}]});
   const summary=await f.claim(),event=summary.events.find(e=>e.kind==='child_result');
   assert.ok(event.payload_json.length<=32768);assert.match(event.payload_json,/child.txt/);

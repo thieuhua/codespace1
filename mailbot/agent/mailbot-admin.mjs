@@ -32,7 +32,7 @@ switch (cmd) {
     console.log(JSON.stringify(listWorktrees(cfg.workdir || 'E:\\mailbot-work'), null, 2));
     break;
   case 'prune':
-    console.log(JSON.stringify(pruneWorktrees(cfg.workdir || 'E:\\mailbot-work', cfg.projects, a1), null, 2));
+    console.log(JSON.stringify(await pruneWorktrees(cfg.workdir || 'E:\\mailbot-work', cfg.projects, a1), null, 2));
     break;
   case "allow":
     await api("POST", "/allowlist", { address: a1, agent: a2 || "*" });

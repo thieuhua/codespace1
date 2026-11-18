@@ -23,7 +23,7 @@ test('C2 Claude denies git metadata and worktree-state Read/Edit', () => {
   assert.equal(args[args.indexOf('--permission-prompts') + 1], 'none');
   assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const deny = JSON.parse(claudeSettings('C:\\Users\\test', 'E:\\mailbot-work')).permissions.deny;
-  for (const path of ['**/.git', '**/.git/**', '**/worktree-state/**', '//e/mailbot-work/worktree-state/**'])
+  for (const path of ['**/.git', '**/.git/**', '**/worktree-state/**', '//e/mailbot-work/worktree-state/**', '**/task-state/**', '//e/mailbot-work/task-state/**'])
     for (const tool of ['Read', 'Edit']) assert.ok(deny.includes(`${tool}(${path})`));
 });
 
@@ -73,17 +73,16 @@ test('C5/A pure Codex args disable plugins and every inherited MCP, quote TOML k
   assert.throws(() => codexDisableArgs([{ name: 'x' }]));
 });
 
-test('C5/A Codex inventory cache lasts ten minutes, verifies disabled inventory, fails closed on bad results', async () => {
-  let now = 0, calls = 0;
+test('C5/A Codex inventory verifies each run, verifies disabled inventory, fails closed on bad results', async () => {
+  let calls = 0;
   const inspect = async (_cmd, args) => {
     calls++;
     assert.ok(args.includes('--disable')); assert.ok(args.includes('plugins'));
     return JSON.stringify([{ name: 'global', enabled: !args.includes('mcp_servers.global.enabled=false') }]);
   };
-  const inventory = codexInventoryCache(inspect, () => now);
+  const inventory = codexInventoryCache(inspect);
   assert.deepEqual(await inventory('codex.js', 'cwd'), [{ name: 'global', enabled: true }]);
-  await inventory('codex.js', 'cwd'); assert.equal(calls, 2);
-  now = 600000; await inventory('codex.js', 'cwd'); assert.equal(calls, 4);
+  await inventory('codex.js', 'cwd'); assert.equal(calls, 4);
   for (const bad of ['not json', '{}', '[{"name":"admin","enabled":true}]']) {
     const unsafe = codexInventoryCache(async () => bad);
     await assert.rejects(unsafe('entry', 'cwd'));

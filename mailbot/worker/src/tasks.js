@@ -13,6 +13,8 @@ const ids = (s) => String(s || '').match(/<[^<>\s]+>/g) || [];
 const domain = (env) => env.MAIL_DOMAIN || 'xuanthieu.site';
 const validText = (s) => typeof s === 'string' && !!s.trim() && s.length <= 200000;
 const stmt = (env, sql, ...args) => env.DB.prepare(sql).bind(...args);
+const timerMatches = (task, event) => `${event}.kind='timer' AND ${task}.wait_until IS NOT NULL AND json_extract(${event}.payload_json,'$.wait_until')=${task}.wait_until AND ${task}.wait_until<=strftime('%Y-%m-%dT%H:%M:%fZ','now') AND json_extract(${task}.wait_json,'$.mode') IN ('user','timer')`;
+const wakeEvent = (task, event) => `(${event}.kind IN ('mail','run_lost') OR (${timerMatches(task,event)}))`;
 // Used only inside SQL statements that serialize the reservation with its INSERT.
 const budget = (owner, hour) => `((SELECT COUNT(*) FROM runs br JOIN tasks bt ON bt.id=br.task_id WHERE bt.owner=${owner} AND br.created_at>${hour}) + (SELECT COUNT(*) FROM command_receipts WHERE sender=${owner} AND created_at>${hour}))`;
 export const publicRun = ({ token_hash, ...run }) => run;
@@ -25,12 +27,16 @@ export async function schedule(env, taskId, send) {
   const exhausted=completionBatch(env,{taskId,status:'failed',result:'Run budget exhausted',key:`budget-${key}`,
     guard:`run_count>=max_runs AND NOT EXISTS(SELECT 1 FROM runs WHERE task_id=tasks.id AND status IN ('pending','running'))`});
   const result = await env.DB.batch([
+    // A timer belongs to one wait condition. Drop undelivered obsolete timers
+    // before testing the queue, so they cannot wake or keep a task alive.
+    stmt(env, `DELETE FROM events WHERE task_id=?1 AND kind='timer' AND run_id IS NULL
+      AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=events.task_id AND (${timerMatches('t','events')}))`, taskId),
     stmt(env, `INSERT INTO runs(task_id,schedule_key,created_at,boundary)
       SELECT t.id,?2,?3,?4 FROM tasks t
       WHERE t.id=?1 AND t.status IN ${LIVE} AND t.expires_at>?3 AND t.run_count<t.max_runs
       AND EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL)
       AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.status IN ('pending','running'))
-      AND (t.status='active' OR EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND e.kind IN ('mail','run_lost'))
+      AND (t.status='active' OR EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND ${wakeEvent('t','e')})
         OR (json_extract(t.wait_json,'$.mode')='all' AND NOT EXISTS(
           SELECT 1 FROM json_each(t.wait_json,'$.ids') j JOIN tasks c ON c.id=j.value WHERE c.status NOT IN ${TERMINAL}))
         OR (json_extract(t.wait_json,'$.mode')='any' AND EXISTS(
@@ -55,12 +61,12 @@ export async function schedule(env, taskId, send) {
     ...exhausted.statements,
   ]);
   // Exhaustion is terminal, not an eternally unschedulable active task.
-  if(result[3].meta.changes) {
+  if(result[4].meta.changes) {
     const task=await stmt(env,'SELECT parent_id FROM tasks WHERE id=?1',taskId).first();
     if(task?.parent_id) await schedule(env,task.parent_id,send);
     if(send) await deliverCompletion(env,exhausted.key,send);
   }
-  return !!result[0].meta.changes;
+  return !!result[1].meta.changes;
 }
 
 // Shared terminal transition builder, also embedded in finishRun's phase-one batch.
@@ -149,10 +155,16 @@ export async function claimRun(env, agents) {
     SELECT a.id,a.message_id,a.filename,a.mime_type,a.size,a.content_b64 IS NOT NULL AS stored
     FROM attachments a WHERE a.message_id IN (SELECT e.message_id FROM events e JOIN source_runs s ON s.id=e.run_id
       JOIN runs r ON r.id=s.id WHERE r.task_id=?2) ORDER BY a.message_id,a.id`, run.id,run.task_id).all();
+  // Only the run consuming the mail that superseded a wait receives this note.
+  // Read our durable finish decision, never a role/source label in mail payloads.
+  const { results: skipped_waits } = await stmt(env, `SELECT r.id AS run_id,json_extract(r.outcome_json,'$.skipped_wait.mode') AS mode
+    FROM runs r JOIN events e ON e.id=json_extract(r.outcome_json,'$.skipped_wait.mail_event_id')
+    WHERE r.task_id=?2 AND e.task_id=r.task_id AND e.run_id=?1 AND e.kind='mail'
+      AND json_extract(r.outcome_json,'$.skipped_wait.mode') IN ('user','timer') ORDER BY r.id`,run.id,run.task_id).all();
   return { ...publicRun(run), agent: task.agent, sender: task.owner, project: task.project, subject: task.title,
     parent_id: task.parent_id, deliver: task.deliver, options_json: task.options_json,
     run_token: token, mail_domain: domain(env), resume_session: SID.test(task.session_id || '') ? task.session_id : null,
-    events: bounded, attachments };
+    events: bounded, attachments, skipped_waits };
 }
 
 export async function runForToken(env, token) {
@@ -163,13 +175,39 @@ export async function runForToken(env, token) {
 
 const runGuard = `status='running' AND cancel_requested=0 AND token_hash=?2 AND EXISTS(SELECT 1 FROM tasks WHERE id=runs.task_id AND status IN ${LIVE} AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
 export async function runTool(env, run, tool, body, send) {
-  if (tool === 'ask_user') return fail('ask_user chưa hỗ trợ (giai đoạn 4)', 501);
   if (!body || typeof body !== 'object') return fail('invalid arguments');
+  // SQL guards below repeat this check to serialize concurrent tool calls.
+  if (['spawn','await','reply'].includes(tool) && await stmt(env,
+    `SELECT 1 FROM runs WHERE id=?1 AND json_extract(outcome_json,'$.wait.mode')='user'`,run.id).first())
+    return fail('ask_user already set; spawn/await/reply are forbidden for this run',409);
+  if (tool === 'ask_user' || (tool === 'await' && Object.hasOwn(body,'seconds'))) {
+    const asking=tool==='ask_user', seconds=asking?body.timeout_seconds:body.seconds;
+    if (Object.keys(body).some(k=>!(asking?['question','timeout_seconds']:['seconds']).includes(k)) ||
+      (asking&&!validText(body.question)) || (!asking&&seconds===undefined) ||
+      (seconds!==undefined&&(!Number.isSafeInteger(seconds)||seconds<60||seconds>86400)))
+      return fail('seconds must be an integer in 60..86400; ask_user requires question');
+    const until=seconds===undefined?null:new Date(Date.now()+seconds*1000).toISOString();
+    const wait=asking?{mode:'user',run_id:run.id,until}:{mode:'timer',until};
+    const changed=await stmt(env,`UPDATE runs SET outcome_json=json_set(
+      CASE WHEN ?4 IS NULL THEN outcome_json ELSE json_set(outcome_json,'$.reply_text',?4) END,'$.wait',json(?3))
+      WHERE id=?1 AND ${runGuard}
+      AND json_extract(outcome_json,'$.wait') IS NULL AND COALESCE(json_array_length(outcome_json,'$.spawned'),0)=0
+      AND NOT EXISTS(SELECT 1 FROM tasks c WHERE c.spawn_run_id=runs.id AND c.parent_id=runs.task_id)
+      AND EXISTS(SELECT 1 FROM tasks t WHERE t.id=runs.task_id AND (?5 IS NULL OR ?5<=t.expires_at)
+        AND t.run_count<t.max_runs
+        AND NOT EXISTS(SELECT 1 FROM json_each(t.wait_json,'$.ids') j JOIN tasks c ON c.id=j.value
+          WHERE json_extract(t.wait_json,'$.mode') IN ('all','any') AND c.parent_id=t.id AND c.status NOT IN ${TERMINAL})
+        ${asking?"AND t.parent_id IS NULL AND t.deliver='email' AND t.question_count<5 AND t.mail_count<14":''})`,
+      run.id,run.token_hash,JSON.stringify(wait),asking?body.question:null,until).run();
+    return changed.meta.changes?{ok:true}:fail(asking?
+      'ask_user: root email task only; spawned children, wait already set or live children still awaited; question/mail/run budget exhausted, timeout exceeds expires_at, or inactive run':
+      'await: spawned children, wait already set or live children still awaited; run budget exhausted, timeout exceeds expires_at, or inactive run',409);
+  }
   if (tool === 'spawn') return spawnTask(env, run, body);
   if (tool === 'reply') {
     if (!validText(body.text) || Object.keys(body).some((k) => k !== 'text')) return fail('reply accepts text only; use outbox/run-<id>');
     const changed = await stmt(env, `UPDATE runs SET outcome_json=json_set(outcome_json,'$.reply_text',?3)
-      WHERE id=?1 AND ${runGuard}`, run.id, run.token_hash, body.text).run();
+      WHERE id=?1 AND ${runGuard} AND COALESCE(json_extract(outcome_json,'$.wait.mode'),'')!='user'`, run.id, run.token_hash, body.text).run();
     return changed.meta.changes ? { ok: true } : fail('inactive run', 409);
   }
   if (tool === 'await') {
@@ -178,6 +216,7 @@ export async function runTool(env, run, tool, body, send) {
     if (!Array.isArray(waitIds) || !waitIds.length || waitIds.length>3 || new Set(waitIds).size!==waitIds.length ||
       waitIds.some((n) => !Number.isSafeInteger(n) || n<1) || !['all','any'].includes(mode) || Object.keys(body).some((k) => !['ids','mode'].includes(k))) return fail('await requires direct, undelivered child ids');
     const changed = await stmt(env, `UPDATE runs SET outcome_json=json_set(outcome_json,'$.wait',json(?3)) WHERE id=?1 AND ${runGuard}
+      AND COALESCE(json_extract(outcome_json,'$.wait.mode'),'')!='user'
       AND (SELECT COUNT(*) FROM tasks c JOIN json_each(?3,'$.ids') j ON c.id=j.value WHERE c.parent_id=runs.task_id
         AND NOT EXISTS(SELECT 1 FROM events e WHERE e.dedupe_key='child:'||c.id AND e.run_id IS NOT NULL))=json_array_length(?3,'$.ids')`,
       run.id, run.token_hash, JSON.stringify({mode,ids:waitIds})).run();
@@ -191,7 +230,8 @@ export async function runTool(env, run, tool, body, send) {
         SELECT t.id,r.id,?3,'<mailbot-notify-'||?3||'@'||?4||'>','notify',?5,'Re: '||t.title,t.rfc_message_id,t.references_hdr,?6
         FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=?1 AND r.token_hash=?2 AND r.status='running' AND r.cancel_requested=0
         AND t.status IN ${LIVE} AND t.expires_at>?6 AND t.parent_id IS NULL AND r.notify_count<3
-        AND t.mail_count+((SELECT COUNT(*)+127 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND e.kind='mail')/128)<14`, run.id,run.token_hash,key,domain(env),body.text,now),
+        AND t.mail_count+CASE WHEN json_extract(r.outcome_json,'$.wait.mode')='user' THEN 1 ELSE 0 END
+          +((SELECT COUNT(*)+127 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND e.kind='mail')/128)<14`, run.id,run.token_hash,key,domain(env),body.text,now),
       stmt(env, `UPDATE runs SET notify_count=notify_count+1,outcome_json=json_insert(outcome_json,'$.notifications[#]',?2)
         WHERE id=?1 AND EXISTS(SELECT 1 FROM outbound_mails WHERE dedupe_key=?2)`, run.id,key),
     ]);
@@ -210,6 +250,7 @@ export async function spawnTask(env, run, body) {
       SELECT p.root_id,p.id,r.id,p.depth+1,?3,p.owner,p.project,substr(?4,1,300),'parent','{}','<child-'||?5||'@mailbot>',?6,?6,min(p.expires_at,?7)
       FROM runs r JOIN tasks p ON p.id=r.task_id JOIN tasks root ON root.id=p.root_id
       WHERE r.id=?1 AND r.token_hash=?2 AND r.status='running' AND r.cancel_requested=0 AND p.status IN ${LIVE}
+      AND COALESCE(json_extract(r.outcome_json,'$.wait.mode'),'')!='user'
       AND root.status IN ${LIVE} AND p.expires_at>?6 AND root.expires_at>?6 AND p.agent!=?3 AND p.depth<2 AND p.child_count<3 AND root.tree_count<8
       AND EXISTS(SELECT 1 FROM allowlist WHERE address=p.owner AND (agent='*' OR agent=?3))
       AND ${budget('p.owner','?8')}<30`,run.id,run.token_hash,body.agent,body.prompt,key,now,expiry(),hourISO()),
@@ -276,18 +317,37 @@ export async function finishRun(env, id, body, send) {
       resultSql:body.ok&&!body.cancelled?`(SELECT COALESCE(json_extract(outcome_json,'$.reply_text')||COALESCE(json_extract(outcome_json,'$.finalize_note'),''),output) FROM runs WHERE id=${Number(id)})`:'?3',
       key,guard:`${doneGuard} AND ((NOT EXISTS(SELECT 1 FROM events WHERE task_id=tasks.id AND run_id IS NULL)
         OR (parent_id IS NULL AND NOT EXISTS(SELECT 1 FROM events WHERE task_id=tasks.id AND run_id IS NULL AND kind!='mail')))
-        AND wait_json IS NULL OR ${body.ok&&!body.cancelled?'0':'1'}=1)`});
+        AND wait_json IS NULL AND NOT EXISTS(SELECT 1 FROM runs WHERE id=${Number(id)} AND json_extract(outcome_json,'$.skipped_wait') IS NOT NULL)
+        OR ${body.ok&&!body.cancelled?'0':'1'}=1)`});
     await env.DB.batch([
       stmt(env,`UPDATE runs SET status=CASE WHEN ?2=1 THEN 'cancelled' WHEN ?3=1 THEN 'done' ELSE 'failed' END,
         output=?4,session_id=?5,outbox_json=?6,result_hash=?7,finish_key=?8,token_hash=NULL,finished_at=?9,outcome_json=json_set(outcome_json,'$.finalize_note',?10)
-        WHERE id=?1 AND status='running' AND cancel_requested=0 AND EXISTS(SELECT 1 FROM tasks WHERE id=runs.task_id AND status IN ${LIVE})`,
+        WHERE id=?1 AND status='running' AND cancel_requested=0 AND EXISTS(SELECT 1 FROM tasks WHERE id=runs.task_id AND status IN ${LIVE} AND expires_at>?9)`,
         id,body.cancelled?1:0,body.ok?1:0,output,sid,metadata,hash,key,now,note),
+      // Mail received during this run supersedes its question/timer. Persist the
+      // decision with finish_key so retries cannot reserve/send that question,
+      // even after schedule has consumed the mail. Keep the original wait for audit.
+      stmt(env,`UPDATE runs SET outcome_json=json_set(outcome_json,'$.skipped_wait',json_object(
+          'mode',json_extract(outcome_json,'$.wait.mode'),
+          'mail_event_id',(SELECT MIN(id) FROM events WHERE task_id=runs.task_id AND run_id IS NULL AND kind='mail')))
+        WHERE id=?1 AND finish_key=?2 AND status='done' AND json_extract(outcome_json,'$.wait.mode') IN ('user','timer')
+          AND EXISTS(SELECT 1 FROM events WHERE task_id=runs.task_id AND run_id IS NULL AND kind='mail')`,id,key),
       stmt(env,`UPDATE tasks SET session_id=?3,lost_count=0,updated_at=?4,
-        wait_json=CASE WHEN ?5=0 THEN NULL ELSE COALESCE((SELECT json_extract(outcome_json,'$.wait') FROM runs WHERE id=?2),wait_json,
+        wait_json=CASE WHEN ?5=0 THEN NULL ELSE COALESCE((SELECT json_extract(outcome_json,'$.wait') FROM runs WHERE id=?2
+          AND json_extract(outcome_json,'$.skipped_wait') IS NULL),wait_json,
           (SELECT json_object('mode','all','ids',json_group_array(id)) FROM tasks c WHERE c.spawn_run_id=?2 AND c.parent_id=tasks.id HAVING COUNT(*)>0)) END
         WHERE id=?1 AND EXISTS(SELECT 1 FROM runs WHERE id=?2 AND finish_key=?6)`,old.task_id,id,sid,now,body.ok&&!body.cancelled?1:0,key),
       stmt(env,`UPDATE tasks SET status=CASE WHEN wait_json IS NULL THEN 'active' ELSE 'waiting' END
+        ,wait_until=json_extract(wait_json,'$.until')
         WHERE id=?1 AND EXISTS(SELECT 1 FROM runs WHERE id=?2 AND finish_key=?3)`,old.task_id,id,key),
+      stmt(env,`INSERT OR IGNORE INTO outbound_mails(task_id,run_id,dedupe_key,message_id,kind,text,subject,in_reply_to,references_hdr,created_at)
+        SELECT t.id,r.id,'question:run:'||r.id,'<mailbot-question-'||r.id||'@'||?3||'>','question',
+          substr(json_extract(r.outcome_json,'$.reply_text')||COALESCE(json_extract(r.outcome_json,'$.finalize_note'),''),1,63000)||char(10)||'-- task #'||t.id||' run #'||r.id,
+          'Re: '||t.title,t.rfc_message_id,t.references_hdr,?4
+        FROM runs r JOIN tasks t ON t.id=r.task_id WHERE r.id=?1 AND r.finish_key=?2 AND r.status='done'
+          AND t.deliver='email' AND t.parent_id IS NULL AND t.status='waiting'
+          AND json_extract(r.outcome_json,'$.wait.mode')='user' AND json_extract(t.wait_json,'$.mode')='user'
+          AND t.question_count<5 AND t.mail_count<15`,id,key,domain(env),now),
       ...terminal.statements,
       stmt(env,`INSERT OR IGNORE INTO outbound_mails(task_id,run_id,dedupe_key,message_id,kind,text,subject,in_reply_to,references_hdr,outbox_json,created_at)
         SELECT t.id,r.id,'reply:run:'||r.id,'<mailbot-run-'||r.id||'@'||?3||'>','reply',
@@ -314,9 +374,12 @@ export async function finishRun(env, id, body, send) {
   const {results:parents}=await stmt(env,`SELECT DISTINCT c.parent_id FROM tasks c JOIN tasks p ON p.id=c.parent_id
     WHERE c.completion_key=?1 AND p.status IN ${LIVE}`,saved.finish_key).all();
   for(const p of parents) await schedule(env,p.parent_id,send);
-  await deliverOutbound(env,`reply:run:${id}`,files,send);
-  const {results:terminalMails}=await stmt(env,`SELECT dedupe_key FROM outbound_mails WHERE task_id=?1 AND dedupe_key LIKE ?2`,old.task_id,`terminal:${saved.finish_key}:%`).all();
-  for(const mail of terminalMails) await deliverOutbound(env,mail.dedupe_key,[],send);
+  try {await deliverOutbound(env,`reply:run:${id}`,files,send);} catch(e) {
+    // Attachment bytes live only in the executor request; keep its retry path.
+    if(files.length) throw e;
+  }
+  try {await deliverOutbound(env,`question:run:${id}`,[],send);} catch {/* durable text error; cron retries */}
+  await deliverCompletion(env,saved.finish_key,send);
   return {ok:true,task_status:(await stmt(env,'SELECT status FROM tasks WHERE id=?1',old.task_id).first())?.status};
 }
 
@@ -359,9 +422,11 @@ export async function mapMail(env,{sender,agent,mail}) {
 export async function receiveTaskMail(env,{msgId,agent,tag=null,sender,mail},send) {
   // Authentication/agent whitelist are mandatory at the SMTP boundary too.
   if(!await isAllowed(env,sender,agent)) return fail('owner not allowed',403);
-  const automated=(mail.headerLines||[]).some((h)=>
-    h.key==='auto-submitted'&&!/^Auto-Submitted:\s*no\s*$/i.test(h.line)||
-    h.key==='x-auto-response-suppress'&&!/^X-Auto-Response-Suppress:\s*(?:none|no)\s*$/i.test(h.line));
+  const automated=(mail.headerLines||[]).some((h)=>{
+    const key=String(h.key).toLowerCase(), value=String(h.line).replace(/^[^:]*:/,'').trim();
+    return key==='auto-submitted'&&!/^no$/i.test(value) || key==='x-auto-response-suppress' ||
+      key==='precedence'&&/^(bulk|auto_reply|list)$/i.test(value);
+  });
   if(automated) return {status:'auto_suppressed'};
   const parsed=parseSubject(mail.subject),now=nowISO();
   if(parsed.error||parsed.action) {
@@ -371,9 +436,9 @@ export async function receiveTaskMail(env,{msgId,agent,tag=null,sender,mail},sen
     const reserved=await stmt(env,`INSERT INTO command_receipts(sender,created_at)
       SELECT ?1,?2 WHERE ${budget('?1','?3')}<30 RETURNING id`,sender,now,hourISO()).first();
     if(!reserved) return {status:'command_suppressed'};
-    const {results:tasks}=await stmt(env,`SELECT id,agent,status,title,wait_json FROM tasks WHERE owner=?1 ORDER BY id DESC LIMIT 20`,sender).all();
+    const {results:tasks}=await stmt(env,`SELECT id,agent,status,title,wait_json,wait_until FROM tasks WHERE owner=?1 ORDER BY id DESC LIMIT 20`,sender).all();
     const text=parsed.error?`${parsed.error}\n${COMMAND_HELP}`:parsed.action==='cancel'?JSON.stringify(cancelled):
-      tasks.map((t)=>`#${t.id} ${t.agent} ${t.status}${t.wait_json?' '+t.wait_json:''}: ${t.title}`).join('\n')||'(không có task)';
+      tasks.map((t)=>`#${t.id} ${t.agent} ${t.status}${t.wait_json?' '+t.wait_json:''}${t.wait_until?' until '+t.wait_until:''}: ${t.title}`).join('\n')||'(không có task)';
     // Command receipts reserve before sending; command mail does not belong to a task.
     await send(env,{from:`${agent}${tag?'+'+tag:''}@${domain(env)}`,to:sender,subject:`Re: ${parsed.subject||`[${parsed.action||'help'}]`}`,
       text:text.slice(0,64000),messageId:`<mailbot-command-${reserved.id}@${domain(env)}>`,inReplyTo:mail.messageId,references:mail.references});
@@ -382,7 +447,7 @@ export async function receiveTaskMail(env,{msgId,agent,tag=null,sender,mail},sen
   let task=parsed.options.new?null:await mapMail(env,{sender,agent,mail});
   const project=tag||task?.project||null;
   if(task&&(tag!==null&&tag!==task.project||['failed','cancelled'].includes(task.status)||
-    (task.status!=='done'&&task.expires_at<=now)||task.mail_count>=14)) task=null;
+    (task.status!=='done'&&task.expires_at<=now)||task.mail_count>=14&&!(task.status==='waiting'&&['user','timer'].includes(JSON.parse(task.wait_json||'{}').mode)&&task.mail_count<15))) task=null;
   const prompt=(extractPrompt(mail.text)||parsed.subject||'(empty mail)').slice(0,150000);
   const fresh=async()=>{
     const result=await submitTask(env,{agent,prompt,project,owner:sender,title:parsed.subject,mail,msgId,options:parsed.options});
@@ -395,12 +460,16 @@ export async function receiveTaskMail(env,{msgId,agent,tag=null,sender,mail},sen
     stmt(env,`UPDATE tasks SET max_runs=CASE WHEN status='done' THEN run_count+8 ELSE max_runs END,
       expires_at=CASE WHEN status='done' THEN ?3 ELSE expires_at END,finished_at=NULL,completion_key=NULL,
       status='active',options_json=json_patch(options_json,?4),updated_at=?2
+      ,wait_until=NULL,wait_json=CASE WHEN json_extract(wait_json,'$.mode') IN ('user','timer') THEN NULL ELSE wait_json END
       WHERE id=?1 AND status IN ('active','waiting','done')
-        AND mail_count+(SELECT COUNT(*) FROM events e WHERE e.task_id=tasks.id AND e.run_id IS NULL)/128<14
-        AND (status='done' OR expires_at>?2)`,task.id,now,expiry(),JSON.stringify(parsed.options)),
+        AND NOT EXISTS(SELECT 1 FROM events WHERE dedupe_key=?5)
+        AND mail_count+(SELECT COUNT(*) FROM events e WHERE e.task_id=tasks.id AND e.run_id IS NULL)/128<
+          CASE WHEN status='waiting' AND json_extract(wait_json,'$.mode') IN ('user','timer') THEN 15 ELSE 14 END
+        AND (status='done' OR expires_at>?2)`,task.id,now,expiry(),JSON.stringify(parsed.options),`mail:${task.id}:${msgId}`),
     stmt(env,`INSERT OR IGNORE INTO events(task_id,kind,message_id,rfc_message_id,payload_json,dedupe_key,created_at)
       SELECT id,'mail',?2,?3,?4,?5,?6 FROM tasks WHERE id=?1 AND status IN ${LIVE}
-        AND mail_count+(SELECT COUNT(*) FROM events e WHERE e.task_id=tasks.id AND e.run_id IS NULL)/128<14
+        AND changes()=1
+        AND mail_count+(SELECT COUNT(*) FROM events e WHERE e.task_id=tasks.id AND e.run_id IS NULL)/128<15
         AND expires_at>?6`,
       task.id,msgId,ids(mail.messageId)[0]||'',JSON.stringify({subject:parsed.subject,text:prompt}),`mail:${task.id}:${msgId}`,now),
   ]);
@@ -416,6 +485,36 @@ export async function getTask(env,id,owner) {
   const {results:events}=await stmt(env,'SELECT * FROM events WHERE task_id=?1 ORDER BY id',id).all();
   const {results:outbound_mails}=await stmt(env,'SELECT * FROM outbound_mails WHERE task_id=?1 ORDER BY id',id).all();
   return {task,runs,events,outbound_mails};
+}
+
+export async function answerTask(env,id,owner,body,send) {
+  if(!body||!validText(body.text)||Object.keys(body).some(k=>k!=='text')) return fail('answer_task accepts text only');
+  const task=await stmt(env,`SELECT * FROM tasks WHERE id=?1 AND owner=?2 AND parent_id IS NULL AND deliver='email'
+    AND status='waiting' AND json_extract(wait_json,'$.mode')='user' AND expires_at>?3`,id,owner,nowISO()).first();
+  if(!task) return fail('root task of owner must be waiting for user',409);
+  const wait=JSON.parse(task.wait_json),key=`answer:${id}:${wait.run_id}`,now=nowISO();
+  const result=await env.DB.batch([
+    stmt(env,`INSERT OR IGNORE INTO events(task_id,kind,payload_json,dedupe_key,created_at)
+      SELECT id,'mail',?3,?4,?5 FROM tasks WHERE id=?1 AND owner=?2 AND parent_id IS NULL AND deliver='email'
+        AND status='waiting' AND json_extract(wait_json,'$.mode')='user' AND json_extract(wait_json,'$.run_id')=?6
+        AND expires_at>?5 AND mail_count<15 AND ${budget('?2','?7')}<30`,
+      id,owner,JSON.stringify({text:body.text,source:'orchestrator'}),key,now,wait.run_id,hourISO()),
+    // changes() refers to the immediately preceding event INSERT inside this
+    // transaction: duplicate/concurrent answers never spend another receipt.
+    stmt(env,`INSERT INTO command_receipts(sender,created_at) SELECT ?1,?2 WHERE changes()=1`,owner,now),
+    stmt(env,`UPDATE tasks SET status='active',wait_json=NULL,wait_until=NULL,updated_at=?3
+      WHERE id=?1 AND owner=?2 AND status='waiting' AND json_extract(wait_json,'$.run_id')=?4
+        AND EXISTS(SELECT 1 FROM events WHERE dedupe_key=?5)`,id,owner,now,wait.run_id,key),
+  ]);
+  if(!result[0].meta.changes) {
+    const duplicate=await stmt(env,'SELECT payload_json FROM events WHERE task_id=?1 AND dedupe_key=?2',id,key).first();
+    if(!duplicate || JSON.parse(duplicate.payload_json).text!==body.text) {
+      const used=await stmt(env,`SELECT ${budget('?1','?2')} n`,owner,hourISO()).first();
+      return fail(used.n>=30?'owner rate limit':'task no longer waiting for user',used.n>=30?429:409);
+    }
+  }
+  await schedule(env,id,send);
+  return {ok:true,task_id:id};
 }
 
 // Hard cap on work per tick. D1 state is committed before attempting any mail.
@@ -446,11 +545,23 @@ export async function cronTick(env,send) {
   }
   const {results:expired}=await stmt(env,`SELECT id FROM tasks WHERE status IN ${LIVE} AND expires_at<=?1 ORDER BY expires_at LIMIT 1`,now).all();
   for(const t of expired) await completeTask(env,{taskId:t.id,status:'failed',result:'Task TTL expired',guard:`expires_at<='${now}'`},send);
+  const {results:timers}=await stmt(env,`SELECT id,wait_until FROM tasks INDEXED BY idx_tasks_timer
+    WHERE status='waiting' AND wait_until<=?1 AND expires_at>?1 AND json_extract(wait_json,'$.mode') IN ('user','timer')
+      AND NOT EXISTS(SELECT 1 FROM events e WHERE e.dedupe_key='timer:'||tasks.id||':'||tasks.wait_until)
+    ORDER BY wait_until,id LIMIT 2`,now).all();
+  for(const t of timers) {
+    await stmt(env,`INSERT OR IGNORE INTO events(task_id,kind,payload_json,dedupe_key,created_at)
+      SELECT id,'timer',json_object('wait_until',wait_until,'source','system','text',
+        CASE WHEN json_extract(wait_json,'$.mode')='user' THEN 'người dùng chưa trả lời' ELSE 'đã đến giờ hẹn' END),
+        'timer:'||id||':'||wait_until,?3 FROM tasks WHERE id=?1 AND status='waiting' AND wait_until=?2
+        AND wait_until<=?3 AND expires_at>?3 AND json_extract(wait_json,'$.mode') IN ('user','timer')`,t.id,t.wait_until,now).run();
+    await schedule(env,t.id,send);
+  }
   const {results:queued}=await stmt(env,`SELECT t.id FROM tasks t WHERE t.status IN ${LIVE} AND t.expires_at>?2
     AND EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL)
     AND NOT EXISTS(SELECT 1 FROM runs WHERE task_id=t.id AND status IN ('pending','running'))
     AND (t.run_count>=t.max_runs OR ${budget('t.owner','?1')}<30)
-    AND (t.status='active' OR EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND e.kind IN ('mail','run_lost'))
+    AND (t.status='active' OR EXISTS(SELECT 1 FROM events e WHERE e.task_id=t.id AND e.run_id IS NULL AND ${wakeEvent('t','e')})
       OR (json_extract(t.wait_json,'$.mode')='all' AND NOT EXISTS(
         SELECT 1 FROM json_each(t.wait_json,'$.ids') j JOIN tasks c ON c.id=j.value WHERE c.status NOT IN ${TERMINAL}))
       OR (json_extract(t.wait_json,'$.mode')='any' AND EXISTS(
@@ -474,5 +585,5 @@ export async function cronTick(env,send) {
     stmt(env,'DELETE FROM tasks WHERE root_id=?1',t.id),
   ]);
   await stmt(env,'DELETE FROM command_receipts WHERE created_at<?1',hourISO()).run();
-  return {lost:lost.length,expired:expired.length,queued:queued.length};
+  return {lost:lost.length,expired:expired.length,timers:timers.length,queued:queued.length};
 }
