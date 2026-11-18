@@ -19,7 +19,8 @@ export function git(cwd, args) {
 
 function identity(workdir, job) {
   if (!TAG.test(job.project || '') || !['claude', 'codex', 'agy'].includes(job.agent)) throw new Error('Project/agent không hợp lệ');
-  const name = `${job.agent}-${createHash('sha256').update(job.thread_key).digest('hex').slice(0, 12)}`;
+  if (job.task_id !== undefined && (!Number.isSafeInteger(job.task_id) || job.task_id < 1)) throw new Error('Task ID không hợp lệ');
+  const name = job.task_id ? `${job.agent}-task-${job.task_id}` : `${job.agent}-${createHash('sha256').update(job.thread_key).digest('hex').slice(0, 12)}`;
   return { path: resolve(workdir, 'worktrees', job.project, name), branch: `mailbot/${job.project}/${name}`,
     stateFile: resolve(workdir, 'worktree-state', job.project, `${name}.json`) };
 }
@@ -70,6 +71,7 @@ export function verifyWorktree(state) {
 }
 
 export function prepareWorktree(workdir, projects, job) {
+  if (job.task_id) job = { ...job, thread_key: `task:${job.task_id}` };
   const project = projects?.[job.project];
   if (!project?.repo) throw new Error(`Project chưa được cấu hình: ${job.project}`);
   const info = identity(workdir, job), repo = real(resolve(project.repo));
@@ -101,7 +103,7 @@ function prepareLocked(info, repo, job) {
     const gitdir = resolve(path, git(path, ['rev-parse', '--git-dir']));
     const gitFile = readFileSync(join(path, '.git'), 'utf8');
     if (!same(resolve(path, gitFile.trim().replace(/^gitdir: /, '')), gitdir)) throw new Error('gitdir không khớp');
-    state = { ...info, path, repo, gitdir, gitFile, project: job.project, agent: job.agent, thread_key: job.thread_key };
+    state = { ...info, path, repo, gitdir, gitFile, project: job.project, agent: job.agent, thread_key: job.thread_key, task_id: job.task_id };
     mkdirSync(dirname(info.stateFile), { recursive: true });
     writeFileSync(info.stateFile, JSON.stringify(state, null, 2), { flag: 'wx' });
   }
@@ -171,7 +173,7 @@ export function listWorktrees(workdir) {
   const root = resolve(workdir, 'worktree-state');
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && TAG.test(d.name)).flatMap((d) =>
-    readdirSync(join(root, d.name)).filter((n) => /^(claude|codex|agy)-[a-f0-9]{12}\.json$/.test(n))
+    readdirSync(join(root, d.name)).filter((n) => /^(claude|codex|agy)-(?:[a-f0-9]{12}|task-[1-9]\d*)\.json$/.test(n))
       .map((n) => JSON.parse(readFileSync(join(root, d.name, n), 'utf8'))));
 }
 

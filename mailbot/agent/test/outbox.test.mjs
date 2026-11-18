@@ -79,12 +79,12 @@ test('replaced outbox parent cannot redirect reads or recursive cleanup', (t) =>
   const { temp, outbox } = fixture(t);
   const parent = join(temp, 'outbox');
   const target = join(temp, 'target');
-  mkdirSync(join(target, 'job-1'), { recursive: true });
-  writeFileSync(join(target, 'job-1', 'private.txt'), 'private');
+  mkdirSync(join(target, 'run-1'), { recursive: true });
+  writeFileSync(join(target, 'run-1', 'private.txt'), 'private');
   renameSync(parent, join(temp, 'old-outbox'));
   try { symlinkSync(target, parent, process.platform === 'win32' ? 'junction' : 'dir'); }
   catch (e) { if (['EPERM', 'EACCES'].includes(e.code)) return t.skip(`symlink không đủ quyền: ${e.code}`); throw e; }
   assert.equal(readOutbox(outbox).attachments.length, 0);
-  assert.equal(readFileSync(join(target, 'job-1', 'private.txt'), 'utf8'), 'private');
+  assert.equal(readFileSync(join(target, 'run-1', 'private.txt'), 'utf8'), 'private');
   assert.throws(() => prepareOutbox(temp, 2));
 });

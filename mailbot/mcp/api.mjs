@@ -1,11 +1,11 @@
-export function apiClient({ url, token, jobToken = false }, fetchImpl = fetch) {
+export function apiClient({ url, token, runToken = false }, fetchImpl = fetch) {
   if (!url || !token) throw new Error('Thiếu URL/token mailbot');
   const base = new URL(url);
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password) throw new Error('URL không hợp lệ');
   return async (path, body, timeout = 10000) => {
     const res = await fetchImpl(base.href.replace(/\/+$/, '') + path, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { 'content-type': 'application/json', ...(jobToken ? { 'X-Job-Token': token } : { authorization: `Bearer ${token}` }) },
+      headers: { 'content-type': 'application/json', ...(runToken ? { 'X-Run-Token': token } : { authorization: `Bearer ${token}` }) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout),
     });
     const data = await res.json().catch(() => ({}));

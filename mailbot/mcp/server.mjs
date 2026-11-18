@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { randomBytes } from 'node:crypto';
 import { homedir } from "node:os";
 import { join, basename, resolve } from "node:path";
 
@@ -96,7 +97,8 @@ server.tool(
           .map((a) => `  [${a.id}] ${a.filename} (${a.mime_type}, ${a.size} B${a.stored ? "" : ", không lưu"})`)
           .join("\n")
       : "  (không có)";
-    return text(
+    const boundary=randomBytes(16).toString('hex');
+    return text(UNTRUSTED+'\n'+`<<<UNTRUSTED_EVENT_${boundary}>>>\n`+
       [
         `Thư #${m.id} nhận lúc ${m.received_at}`,
         `From: ${sender(m)}  (envelope: ${m.envelope_from})`,
@@ -107,12 +109,10 @@ server.tool(
         m.auth_results ? `Authentication-Results: ${m.auth_results}` : null,
         `Đính kèm:\n${atts}`,
         "",
-        `<<<${UNTRUSTED}>>>`,
         body,
-        "<<<HẾT NỘI DUNG THƯ>>>",
       ]
         .filter((l) => l !== null)
-        .join("\n")
+        .join("\n").replaceAll(boundary,"[boundary removed]")+`\n<<<END_UNTRUSTED_EVENT_${boundary}>>>`
     );
   }
 );

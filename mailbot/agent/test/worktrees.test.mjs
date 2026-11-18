@@ -7,7 +7,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git, prepareWorktree, commitWorktree, listWorktrees, pruneWorktrees, lockWorktree, lockRepository, verifyWorktree } from '../worktrees.mjs';
-import { JOB_TOOLS, jobMcp, codexMcpArgs, cliEnv } from '../job-mcp.mjs';
+import { RUN_TOOLS, runMcp, codexMcpArgs, cliEnv } from '../run-mcp.mjs';
 
 const execFile = childProcess.execFileSync;
 
@@ -51,7 +51,7 @@ test('worktree identity/reuse, excludes and hook-free commit', (t) => {
   assert.equal(git(state.path, ['config', '--get', 'core.sshCommand']), 'false');
   assert.match(state.branch, /^mailbot\/demo\/claude-[a-f0-9]{12}$/);
   assert.equal(prepareWorktree(workdir, projects, job).path, state.path);
-  for (const name of ['inbox/job-1', 'outbox/job-1']) { mkdirSync(join(state.path, name), { recursive: true }); writeFileSync(join(state.path, name, 'secret.txt'), 'private'); }
+  for (const name of ['inbox/run-1', 'outbox/run-1']) { mkdirSync(join(state.path, name), { recursive: true }); writeFileSync(join(state.path, name, 'secret.txt'), 'private'); }
   writeFileSync(join(state.path, '.codex-last-1.txt'), 'output');
   assert.equal(git(state.path, ['status', '--porcelain']), '');
   writeFileSync(join(state.path, 'hello.txt'), 'updated\n');
@@ -62,6 +62,15 @@ test('worktree identity/reuse, excludes and hook-free commit', (t) => {
   assert.equal(git(state.path, ['status', '--porcelain']), '');
   assert.equal(git(state.path, ['log', '-1', '--format=%an <%ae>']), 'mailbot <claude@example.com>');
   assert.equal(listWorktrees(workdir).length, 1);
+});
+
+test('D task worktree identity is tag+agent+task_id, independent of root/session/run',t=>{
+  const {workdir,projects,job}=setup(t);
+  const one=prepareWorktree(workdir,projects,{...job,task_id:10,root_id:1});
+  const two=prepareWorktree(workdir,projects,{...job,task_id:11,root_id:1});
+  assert.notEqual(one.path,two.path);assert.match(one.branch,/claude-task-10$/);
+  assert.equal(prepareWorktree(workdir,projects,{...job,id:99,task_id:10,root_id:1,thread_key:'changed'}).path,one.path);
+  assert.ok(listWorktrees(workdir).some(s=>s.task_id===10));
 });
 
 test('modified .git is refused before post-CLI git; missing projects fail', (t) => {
@@ -106,16 +115,16 @@ test('prune preserves dirty/unmerged branches and removes only clean merged work
 });
 
 test('job MCP is scoped to Claude/Codex; token absent from CLI env; paths use forward slashes', () => {
-  const server = jobMcp({ agent: 'claude', job_token: 'token' }, 'https://example.com', 'C:\\mailbot\\mcp\\job-tools.mjs');
-  assert.equal(server.env.MAILBOT_JOB_TOKEN, 'token');
-  assert.equal(server.args[0], 'C:/mailbot/mcp/job-tools.mjs');
-  assert.equal(jobMcp({ agent: 'agy', job_token: 'token' }, 'x'), null);
-  assert.equal(jobMcp({ agent: 'codex' }, 'x'), null);
-  assert.deepEqual(cliEnv({ PATH: 'ok', MAILBOT_JOB_TOKEN: 'bad', MAILBOT_TOKEN: 'bad', MAILBOT_ADMIN_TOKEN: 'bad', mailbot_job_token: 'bad' }), { PATH: 'ok' });
+  const server = runMcp({ agent: 'claude', run_token: 'token' }, 'https://example.com', 'C:\\mailbot\\mcp\\run-tools.mjs');
+  assert.equal(server.env.MAILBOT_RUN_TOKEN, 'token');
+  assert.equal(server.args[0], 'C:/mailbot/mcp/run-tools.mjs');
+  assert.equal(runMcp({ agent: 'agy', run_token: 'token' }, 'x'), null);
+  assert.equal(runMcp({ agent: 'codex' }, 'x'), null);
+  assert.deepEqual(cliEnv({ PATH: 'ok', MAILBOT_RUN_TOKEN: 'bad', MAILBOT_TOKEN: 'bad', MAILBOT_ADMIN_TOKEN: 'bad', mailbot_run_token: 'bad' }), { PATH: 'ok' });
   const args = codexMcpArgs(server).join(' ');
-  assert.match(args, /mcp_servers.mailbot-job.command=/);
-  assert.match(args, /mcp_servers.mailbot-job.env=/);
-  assert.equal(JOB_TOOLS.length, 2);
+  assert.match(args, /mcp_servers.mailbot-run.command=/);
+  assert.match(args, /mcp_servers.mailbot-run.env=/);
+  assert.equal(RUN_TOOLS.length, 5);
 });
 
 test('C2 config snapshots and actual toplevel are verified before commit; filter config refused', (t) => {

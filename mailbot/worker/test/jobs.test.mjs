@@ -1,27 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import { database } from '../test-support/d1.mjs';
 import { createJob, claimJob, finishJob, senderAuth, isAllowed } from '../src/mailbot.js';
 
 // D1 adapter chạy SQL thật trên SQLite memory, không mạng hay credential.
 function setup(t) {
-  const sqlite = new DatabaseSync(':memory:');
-  t.after(() => sqlite.close());
-  for (const f of ['schema.sql', 'schema-v2.sql', 'schema-v3.sql', 'schema-v4.sql']) sqlite.exec(readFileSync(new URL('../' + f, import.meta.url), 'utf8'));
-  const DB = {
-    prepare(sql) {
-      const statement = sqlite.prepare(sql.replace(/\?(\d+)/g, '$p$1'));
-      let values = {};
-      return {
-        bind(...args) { values = Object.fromEntries(args.map((v, i) => [`$p${i + 1}`, v])); return this; },
-        async first() { return statement.get(values) || null; },
-        async all() { return { results: statement.all(values) }; },
-        async run() { const r = statement.run(values); return { meta: { last_row_id: r.lastInsertRowid } }; },
-      };
-    },
-    async batch(stmts) { return Promise.all(stmts.map((s) => s.run())); },
-  };
+  const { sqlite, DB } = database(t);
   const env = { DB, MAIL_DOMAIN: 'example.com' }, sent = [];
   const send = async (...args) => { sent.push(args); };
   const create = (sender = 'a@example.com', subject = 'hello', more = {}) => createJob(env, {
@@ -35,6 +20,7 @@ test('schema includes all future columns and is a one-time migration', (t) => {
   for (const c of ['options_json', 'project', 'parent_id', 'root_id', 'depth', 'cancel_requested', 'job_token_hash', 'notify_count', 'delegate_count', 'outbox_json', 'reply_to']) assert.ok(cols.includes(c));
   assert.throws(() => sqlite.exec(readFileSync(new URL('../schema-v3.sql', import.meta.url), 'utf8')), /duplicate column/);
   assert.doesNotThrow(() => sqlite.exec(readFileSync(new URL('../schema-v4.sql', import.meta.url), 'utf8')));
+  assert.throws(() => sqlite.exec(readFileSync(new URL('../schema-v5.sql', import.meta.url), 'utf8')), /already exists/);
 });
 test('/new skips old session; successful result replaces thread for later replies', async (t) => {
   const { env, create, send } = setup(t);

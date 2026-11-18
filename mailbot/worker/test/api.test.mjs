@@ -15,8 +15,8 @@ function setup(t) {
   const { DB, sqlite } = database(t), sent = [];
   sqlite.exec("INSERT INTO allowlist VALUES ('a@example.com','*','now')");
   const env = { DB, MAIL_DOMAIN: 'example.com', API_TOKEN: 'reader', ADMIN_TOKEN: 'admin', EMAIL: { async send(m) { sent.push(m); } } };
-  const api = (path, token = 'admin', body, headers = {}) => worker.fetch(new Request('https://offline.test' + path, {
-    method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
+  const api = (path, token = 'admin', body, headers = {}, method) => worker.fetch(new Request('https://offline.test' + path, {
+    method: method || (body === undefined ? 'GET' : 'POST'), headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   }), env);
   const email = async (to, auth = 'pass') => {
@@ -37,34 +37,61 @@ test('SMTP handler rejects unknown/unauthenticated tagged recipients; bare claud
   assert.equal(await email('claude@example.com', 'fail'), null);
   assert.equal(await email('claude+demo@example.com'), null);
   assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM messages').get().n, 2);
-  assert.equal(sqlite.prepare('SELECT project FROM jobs').get().project, 'demo');
+  assert.equal(sqlite.prepare('SELECT project FROM tasks').get().project, 'demo');
   const visible = await (await api('/messages', 'reader')).json();
   assert.equal(visible.messages.length, 1);
   const privateId = sqlite.prepare("SELECT id FROM messages WHERE envelope_to LIKE '%+%'").get().id;
   for (const suffix of ['', '/attachments/1']) assert.equal((await api(`/messages/${privateId}${suffix}`, 'reader')).status, 404);
   assert.equal((await api(`/messages/${privateId}/read`, 'reader', {})).status, 404);
-  assert.equal((await api('/jobs', 'reader')).status, 403);
+  assert.equal((await api('/tasks', 'reader')).status, 403);
 });
 
-test('admin/job APIs separate auth; result clears token; detail exposes output/outbox without token hash', async (t) => {
+test('admin/run APIs separate auth; old job APIs removed; owner fixed; finish revokes scoped token', async (t) => {
   const { api, sent } = setup(t);
-  assert.equal((await api('/jobs', 'reader', { agent: 'claude', prompt: 'x', reply_to: 'a@example.com' })).status, 403);
-  const { job: pending } = await (await api('/jobs', 'admin', { agent: 'claude', prompt: 'x', project: 'demo', reply_to: 'a@example.com' })).json();
-  const { job } = await (await api('/jobs/claim', 'admin', { agents: ['claude'] })).json();
-  assert.equal(job.id, pending.id);
-  const headers = { 'X-Job-Token': job.job_token };
-  assert.equal((await api('/job-api/notify', 'admin', { subject: 'x', body: 'x' })).status, 401);
-  assert.equal((await api('/jobs', job.job_token)).status, 401);
-  assert.equal((await api('/job-api/notify', '', { subject: 'update', body: 'hi' }, headers)).status, 200);
-  assert.equal(sent[0].to, 'a@example.com'); assert.equal(sent[0].from, 'claude+demo@example.com');
-  assert.equal((await api('/job-api/delegate', '', { agent: 'codex', prompt: 'child' }, headers)).status, 200);
-  await api(`/jobs/${job.id}/result`, 'admin', { ok: true, output: 'done', session_id: 'session' });
-  const detail = await (await api(`/jobs/${job.id}`)).json();
-  assert.equal(detail.job.output, 'done'); assert.equal(detail.job.outbox_json, '[]');
-  assert.equal(Object.hasOwn(detail.job, 'job_token_hash'), false);
-  assert.equal((await api('/job-api/notify', '', { subject: 'x', body: 'x' }, headers)).status, 401);
-  const jobs = await (await api('/jobs')).json();
-  const child = jobs.jobs.find((j) => j.parent_id === job.id);
-  assert.equal((await api(`/jobs/${child.id}/cancel`, 'admin', {})).status, 200);
-  assert.equal((await (await api(`/jobs/${child.id}`)).json()).job.status, 'cancelled');
+  assert.equal((await api('/tasks', 'reader', {agent:'claude',prompt:'x',owner:'a@example.com'})).status,403);
+  assert.equal((await api('/jobs')).status,404);
+  assert.equal((await api('/job-api/notify','',{})).status,401);
+  const {task}=await (await api('/tasks','admin',{agent:'claude',prompt:'x',project:'demo',owner:'a@example.com'})).json();
+  const {run}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  assert.equal(run.task_id,task.id);
+  const headers={'X-Run-Token':run.run_token};
+  assert.equal((await api('/run-api/notify','admin',{text:'x'})).status,401);
+  assert.equal((await api('/tasks',run.run_token)).status,401);
+  assert.equal((await api('/run-api/notify','',{text:'hi'},headers)).status,200);
+  assert.equal(sent[0].to,'a@example.com');assert.equal(sent[0].from,'claude+demo@example.com');
+  await api(`/runs/${run.id}/result`,'admin',{ok:true,output:'done',session_id:'session'});
+  const detail=await (await api(`/tasks/${task.id}?owner=a%40example.com`)).json();
+  assert.equal(detail.task.status,'done');assert.equal(detail.runs[0].output,'done');
+  assert.equal(Object.hasOwn(detail.runs[0],'token_hash'),false);
+  assert.equal((await api('/run-api/notify','',{text:'late'},headers)).status,401);
+  assert.equal((await api(`/tasks/${task.id}?owner=other%40example.com`)).status,404);
+  const results=await (await api('/tasks?owner=a%40example.com')).json();assert.equal(results.tasks.length,1);
+});
+
+ test('mail events protect incoming attachments from deletion until their run finishes',async t=>{
+  const {api,email,sqlite}=setup(t);
+  await email('claude@example.com');
+  const id=sqlite.prepare('SELECT id FROM messages').get().id;
+  assert.equal((await api(`/messages/${id}`,'admin',undefined,{},'DELETE')).status,409);
+  assert.equal(sqlite.prepare('SELECT message_id FROM events').get().message_id,id);
+  const {run}=await (await api('/runs/claim','admin',{agents:['claude']})).json();
+  assert.equal(run.events[0].message_id,id);
+  await api(`/runs/${run.id}/result`,'admin',{ok:true,output:'done'});
+  assert.equal((await api(`/messages/${id}`,'admin',undefined,{},'DELETE')).status,200);
+});
+
+for (const status of ['failed', 'cancelled']) test(`E7 DELETE releases unconsumed mail of ${status} task`, async t => {
+  const { api, email, sqlite } = setup(t);
+  await email('claude@example.com');
+  const id = sqlite.prepare('SELECT id FROM messages').get().id;
+  const { run } = await (await api('/runs/claim', 'admin', { agents: ['claude'] })).json();
+  sqlite.prepare("INSERT INTO events(task_id,kind,message_id,payload_json,dedupe_key,created_at) VALUES(?,'mail',?,'{}','late','now')").run(run.task_id, id);
+  if (status === 'failed') await api(`/runs/${run.id}/result`, 'admin', { ok: false, output: 'error' });
+  else {
+    const before = sqlite.prepare('SELECT COUNT(*) n FROM outbound_mails').get().n;
+    await api(`/tasks/${run.task_id}/cancel?owner=a%40example.com`, 'admin', {});
+    assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM outbound_mails WHERE status=\'sent\'').get().n, before + 1);
+  }
+  assert.equal((await api(`/messages/${id}`, 'admin', undefined, {}, 'DELETE')).status, 200);
+  assert.equal(sqlite.prepare('SELECT id FROM messages WHERE id=?').get(id), undefined);
 });
