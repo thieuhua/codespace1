@@ -48,6 +48,16 @@ QA sink: `QA_SINK_DOMAINS` mặc định rỗng trong code; `worker/wrangler.tom
 
 Đọc bằng `GET /api/qa/outbox?after_id=0&limit=20`, Bearer **ADMIN_TOKEN**; trả `{mails:[{id,to,subject,message_id,raw,created_at}]}` theo id tăng dần. `after_id` nguyên không âm, `limit` nguyên dương (tối đa 100). API_TOKEN/run token không được đọc. Cần áp dụng schema v7 trước khi dùng; dữ liệu QA giữ riêng trong D1, gồm cả nội dung đính kèm trong MIME, hiện chưa tự dọn. Chưa migrate/deploy hoặc thử thư thật trong thay đổi này.
 
+### Kịch bản QA qua thư thật
+
+Từ `mailbot`, chạy `node tools/qa/scenarios.mjs [tên...]`; bỏ tên để chạy cả bảy: `happy-codex`, `stranger`, `bad-dkim`, `auto-submitted`, `status`, `thread`, `ask-user`. In PASS/FAIL từng ca, tiếp tục sau lỗi, exit 1 nếu có lỗi. **Gửi thư thật qua VPS và gọi Codex, dùng quota owner**: cần executor, schema v7/QA sink, whitelist qa@qa.xuanthieu.site cho codex; qa-stranger@qa.xuanthieu.site phải ngoài whitelist.
+
+Đặt sẵn `QA_ADMIN_TOKEN` trong môi trường; runner không đọc cấu hình `~/.mailbot` hoặc in token. Tùy chọn: `QA_URL` (mặc định API Worker trên), `QA_TO` (codex@xuanthieu.site), `QA_REPLY_TIMEOUT_SECONDS` (60, nguyên 10..90), `QA_OPTS='{"dkimKeyFile":"/path/to/key.pem"}'`. Cần Node 26, postal-mime trong worker/node_modules, bash (Git Bash trên Windows), scp/ssh BatchMode với alias thieuhua-vps1, Python 3 trên VPS. Khi gửi, signer dùng khóa mặc định ~/.mailbot/qa/dkim-mb1.pem nếu chưa chỉ định khóa khác.
+
+Mỗi ca dùng nonce/cursor riêng, phân trang outbox; ca âm poll đủ 40 giây và kiểm tra cuối. `stranger`/`bad-dkim` chấp nhận SMTP DATA 5xx chứa đúng `Sender not allowed`; lỗi SMTP/API khác là FAIL. `thread` kiểm số task trong chữ ký; `ask-user` kiểm Message-ID câu hỏi và kết quả cuối cùng task. Khóa sai được sinh/xóa dưới tools/qa/.test-tmp. **DKIM sai vẫn có thể DMARC pass nhờ SPF khớp From trên VPS**, nên `bad-dkim` có thể FAIL với chính sách hiện tại. Ca âm chỉ chứng minh không có phản hồi trong 40 giây.
+
+Gọi riêng sign.mjs/send.sh giữ đối số cũ; `QA_OPTS` nhận `from` (mặc định qa@qa.xuanthieu.site), `extraHeaders` (tên → chuỗi, không trùng header chuẩn), `inReplyTo`, `references` (Message-ID dạng `<id@domain>`, cách nhau bằng dấu cách), `dkimKeyFile`, `skipDkim` (boolean). Runner chỉ nhận from mặc định/dkimKeyFile, tự đặt header theo ca. Kiểm offline: `node --check tools/qa/scenarios.mjs`; `node --test --test-isolation=none tools/qa/sign.test.mjs` chỉ dựng/parse/xác minh DKIM với khóa trong RAM. Chưa chạy kịch bản thật khi phát triển harness.
+
 Cấu hình executor do chủ máy quản lý tại `~/.mailbot/agent.json`:
 
 ```json
