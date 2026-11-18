@@ -7,7 +7,6 @@
 //   { "url": "https://mailbot.thieupro666.workers.dev", "admin_token": "...", "port": 20025,
 //     "workdir": "E:\\mailbot-work", "agents": ["claude", "codex", "agy"] }
 import { createServer } from "node:http";
-import { spawn, execFile } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -15,13 +14,15 @@ import { timingSafeEqual, createHash } from "node:crypto";
 import { claudeSettings, claudeAllowedTools, claudeIsolationArgs, jobOptions, optionArgs } from "./cli-options.mjs";
 import { prepareOutbox } from "./outbox.mjs";
 import { prepareWorktree, lockWorktree } from './worktrees.mjs';
-import { RUN_TOOLS, runMcp, codexMcpArgs, cliEnv } from './run-mcp.mjs';
+import { RUN_TOOLS, runMcp, codexMcpArgs } from './run-mcp.mjs';
 import { saveInboxAttachment } from './inbox.mjs';
 import { readLastOutput } from './cli-output.mjs';
-import { codexInventoryCache, inspectCli, verifyAgyMcp } from './mcp-isolation.mjs';
+import { codexInventoryCache, agyMcpCheck } from './mcp-isolation.mjs';
 import { finalizeFiles } from './job-finalize.mjs';
 import { buildRunPrompt } from './run-prompt.mjs';
-import { prepareTaskDirectory, recordTaskUse, pruneTaskDirectories } from './task-files.mjs';
+import { prepareTaskDirectory, lockTaskDirectory, recordTaskUse, pruneTaskDirectories } from './task-files.mjs';
+import { createRunPool, poolLimits } from './run-pool.mjs';
+import { createCliRunner } from './cli-runner.mjs';
 
 const CFG_DIR = join(homedir(), ".mailbot");
 const cfg = JSON.parse(readFileSync(join(CFG_DIR, "agent.json"), "utf8"));
@@ -72,6 +73,7 @@ function codexEntry() {
 // Thư mục chứa token/khóa: chặn Claude đọc/sửa (Codex sandbox chỉ chặn ghi, không chặn đọc).
 const CLAUDE_SETTINGS = claudeSettings(homedir(), WORKDIR);
 const codexInventory = codexInventoryCache();
+const checkAgyMcp = agyMcpCheck();
 
 async function commandFor(job, dir, prompt) {
   const mcp = runMcp(job, URL_BASE);
@@ -126,7 +128,7 @@ async function commandFor(job, dir, prompt) {
     };
   }
   if (job.agent === "agy") {
-    verifyAgyMcp(await inspectCli(cfg.agy_exe || 'agy.exe', ['mcp', 'list'], dir), cfg.agy_allowed_global_mcp);
+    await checkAgyMcp(cfg.agy_exe || 'agy.exe', dir, cfg.agy_allowed_global_mcp);
     const args = ["--output-format", "json", "--mode", "accept-edits", "--sandbox"];
     args.push(...optionArgs(job.agent, options, cfg.agy_model));
     if (resume) args.push("--conversation", resume);
@@ -151,51 +153,10 @@ function lastJson(out) {
   return null;
 }
 
-const MAX_OUT = 4 * 1024 * 1024;
-
-function run({ cmd, args, stdin }, cwd, job) {
-  return new Promise((resolve) => {
-    let done = false, out = "", err = "", timedOut = false, cancelled = false;
-    let cancelTimer, killTimer;
-    const finish = (code, extra = "") => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      clearTimeout(cancelTimer);
-      clearTimeout(killTimer);
-      resolve({ code, out, err: err + extra, timedOut, cancelled });
-    };
-    const child = spawn(cmd, args, { cwd, windowsHide: true, env: cliEnv() });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (d) => { if (out.length < MAX_OUT) out += d; });
-    child.stderr.on("data", (d) => { if (err.length < MAX_OUT) err += d; });
-    child.stdin.on("error", () => {}); // CLI thoát sớm (EPIPE) không được làm sập agent
-    const stop = () => {
-      if (done || !child.pid) return;
-      log(`stop pid ${child.pid}, cancelled=${cancelled}`);
-      execFile("taskkill", ["/T", "/F", "/PID", String(child.pid)], () => {
-        if (done) return;
-        // Tiến trình cháu giữ pipe thì "close" không bao giờ đến: đóng pipe và ép kết thúc.
-        child.stdout.destroy();
-        child.stderr.destroy();
-        killTimer = setTimeout(() => finish(-1, cancelled ? "\n[Đã hủy job]" : `\n[Quá thời gian ${TIMEOUT_MS / 60e3} phút, đã dừng]`), 5000);
-      });
-    };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, TIMEOUT_MS);
-    const checkCancel = async () => {
-      try {
-        const state = await api(`/runs/${job.id}/state`, undefined, 5000);
-        if (!done && state.cancel_requested) { cancelled = true; stop(); }
-      } catch (e) { if (!done) log(`state job #${job.id}: ${e.message}`); }
-      finally { if (!done && !cancelled) cancelTimer = setTimeout(checkCancel, 15000); }
-    };
-    cancelTimer = setTimeout(checkCancel, 15000);
-    child.on("error", (e) => finish(-1, String(e)));
-    child.on("close", (code) => finish(code, cancelled ? "\n[Đã hủy job]" : timedOut ? `\n[Quá thời gian ${TIMEOUT_MS / 60e3} phút, đã dừng]` : ""));
-    child.stdin.end(stdin);
-  });
-}
+const run = createCliRunner({
+  getState: id => api(`/runs/${id}/state`, undefined, 5000),
+  timeoutMs: TIMEOUT_MS, log,
+});
 
 const clean = (s) => String(s || "").replace(/[\x00-\x1f]+/g, " ").slice(0, 200);
 
@@ -222,14 +183,32 @@ async function postResult(job, body) {
 }
 
 async function handle(job) {
-  let dir = join(WORKDIR, job.agent, `task-${job.task_id}`), worktree, unlock;
+  // Acquire before touching exchange files. A rejected lock must never clean
+  // another run's inbox/outbox. Always release, even if finalization throws.
+  let unlock;
+  try { unlock = job.project ? lockWorktree(WORKDIR, job) : lockTaskDirectory(WORKDIR, job.agent, job.task_id); }
+  catch (e) {
+    await postResult(job, { ok: false, output: `Không lấy được khóa cwd: ${e.message}`, session_id: null, attachments: [] });
+    return;
+  }
+  let body;
+  try { body = await handleLocked(job); }
+  catch (e) { body = { ok: false, output: `Agent lỗi finalize: ${e.message}`, session_id: null, attachments: [] }; }
+  finally { unlock(); }
+  // Release cwd before result: Worker may schedule this task's next run while
+  // the result response/retry is still in flight. Pool capacity stays occupied.
+  const res = await postResult(job, body);
+  log(`run #${job.id} status=${res.task_status || (res.ignored ? 'ignored' : 'accepted')}${res.error ? ` (${res.error})` : ''}`);
+}
+
+async function handleLocked(job) {
+  let dir = join(WORKDIR, job.agent, `task-${job.task_id}`), worktree;
   const t0 = Date.now();
   log(`job #${job.id} ${job.agent} từ ${job.sender}${job.resume_session ? ` (tiếp phiên ${job.resume_session})` : ""}`);
   let result, execution;
   let outbox;
   try {
     if (job.project) {
-      unlock = lockWorktree(WORKDIR, job);
       worktree = prepareWorktree(WORKDIR, cfg.projects, job);
       dir = worktree.path;
     } else {
@@ -245,8 +224,8 @@ async function handle(job) {
     try {
       const runs = join(CFG_DIR, "runs");
       mkdirSync(runs, { recursive: true });
-      writeFileSync(join(runs, `run-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`);
-    } catch {}
+      writeFileSync(join(runs, `run-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`, { flag: "wx" });
+    } catch (e) { log(`output run #${job.id}: ${e.message}`); }
     result = spec.parse(r.out, r.code);
     result.cancelled = r.cancelled;
     result.timedOut = r.timedOut;
@@ -261,41 +240,29 @@ async function handle(job) {
     if(state.cancel_requested || state.status!=='running') result.cancelled=true;
   } catch(e) { result.cancelled=true; result.output+=`\n[Không xác minh được trạng thái run: ${e.message}]`; }
   const { attachments, notes, gitReport } = finalizeFiles({ result, outbox, worktree, dir, job,
-    domain: job.mail_domain || cfg.mail_domain || 'xuanthieu.site', unlock, executed: !!execution });
+    domain: job.mail_domain || cfg.mail_domain || 'xuanthieu.site', executed: !!execution });
   const tail = gitReport.slice(0, 40000) + (notes.length ? `\n\n[Gửi tệp]\n${notes.join('\n').slice(0, 10000)}` : '');
   result.output = String(result.output || '').slice(0, 200000 - tail.length) + tail;
   const secs = Math.round((Date.now() - t0) / 1000);
   log(`job #${job.id} xong sau ${secs}s ok=${!!result.ok}`);
-  const res = await postResult(job, {
+  return {
     ok: !!result.ok, output: String(result.output || ""), session_id: result.session_id || null,
     cancelled: !!result.cancelled, attachments, finalize_note: tail,
-  });
-  log(`run #${job.id} status=${res.task_status || (res.ignored ? 'ignored' : 'accepted')}${res.error ? ` (${res.error})` : ""}`);
+  };
 }
 
-// Mỗi agent chạy tuần tự (tránh hai phiên cùng sửa một thư mục); các agent khác nhau chạy song song.
-const busy = new Set();
-async function drain(agent) {
-  if (busy.has(agent)) return;
-  busy.add(agent);
-  try {
-    for (;;) {
-      const { run: job } = await api("/runs/claim", { agents: [agent] });
-      if (!job) break;
-      await handle(job);
-    }
-  } catch (e) {
-    log(`drain ${agent}: ${e.message}`);
-  } finally {
-    busy.delete(agent);
-  }
-}
-const drainAll = () => ENABLED.forEach((a) => drain(a));
+const limits = poolLimits(cfg, log);
+const pool = createRunPool({
+  agents: ENABLED, ...limits, log,
+  claim: async agents => (await api('/runs/claim', { agents })).run,
+  execute: handle,
+});
+const drainAll = () => pool.wake();
 let pruning=false;
 async function pruneOldTasks() {
-  if(pruning || busy.size) return;
+  if(pruning || pool.snapshot().occupied) return;
   pruning=true;
-  try { await pruneTaskDirectories(WORKDIR,async(id)=>{ const result=await api(`/tasks/${id}/retention`); return busy.size?null:result.task; }); }
+  try { await pruneTaskDirectories(WORKDIR,async(id)=>{ const result=await api(`/tasks/${id}/retention`); return pool.snapshot().occupied?null:result.task; }); }
   catch(e) {log(`task retention: ${e.message}`);}
   finally {pruning=false;}
 }
@@ -316,7 +283,7 @@ createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && req.url === "/health") {
-    res.writeHead(200, { "content-type": "text/plain" }).end(`ok ${[...busy].join(",")}`);
+    res.writeHead(200, { "content-type": "text/plain" }).end(`ok ${JSON.stringify(pool.snapshot().running)}`);
     return;
   }
   res.writeHead(404).end();

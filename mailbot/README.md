@@ -18,7 +18,7 @@ Cron mỗi phút: run_lost, TTL, queue bị rate-limit, outbound text, retention
 | Thiết kế đầy đủ | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [bất biến AGENTS](AGENTS.md) |
 | Worker | [index.js](worker/src/index.js): SMTP/API; [tasks.js](worker/src/tasks.js): scheduler/tool/terminal/cron; [mailbot.js](worker/src/mailbot.js): senderAuth/whitelist/wake |
 | D1 | [schema-v5.sql](worker/schema-v5.sql), sau schema.sql/v2/v3/v4; giữ jobs/threads cũ để tra cứu |
-| Executor | [mailbot-agent.mjs](agent/mailbot-agent.mjs), [mailbot-admin.mjs](agent/mailbot-admin.mjs); Scheduled Task mailbot-agent, cổng 20025 |
+| Executor | [mailbot-agent.mjs](agent/mailbot-agent.mjs), pool [run-pool.mjs](agent/run-pool.mjs), CLI [cli-runner.mjs](agent/cli-runner.mjs), [mailbot-admin.mjs](agent/mailbot-admin.mjs); Scheduled Task mailbot-agent, cổng 20025 |
 | MCP reader | [server.mjs](mcp/server.mjs), token API_TOKEN, chỉ inbox claude không tag |
 | MCP điều phối | [orchestrator.mjs](mcp/orchestrator.mjs), ADMIN_TOKEN + owner cố định, không tool đọc inbox |
 | MCP run | [run-tools.mjs](mcp/run-tools.mjs), executor tự cấp mỗi run cho Claude/Codex; agy không được cấp |
@@ -54,6 +54,8 @@ Cấu hình executor do chủ máy quản lý tại `~/.mailbot/agent.json`:
   "port": 20025,
   "workdir": "E:\\mailbot-work",
   "agents": ["claude", "codex", "agy"],
+  "max_parallel": 3,
+  "max_per_agent": 2,
   "projects": {
     "demo": {"repo": "E:\\projects\\demo", "claude_allowed_tools": ["Bash(npm test:*)"]}
   }
@@ -61,6 +63,8 @@ Cấu hình executor do chủ máy quản lý tại `~/.mailbot/agent.json`:
 ```
 
 Giữ các trường tùy chọn đang dùng: codex_js, claude_exe/agy_exe, claude_model/codex_model/agy_model, timeout_minutes, poll_seconds, agy_allowed_global_mcp. Không bật test runner nếu chưa tin mã repo: runner tương đương chạy mã tùy ý ngoài kiểm soát Read/Edit. Agy inventory không hiểu/lệnh lỗi hoặc MCP enabled ngoài allowlist (mặc định []) làm run failed trước model; không tự sửa global config.
+
+`max_parallel` giới hạn tổng run đang xử lý (mặc định 3); `max_per_agent` giới hạn riêng mỗi agent (mặc định 2). Cả hai cần là số nguyên dương an toàn; bỏ trống dùng mặc định, giá trị sai dùng mặc định và ghi log. Executor giữ chỗ trước claim, chỉ xin từng agent còn chỗ; wake/poll/run kết thúc cùng lấp chỗ, lỗi claim retry backoff 1–30s. Không có hàng đợi run đã claim. Mỗi run có cwd/khóa, timeout và cancel riêng; một run lỗi không dừng các run còn lại. `/health` trả `ok ` kèm JSON số run đang xử lý theo agent, kể cả finalize/nộp kết quả; không tính claim chưa trả về run.
 
 Admin cục bộ (đọc config của chủ máy khi thực sự chạy):
 
@@ -152,8 +156,8 @@ npm test -- --test-isolation=none
 
 Wrangler dry-run bằng binary local, tắt telemetry, chỉ ghi outdir trong mailbot. Không gọi npx để tự tải package; nếu launcher bị spawn EPERM thì báo không kiểm bundle. Kết quả kiểm cuối được báo riêng trong bản bàn giao; dry-run/test không chứng minh deploy, CLI model, email thật, cron thật hoặc CPU 10 ms trên Workers Free.
 
-Đợt D, offline: `node --check` qua 37 JS/MJS. `npm test` mặc định ở cả ba package lỗi `spawn EPERM`; `npm test -- --test-isolation=none` qua worker 57/57, agent 36/36, MCP 3/3, không skip. Worker dùng SQLite với foreign_keys bật và batch transaction thật. Test kéo búa bao xác nhận đúng một email tổng hợp. Benchmark validate 2 MiB có trung vị cục bộ khoảng 3.125–3.925 ms, không gồm toàn bộ JSON/MIME/D1/email.
+Giai đoạn 3, offline: `node --check` qua 43 JS/MJS. `npm test` mặc định ở cả ba package lỗi `spawn EPERM`; `npm test -- --test-isolation=none` qua worker 82/82, agent 53/53, MCP 3/3, không skip. Worker dùng SQLite với foreign_keys bật và batch transaction thật. Test mới dùng claim/process/timer giả: wake dồn dập, giới hạn tổng/per-agent, agent đầy, lỗi claim/backoff/run, khóa cwd/retention, single-flight MCP, hủy/timeout riêng và callback state muộn. Test kéo búa bao xác nhận đúng một email tổng hợp. Kiểm thử Git có mô phỏng đọc `.git` bị sửa vì sandbox chặn sửa vật lý trong một ca; không chứng minh chống tamper trên máy triển khai.
 
-Wrangler local dry-run với home/config/log tạm riêng, telemetry và network bị chặn, dừng tại esbuild `Error: spawn EPERM`; chưa kiểm được bundle. Không gọi mạng, CLI model, gửi thư thật, migrate/deploy hay đọc cấu hình/credential người dùng. Song song theo run và ask_user/timer/send_event vẫn dành giai đoạn 3/4.
+Wrangler local dry-run đợt D trước đây với home/config/log tạm riêng, telemetry và network bị chặn, dừng tại esbuild `Error: spawn EPERM`; chưa kiểm được bundle, giai đoạn 3 không chạy lại dry-run. Không gọi mạng, CLI model, gửi thư thật, migrate/deploy hay đọc cấu hình/credential người dùng. Song song theo run đã triển khai; ask_user/timer/send_event vẫn dành giai đoạn 4.
 
 Ba thư mục `agent/.test-tmp`, `worker/.test-tmp`, `mcp/.test-tmp` còn cache kiểm thử. Bộ duyệt tự động từ chối lệnh dọn các đường dẫn đã kiểm tra trong mailbot với `blocked by policy`; chủ máy tự dọn, không đưa cache vào commit.

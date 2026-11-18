@@ -1,4 +1,4 @@
-import { mkdirSync, lstatSync, realpathSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, unlinkSync } from 'node:fs';
+import { mkdirSync, lstatSync, realpathSync, existsSync, writeFileSync, readFileSync, readdirSync, rmSync, unlinkSync, rmdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const same=(a,b)=>process.platform==='win32'?a.toLowerCase()===b.toLowerCase():a===b;
@@ -7,8 +7,23 @@ function ordinaryDirectory(path) {
   if(!st.isDirectory()||st.isSymbolicLink()||!same(realpathSync.native(path),path)) throw new Error('Task directory redirected');
 }
 
-export function prepareTaskDirectory(workdir,agent,id) {
+function taskIdentity(agent, id) {
   if(!['claude','codex','agy'].includes(agent)||!Number.isSafeInteger(id)||id<1) throw new Error('Invalid task directory identity');
+}
+
+// Outside the CLI cwd; mkdir is atomic across executor/retention processes.
+export function lockTaskDirectory(workdir, agent, id) {
+  taskIdentity(agent,id);
+  const root=resolve(workdir);mkdirSync(root,{recursive:true});ordinaryDirectory(root);
+  const state=join(root,'task-state');mkdirSync(state,{recursive:true});ordinaryDirectory(state);
+  const locks=join(state,'locks');mkdirSync(locks,{recursive:true});ordinaryDirectory(locks);
+  const path=join(locks,`${agent}-task-${id}.lock`);
+  try { mkdirSync(path); } catch(e) { throw new Error(`Task directory đang khóa: ${agent}/task-${id} (${e.code})`); }
+  return () => rmdirSync(path);
+}
+
+export function prepareTaskDirectory(workdir,agent,id) {
+  taskIdentity(agent,id);
   const root=resolve(workdir);mkdirSync(root,{recursive:true});ordinaryDirectory(root);
   const parent=join(root,agent);mkdirSync(parent,{recursive:true});ordinaryDirectory(parent);
   const path=join(parent,`task-${id}`);mkdirSync(path,{recursive:true});ordinaryDirectory(path);
@@ -40,24 +55,28 @@ export async function pruneTaskDirectories(workdir,lookup,{now=Date.now(),days=7
     const data=JSON.parse(readFileSync(marker,'utf8'));
     if(name!==`${data.agent}-task-${data.id}.json`||!Number.isSafeInteger(data.id)||data.id<1||
       !Number.isFinite(data.last_used)||now-data.last_used<days*86400000) continue;
-    const task=await lookup(data.id);
-    if(!task||task.project||!['done','failed','cancelled'].includes(task.status)||
-      !task.finished_at||now-Date.parse(task.finished_at)<days*86400000) continue;
-    const parent=join(root,data.agent),path=join(parent,`task-${data.id}`);
-    ordinaryDirectory(root);ordinaryDirectory(state);ordinaryDirectory(parent);
-    if(existsSync(path)) {
-      ordinaryDirectory(path);
-      // Refuse links at every level before recursive removal.
-      const scan=[path];
-      while(scan.length) for(const entry of readdirSync(scan.pop(),{withFileTypes:true})) {
-        const p=join(entry.parentPath,entry.name),leaf=lstatSync(p);
-        if(leaf.isSymbolicLink()) throw new Error('Task retention refuses links');
-        if(leaf.isDirectory()) {ordinaryDirectory(p);scan.push(p);}
+    let unlock;
+    try { unlock=lockTaskDirectory(root,data.agent,data.id); } catch { continue; }
+    try {
+      const task=await lookup(data.id);
+      if(!task||task.project||!['done','failed','cancelled'].includes(task.status)||
+        !task.finished_at||now-Date.parse(task.finished_at)<days*86400000) continue;
+      const parent=join(root,data.agent),path=join(parent,`task-${data.id}`);
+      ordinaryDirectory(root);ordinaryDirectory(state);ordinaryDirectory(parent);
+      if(existsSync(path)) {
+        ordinaryDirectory(path);
+        // Refuse links at every level before recursive removal.
+        const scan=[path];
+        while(scan.length) for(const entry of readdirSync(scan.pop(),{withFileTypes:true})) {
+          const p=join(entry.parentPath,entry.name),leaf=lstatSync(p);
+          if(leaf.isSymbolicLink()) throw new Error('Task retention refuses links');
+          if(leaf.isDirectory()) {ordinaryDirectory(p);scan.push(p);}
+        }
+        ordinaryDirectory(parent);ordinaryDirectory(path);
+        rmSync(path,{recursive:true});
       }
-      ordinaryDirectory(parent);ordinaryDirectory(path);
-      rmSync(path,{recursive:true});
-    }
-    unlinkSync(marker);removed.push(data.id);
+      unlinkSync(marker);removed.push(data.id);
+    } finally { unlock(); }
   }
   return removed;
 }

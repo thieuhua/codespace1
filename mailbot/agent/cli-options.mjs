@@ -11,8 +11,8 @@ export function claudeSettings(home, workdir = '') {
   const unixHome = home.replace(/\\/g, "/").replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`);
   return JSON.stringify({ permissions: { deny: [
     ...SECRET_DIRS.flatMap((d) => [`Read(/${unixHome}/${d}/**)`, `Edit(/${unixHome}/${d}/**)`, `Bash(*${d}*)`]),
-    ...['**/.git', '**/.git/**', '**/worktree-state/**',
-      ...(workdir ? ['/' + workdir.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => `/${d.toLowerCase()}`) + '/worktree-state/**'] : [])]
+    ...['**/.git', '**/.git/**', '**/worktree-state/**', '**/task-state/**',
+      ...(workdir ? ['worktree-state','task-state'].map(d => '/' + workdir.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`) + `/${d}/**`) : [])]
       .flatMap((p) => [`Read(${p})`, `Edit(${p})`]),
     ...["*--no-index*", "*--output*", "*--ext-diff*", "*-c *", "*core.*"].map((s) => `Bash(${s})`),
   ] } });

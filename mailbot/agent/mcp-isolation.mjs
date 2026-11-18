@@ -9,19 +9,44 @@ export function inspectCli(cmd, args, cwd) {
 }
 
 export function codexInventoryCache(inspect = inspectCli, now = Date.now) {
-  let cached;
-  return async (entry, cwd) => {
-    if (cached?.entry === entry && now() - cached.at < 600000) return cached.servers;
-    let servers;
-    try { servers = JSON.parse(await inspect(process.execPath, [entry, '--disable', 'plugins', 'mcp', 'list', '--json'], cwd)); }
-    catch { throw new Error('Không đọc được Codex MCP inventory; không chạy job'); }
-    const args = codexDisableArgs(servers);
-    let disabled;
-    try { disabled = JSON.parse(await inspect(process.execPath, [entry, ...args, 'mcp', 'list', '--json'], cwd)); }
-    catch { throw new Error('Không xác minh được Codex MCP isolation; không chạy job'); }
-    verifyCodexDisabled(disabled);
-    cached = { entry, at: now(), servers: servers.map(({ name, enabled }) => ({ name, enabled })) };
-    return cached.servers;
+  const cache = new Map(), flights = new Map();
+  return (entry, cwd) => {
+    // cwd matters: project-local MCP settings must not reuse another task's
+    // verification. Each successful entry expires; rejected checks never cache.
+    const key = JSON.stringify([entry, cwd]);
+    for (const [k, value] of cache) if (now() - value.at >= 600000) cache.delete(k);
+    if (cache.has(key)) return Promise.resolve(cache.get(key).servers);
+    if (flights.has(key)) return flights.get(key);
+    const flight = Promise.resolve().then(async () => {
+      let servers;
+      try { servers = JSON.parse(await inspect(process.execPath, [entry, '--disable', 'plugins', 'mcp', 'list', '--json'], cwd)); }
+      catch { throw new Error('Không đọc được Codex MCP inventory; không chạy job'); }
+      const args = codexDisableArgs(servers);
+      let disabled;
+      try { disabled = JSON.parse(await inspect(process.execPath, [entry, ...args, 'mcp', 'list', '--json'], cwd)); }
+      catch { throw new Error('Không xác minh được Codex MCP isolation; không chạy job'); }
+      verifyCodexDisabled(disabled);
+      const safe = Object.freeze(servers.map(({ name, enabled }) => Object.freeze({ name, enabled })));
+      cache.set(key, { at: now(), servers: safe });
+      return safe;
+    }).finally(() => flights.delete(key));
+    flights.set(key, flight);
+    return flight;
+  };
+}
+
+// Agy has no TTL cache: share only an overlapping inspection in the same cwd,
+// then verify each caller's allowlist. The next run always inspects again.
+export function agyMcpCheck(inspect = inspectCli) {
+  const flights = new Map();
+  return async (entry, cwd, allowed) => {
+    const key = JSON.stringify([entry, cwd]);
+    if (!flights.has(key)) {
+      const flight = Promise.resolve().then(() => inspect(entry, ['mcp', 'list'], cwd))
+        .finally(() => flights.delete(key));
+      flights.set(key, flight);
+    }
+    verifyAgyMcp(await flights.get(key), allowed);
   };
 }
 

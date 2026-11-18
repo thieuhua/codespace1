@@ -23,7 +23,7 @@ test('C2 Claude denies git metadata and worktree-state Read/Edit', () => {
   assert.equal(args[args.indexOf('--permission-prompts') + 1], 'none');
   assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
   const deny = JSON.parse(claudeSettings('C:\\Users\\test', 'E:\\mailbot-work')).permissions.deny;
-  for (const path of ['**/.git', '**/.git/**', '**/worktree-state/**', '//e/mailbot-work/worktree-state/**'])
+  for (const path of ['**/.git', '**/.git/**', '**/worktree-state/**', '//e/mailbot-work/worktree-state/**', '**/task-state/**', '//e/mailbot-work/task-state/**'])
     for (const tool of ['Read', 'Edit']) assert.ok(deny.includes(`${tool}(${path})`));
 });
 

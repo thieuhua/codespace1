@@ -1,12 +1,12 @@
 # Kiến trúc xử lý: Task → Run → Event
 
-Đặc tả đợt D, giai đoạn 1 + 2. Tích hợp 12 mục archreview và các điểm còn liên quan của joinreview. Quyết định trực tiếp trong brief đợt D thay phần reclaim, reply giữa lượt, project do spawn chọn và cancel bằng event. Các bất biến bảo mật tại [AGENTS.md](../AGENTS.md) vẫn áp dụng.
+Đặc tả đợt D, giai đoạn 1 + 2 + 3. Tích hợp 12 mục archreview và các điểm còn liên quan của joinreview. Quyết định trực tiếp trong brief đợt D thay phần reclaim, reply giữa lượt, project do spawn chọn và cancel bằng event. Các bất biến bảo mật tại [AGENTS.md](../AGENTS.md) vẫn áp dụng.
 
 ## Phạm vi
 
 Worker lập lịch, D1 giữ trạng thái, executor chuẩn bị cwd → chạy CLI → finalize worktree/outbox → nộp kết quả. MCP run có token riêng; reader inbox và orchestrator tách biệt. Không chuyển dữ liệu jobs/threads cũ; chỉ giữ bảng để tra cứu. `/jobs`, `/job-api`, MCP mailbot-job không còn phục vụ. Các hàm/test legacy còn trong source, không được router mới gọi.
 
-Giai đoạn 1 + 2 triển khai schema v5, email/task, scheduler, executor run, reply/spawn/await/notify, completeTask, cancel cây, cron lost/TTL/rate-limit/retention. Giai đoạn 3 mới song song theo run; hiện tuần tự mỗi agent, các agent khác nhau song song. Giai đoạn 4 mới ask_user, timer, send_event; ask_user hiện trả chưa hỗ trợ, không giả thành công.
+Giai đoạn 1 + 2 triển khai schema v5, email/task, scheduler, executor run, reply/spawn/await/notify, completeTask, cancel cây, cron lost/TTL/rate-limit/retention. Giai đoạn 3 triển khai executor song song theo run: mặc định tối đa 3 run tổng, 2 run/agent; chỉ claim khi có chỗ, không giữ hàng đợi run đã claim trên laptop. Giai đoạn 4 mới ask_user, timer, send_event; ask_user hiện trả chưa hỗ trợ, không giả thành công.
 
 ## Schema và chỉ mục
 
@@ -106,10 +106,14 @@ D1 và EMAIL.send không có giao dịch chung hay idempotency key phía nhà cu
 
 ## Executor và giới hạn dữ liệu
 
-- Vẫn khóa mỗi agent; giai đoạn 3 mới semaphore tổng/per-agent và khóa cwd cho nhiều run cùng agent.
+- `agent/run-pool.mjs` điều phối run độc lập, nhận claim/execute qua injection. `agent.json`: `max_parallel` mặc định 3, `max_per_agent` mặc định 2; thiếu dùng mặc định, giá trị không phải số nguyên dương an toàn dùng mặc định và ghi log tên trường. Một vòng lấp chỗ single-flight, round-robin từng agent còn chỗ; giữ chỗ đồng bộ tổng/per-agent TRƯỚC await claim. Claim nguyên tử hiện có nhận `[agent]`; không đổi Worker/schema và không claim cho agent đầy.
+- `/wake`, poll dự phòng và finally của mỗi run đều yêu cầu lấp chỗ; gộp wake đang xử lý và giữ tín hiệu tới trong khi claim. Lỗi claim trả chỗ đã giữ, ghi log, retry backoff 1s → 2s → ... tối đa 30s; wake/poll/run kết thúc không bỏ qua backoff. Claim thành công (kể cả rỗng) reset chuỗi lỗi. Run đã claim chạy ngay, chỗ được giữ tới khi execute/nộp kết quả kết thúc; lỗi từng run được bắt riêng và luôn trả chỗ. Claim mất response sau khi Worker đã nhận vẫn thuộc recovery run_lost, không reclaim ID.
+- `agent/cli-runner.mjs` giữ child, cờ cancel/timeout và mọi timer trong từng invocation; cancel poll 15s, request state timeout 5s, CLI timeout mặc định 20 phút. Dừng đúng PID/cây của run đó; callback state muộn không hủy hoặc tạo timer sau khi run đã kết thúc. `/health` giữ text `ok ` rồi JSON số run đang xử lý theo từng agent, ví dụ `ok {"claude":2,"codex":1,"agy":0}`; không tính reservation claim chưa có run.
 - Cwd `<workdir>/<agent>/task-<task_id>` kiểm directory thực, không junction/symlink. Worktree theo `(tag,agent,task_id)`, path worktrees/<tag>/<agent>-task-ID, branch mailbot/<tag>/<agent>-task-ID; không dùng root/session. Prune đọc được state hash thread lịch sử nhưng executor mới không dùng lại.
+- Task thường dùng khóa mkdir nguyên tử `task-state/locks/<agent>-task-ID.lock`, worktree giữ khóa hiện có trong worktree-state. Lấy khóa trước khi chuẩn bị/đọc/dọn exchange; trùng đường dẫn fail run, không đợi trên laptop và không dọn dữ liệu của run giữ khóa. Khóa xuyên CLI + finalize, nhả trong finally trước POST result (Worker có thể schedule lượt sau trước response); semaphore vẫn giữ tới hết POST/retry. Retention dùng cùng khóa task, không xóa cwd đang dùng. Khóa canonical repo prepare/prune hiện có vẫn retry ngắn và không giữ qua CLI. Không tự phá khóa cũ sau crash; chủ máy đối chiếu trước xử lý.
 - Inbox `inbox/run-ID/message_id-attachment_id-name`, outbox `outbox/run-ID`; dọn mọi run. Giữ lstat/fstat/realpath/nlink=1, 10 tệp/2 MiB, b64_lines CRLF/76; Worker validate tuyến tính một lần, WeakSet không nhận cờ JSON để bỏ validate.
 - Claude restricted/permission-prompts none, deny SECRET_DIRS/Git metadata, shell allowlist, mặc định model opus. Codex disable plugins và từng MCP kế thừa + xác minh disabled trước bật mailbot-run. Agy fail-closed inventory, không MCP run, stdout làm reply; vẫn spawn làm con. Không sửa global config.
+- Codex kiểm kê + xác minh isolation single-flight theo `(entry,cwd)`, chỉ cache kết quả đã xác minh trong 10 phút, không cache lỗi; không chia sẻ project-local settings giữa cwd. Agy chỉ chia sẻ inventory đang chạy theo `(entry,cwd)`, mỗi caller kiểm allowlist riêng; không cache kết quả/lỗi qua lượt sau. Log chung append đồng bộ mỗi dòng; `runs/` mkdir recursive, output riêng `run-ID.out` tạo độc quyền `wx`, trùng ID không ghi đè và ghi log lỗi.
 - Kiểm state sau CLI trước finalize. Hủy/timeout/lỗi/không xác minh state: không commit/session/attachments. Verify worktree trước đọc outbox; commit không hook/filter/gitattributes lạ, giữ khóa xuyên CLI+commit. Kiểm hậu kỳ thất bại xóa attachments đã đọc.
 - Boundary ngẫu nhiên mỗi run; loại boundary trùng trong dữ liệu. Subject, filename, mail/child_result đều trong block không tin cậy; system/tool/cwd ở ngoài. Đây là giảm injection, không bảo đảm model miễn nhiễm.
 - Claim cắt ngay trong SQL bằng window SUM: tổng event payload <=150000 ký tự, <=128 event/run, có truncated. Không lấy chuỗi lớn vào JS rồi mới cắt. Email text <=64000; full stdout ở log executor/runs.output (giới hạn 200000).
