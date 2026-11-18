@@ -12,15 +12,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { claudeSettings, claudeAllowedTools, claudeIsolationArgs, jobOptions, optionArgs } from "./cli-options.mjs";
-import { prepareOutbox } from "./outbox.mjs";
-import { prepareWorktree, lockWorktree } from './worktrees.mjs';
+import { lockWorktree } from './worktrees.mjs';
 import { RUN_TOOLS, runMcp, codexMcpArgs } from './run-mcp.mjs';
 import { saveInboxAttachment } from './inbox.mjs';
 import { readLastOutput } from './cli-output.mjs';
 import { codexInventoryCache, agyMcpCheck } from './mcp-isolation.mjs';
-import { finalizeFiles } from './job-finalize.mjs';
-import { buildRunPrompt } from './run-prompt.mjs';
-import { prepareTaskDirectory, lockTaskDirectory, recordTaskUse, pruneTaskDirectories } from './task-files.mjs';
+import { waitForTaskDirectoryLock, pruneTaskDirectories } from './task-files.mjs';
+import { createJobExecutor, createJobHandler } from './job-handler.mjs';
 import { createRunPool, poolLimits } from './run-pool.mjs';
 import { createCliRunner } from './cli-runner.mjs';
 
@@ -182,74 +180,20 @@ async function postResult(job, body) {
   }
 }
 
-async function handle(job) {
-  // Acquire before touching exchange files. A rejected lock must never clean
-  // another run's inbox/outbox. Always release, even if finalization throws.
-  let unlock;
-  try { unlock = job.project ? lockWorktree(WORKDIR, job) : lockTaskDirectory(WORKDIR, job.agent, job.task_id); }
-  catch (e) {
-    await postResult(job, { ok: false, output: `Không lấy được khóa cwd: ${e.message}`, session_id: null, attachments: [] });
-    return;
-  }
-  let body;
-  try { body = await handleLocked(job); }
-  catch (e) { body = { ok: false, output: `Agent lỗi finalize: ${e.message}`, session_id: null, attachments: [] }; }
-  finally { unlock(); }
-  // Release cwd before result: Worker may schedule this task's next run while
-  // the result response/retry is still in flight. Pool capacity stays occupied.
-  const res = await postResult(job, body);
-  log(`run #${job.id} status=${res.task_status || (res.ignored ? 'ignored' : 'accepted')}${res.error ? ` (${res.error})` : ''}`);
-}
-
-async function handleLocked(job) {
-  let dir = join(WORKDIR, job.agent, `task-${job.task_id}`), worktree;
-  const t0 = Date.now();
-  log(`job #${job.id} ${job.agent} từ ${job.sender}${job.resume_session ? ` (tiếp phiên ${job.resume_session})` : ""}`);
-  let result, execution;
-  let outbox;
-  try {
-    if (job.project) {
-      worktree = prepareWorktree(WORKDIR, cfg.projects, job);
-      dir = worktree.path;
-    } else {
-      dir=prepareTaskDirectory(WORKDIR,job.agent,job.task_id);
-      recordTaskUse(WORKDIR,job);
-    }
-    outbox = prepareOutbox(dir, job.id);
-    const files = await saveAttachments(job, dir);
-    const prompt = buildRunPrompt(job, {dir,outbox:outbox.path,files});
-    const spec = await commandFor(job, dir, prompt);
-    const r = await run(spec, dir, job);
-    execution = r;
-    try {
-      const runs = join(CFG_DIR, "runs");
-      mkdirSync(runs, { recursive: true });
-      writeFileSync(join(runs, `run-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`, { flag: "wx" });
-    } catch (e) { log(`output run #${job.id}: ${e.message}`); }
-    result = spec.parse(r.out, r.code);
-    result.cancelled = r.cancelled;
-    result.timedOut = r.timedOut;
-    if (!result.ok && r.err.trim()) result.output = `${result.output || ""}\n\n[stderr]\n${r.err.slice(-4000)}`;
-    if (r.code !== 0 && result.ok) result.ok = false;
-  } catch (e) {
-    result = { ok: false, output: `Agent lỗi: ${e.message}`, cancelled: execution?.cancelled, timedOut: execution?.timedOut };
-  }
-  // Recheck after CLI, before any worktree commit or attachment/session release.
-  try {
-    const state=await api(`/runs/${job.id}/state`,undefined,5000);
-    if(state.cancel_requested || state.status!=='running') result.cancelled=true;
-  } catch(e) { result.cancelled=true; result.output+=`\n[Không xác minh được trạng thái run: ${e.message}]`; }
-  const { attachments, notes, gitReport } = finalizeFiles({ result, outbox, worktree, dir, job,
-    domain: job.mail_domain || cfg.mail_domain || 'xuanthieu.site', executed: !!execution });
-  const tail = gitReport.slice(0, 40000) + (notes.length ? `\n\n[Gửi tệp]\n${notes.join('\n').slice(0, 10000)}` : '');
-  result.output = String(result.output || '').slice(0, 200000 - tail.length) + tail;
-  const secs = Math.round((Date.now() - t0) / 1000);
-  log(`job #${job.id} xong sau ${secs}s ok=${!!result.ok}`);
-  return {
-    ok: !!result.ok, output: String(result.output || ""), session_id: result.session_id || null,
-    cancelled: !!result.cancelled, attachments, finalize_note: tail,
-  };
-}
+const handleLocked = createJobExecutor({
+  workdir: WORKDIR, projects: cfg.projects, domain: cfg.mail_domain || 'xuanthieu.site',
+  getState: id => api(`/runs/${id}/state`, undefined, 5000),
+  saveAttachments, commandFor, run, log,
+  saveOutput(job, r) {
+    const runs = join(CFG_DIR, 'runs');
+    mkdirSync(runs, { recursive: true });
+    writeFileSync(join(runs, `run-${job.id}.out`), `code=${r.code}\n--- stdout\n${r.out}\n--- stderr\n${r.err}`, { flag: 'wx' });
+  },
+});
+const handle = createJobHandler({
+  acquire: job => job.project ? lockWorktree(WORKDIR, job) : waitForTaskDirectoryLock(WORKDIR, job.agent, job.task_id),
+  execute: handleLocked, postResult, log,
+});
 
 const limits = poolLimits(cfg, log);
 const pool = createRunPool({
@@ -262,7 +206,13 @@ let pruning=false;
 async function pruneOldTasks() {
   if(pruning || pool.snapshot().occupied) return;
   pruning=true;
-  try { await pruneTaskDirectories(WORKDIR,async(id)=>{ const result=await api(`/tasks/${id}/retention`); return pool.snapshot().occupied?null:result.task; }); }
+  try {
+    await pruneTaskDirectories(WORKDIR,async(id)=>{
+      if(pool.snapshot().occupied) return null;
+      const result=await api(`/tasks/${id}/retention`);
+      return pool.snapshot().occupied?null:result.task;
+    },{isIdle:()=>!pool.snapshot().occupied});
+  }
   catch(e) {log(`task retention: ${e.message}`);}
   finally {pruning=false;}
 }

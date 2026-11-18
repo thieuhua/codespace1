@@ -23,6 +23,7 @@ export function createRunPool({ agents, maxParallel = 3, maxPerAgent = 2, claim,
   const report = message => { try { log(message); } catch { /* logging cannot break accounting */ } };
 
   function backoff(error) {
+    if (closed) return;
     report(`claim run: ${error?.message || error}`);
     const delay = Math.min(maxRetryMs, retryMs * 2 ** Math.min(failures++, 16));
     retryTimer = setTimer(() => { retryTimer = undefined; wake(); }, delay);

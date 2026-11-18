@@ -134,3 +134,14 @@ test('non-Error claim and run rejections cannot crash accounting or the fill loo
   await clock.next(); assert.equal(pool.snapshot().occupied, 0);
   assert.match(logs[0], /claim run: null/); assert.match(logs[1], /run #1 codex: undefined/);
 });
+
+test('P3.7 claim rejection after close releases reservation without scheduling backoff', async () => {
+  const clock=timers(),claim=deferred();let calls=0,executed=0;
+  const pool=createRunPool({agents:['claude'],...clock,
+    claim:()=>{calls++;return claim.promise;},execute:()=>{executed++;},
+  });
+  const filling=pool.wake();await turn();assert.equal(pool.snapshot().claiming,1);
+  pool.close();claim.reject(new Error('late claim failure'));await filling;
+  assert.equal(clock.pending.size,0);assert.equal(pool.snapshot().occupied,0);
+  await pool.wake();assert.equal(calls,1);assert.equal(executed,0);
+});

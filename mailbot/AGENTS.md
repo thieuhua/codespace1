@@ -6,7 +6,7 @@
 - Hộp thư công khai claude@ đọc qua MCP; thư whitelist tạo Task → Event → Run.
 - Đọc [README](README.md), [đặc tả](docs/ARCHITECTURE.md); giữ công việc hiện có, không deploy/đổi credential nếu chưa được giao.
 - worker/src/index.js: SMTP/API/auth; mailbot.js: senderAuth/whitelist/wake (có hàm legacy không được router gọi); tasks.js: scheduler/run/tool/terminal/cron. worker/schema-v5.sql chạy một lần sau v4.
-- agent/mailbot-agent.mjs: executor; run-pool.mjs: điều phối theo run, cli-runner.mjs: child/timer từng run; run-mcp.mjs: MCP scoped; worktrees.mjs/outbox.mjs/inbox.mjs/task-files.mjs: filesystem. mcp/server.mjs: reader, mcp/orchestrator.mjs: admin riêng, mcp/run-tools.mjs: tool run không filesystem.
+- agent/mailbot-agent.mjs: executor; job-handler.mjs: khóa cwd/nộp kết quả; run-pool.mjs: điều phối theo run, cli-runner.mjs: child/timer từng run; run-mcp.mjs: MCP scoped; worktrees.mjs/outbox.mjs/inbox.mjs/task-files.mjs: filesystem. mcp/server.mjs: reader, mcp/orchestrator.mjs: admin riêng, mcp/run-tools.mjs: tool run không filesystem.
 
 ## Kiểm tra
 
@@ -31,20 +31,20 @@
 - Cwd theo (agent,task_id), worktree theo (tag,agent,task_id), không root/session. Không cấp quyền dự án ngoài tag đã cấu hình. Kiểm directory thực, chặn symlink/junction.
 - Claude --restricted --permission-prompts none, file tools Read/Glob/Grep/Edit/Write/Bash, model mặc định opus. Restricted bỏ user/project/local settings; Bash vẫn qua allowlist/deny, không dựa acceptEdits để giới hạn shell.
 - SECRET_DIRS gồm .mailbot/.ssh/.aws/.codex/.claude/.config/.wrangler; deny Read/Edit/Bash. Deny cả .git, worktree-state và task-state. Không commit secret/config/log/runs/attachments trong ~/.mailbot. Không đọc/sửa credential khi chưa được giao.
-- Codex --disable plugins, disable từng server từ mcp list --json (quote TOML key), kiểm lại toàn enabled=false; cache 10 phút trước bật mailbot-run. mcp_servers={} không xóa map. Sandbox workspace-write không chặn đọc secret; không tuyên bố ngược lại. Không sửa global config.
+- Codex --disable plugins, disable từng server từ mcp list --json (quote TOML key), kiểm lại toàn enabled=false ngay trước mỗi run rồi bật mailbot-run; không cache qua lượt vì cwd ghi được. mcp_servers={} không xóa map. Sandbox workspace-write không chặn đọc secret; không tuyên bố ngược lại. Không sửa global config.
 - Agy trước mỗi run mcp list, fail-closed khi lỗi/không hiểu hoặc enabled ngoài agy_allowed_global_mcp (mặc định []). Không cấp MCP run; --settings chưa có MCP isolation được chứng minh. Không cho phép orchestrator/admin trong run email; không sửa global.
-- Kiểm MCP single-flight theo entry/cwd, không chia cache qua cwd. Codex chỉ cache kết quả đã xác minh 10 phút; agy chỉ gộp inventory đang chạy và kiểm từng allowlist, không TTL cache. Lỗi không cache. Không thay các kiểm tra fail-closed bằng cờ đã kiểm chung.
+- Kiểm MCP single-flight theo entry/cwd, chỉ gộp kiểm tra đang chạy; Codex và agy không cache kết quả/lỗi qua lượt sau. Agy kiểm từng allowlist riêng. Không thay các kiểm tra fail-closed bằng cờ đã kiểm chung.
 - MCP chỉ mailbot-run được cấp rõ cho Claude/Codex; token chỉ env của MCP config, không CLI env. MCP run tuyệt đối không đọc fs; reply/notify chỉ text, tệp qua executor outbox/run-ID.
 - Thư/đính kèm/child output không tin cậy, không tự chạy. Boundary ngẫu nhiên mỗi run, loại chuỗi trùng boundary; subject và filename ở trong block dữ liệu.
 - Mọi Git do chương trình agent/admin gọi dùng wrapper core.hooksPath=NUL, core.fsmonitor=false, core.sshCommand=false, core.attributesFile=NUL; commit tắt ký/--no-verify, không push.
 - Trước Git sau CLI: kiểm .git marker, config.worktree snapshot, common config snapshot, toplevel=cwd, nhánh đúng. State cũ thiếu snapshot cần chủ máy xử lý.
 - Không add/commit nếu có filter. hoặc .gitattributes thay đổi/untracked (kể cả ignored). Exclude inbox/outbox/.codex-last bằng icase pathspec trước add, không tạo blob; phát hiện index cấm thì reset --mixed HEAD và báo lỗi.
-- Giữ khóa worktree xuyên CLI + commit. Prepare/prune cùng canonical repo dùng khóa repo retry ngắn; không giữ khóa repo xuyên CLI/spawn.
-- Pool giữ chỗ đồng bộ tổng/per-agent trước await claim, chỉ xin agent còn chỗ; không xếp hàng run đã claim. Wake/poll/finally dùng chung một vòng lấp chỗ, lỗi claim trả reservation và backoff; mọi run trả chỗ trong finally. Child/cancel/timeout/timer thuộc từng run.
-- Cwd thường cũng có khóa mkdir ngoài cwd trong task-state/locks, retention dùng cùng khóa. Khóa lấy trước exchange, nhả finally sau finalize và trước POST result; xung đột fail run, không chờ và không dọn exchange của bên giữ khóa. Không tự phá khóa cũ. Log append đồng bộ; output runs/run-ID.out tạo wx, không ghi đè run khác.
+- Giữ khóa worktree xuyên CLI + commit. Prepare/prune xếp hàng Promise theo canonical repo trước khóa file; chờ khóa file bằng timer tối đa khoảng 2s, Git prepare/prune bất đồng bộ. Không giữ khóa repo xuyên CLI/spawn. prepareWorktree/pruneWorktrees/lockRepository trả Promise, caller phải await.
+- Pool giữ chỗ đồng bộ tổng/per-agent trước await claim, chỉ xin agent còn chỗ; không giữ hàng đợi chờ slot cho run đã claim. Wake/poll/finally dùng chung một vòng lấp chỗ, lỗi claim trả reservation và backoff; close không tạo timer mới dù claim reject muộn. Mọi run trả chỗ trong finally. Child/cancel/timeout/timer thuộc từng run; stop xóa timer timeout/cancel ngay, exit xóa timer và chờ pipe tối đa 5s, không taskkill PID đã exit.
+- Cwd thường cũng có khóa mkdir ngoài cwd trong task-state/locks, retention dùng cùng khóa. Khóa lấy trước exchange, nhả finally sau finalize và trước POST result; task thường chờ khóa tối đa khoảng 2s bằng timer, worktree trùng khóa vẫn fail ngay. Không dọn exchange của bên giữ khóa hoặc khi cwd chưa xác định; lỗi unlock chỉ log và vẫn nộp kết quả. Không tự phá khóa cũ. Log append đồng bộ; output runs/run-ID.out tạo wx, không ghi đè run khác.
 - Hủy/timeout/lỗi/không xác minh run state: chỉ dọn exchange, không commit/session/attachments. Verify worktree trước đọc outbox; hậu kiểm thất bại bỏ cả attachment đã đọc. Output Codex phải lstat/fstat/realpath/nlink=1 trước đọc/xóa.
 - Inbox/outbox theo run, tên inbox có message_id và attachment_id. Chỉ outbox file cấp 1, chặn symlink/junction/hardlink, 10 tệp/2 MiB. b64_lines CRLF/76, validate tuyến tính một lần, mảng bất biến WeakSet nội bộ; không cờ JSON bypass, không wrap attachment lần nữa. D1 chỉ lưu metadata outbox.
-- Prune worktree chỉ sạch, đúng nhánh, không khóa, nhánh merged vào HEAD nguồn, không force. Task cwd retention chỉ terminal xác nhận đủ 7 ngày, đúng path và không link; không chắc giữ lại.
+- Prune worktree chỉ sạch, đúng nhánh, không khóa, nhánh merged vào HEAD nguồn, không force. Task cwd retention mỗi lượt xét <=1 ứng viên quá 7 ngày, dừng khi pool bận và không gọi API lúc bận. Lookup trước khóa, kiểm lại marker sau khóa; chỉ xóa terminal xác nhận đủ 7 ngày, đúng path và không link; không chắc giữ lại.
 
 ## Bất biến Task/Run/Event
 

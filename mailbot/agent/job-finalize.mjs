@@ -18,7 +18,7 @@ export function finalizeFiles({ result, outbox, worktree, dir, job, domain, unlo
     if (outbox) read(outbox, { discard: true });
     gitReport = `\n\n[Git lỗi] ${e.message}\nNhánh: ${worktree?.branch || ''}\nWorktree: ${worktree?.path || dir}`;
   } finally {
-    try { cleanup(dir, job.id); } catch (e) { files.notes.push(`Không dọn inbox: ${e.message}`); }
+    try { if (dir) cleanup(dir, job.id); } catch (e) { files.notes.push(`Không dọn inbox: ${e.message}`); }
     unlock?.();
   }
   return { ...files, gitReport };

@@ -4,7 +4,8 @@ import { mkdtempSync,rmSync,writeFileSync,readFileSync,existsSync,mkdirSync,syml
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildRunPrompt } from '../run-prompt.mjs';
-import { prepareTaskDirectory,lockTaskDirectory,recordTaskUse,pruneTaskDirectories } from '../task-files.mjs';
+import { prepareTaskDirectory,lockTaskDirectory,waitForTaskDirectoryLock,recordTaskUse,pruneTaskDirectories } from '../task-files.mjs';
+import { createJobExecutor, createJobHandler } from '../job-handler.mjs';
 import { prepareOutbox } from '../outbox.mjs';
 import { saveInboxAttachment } from '../inbox.mjs';
 import { finalizeFiles } from '../job-finalize.mjs';
@@ -20,11 +21,11 @@ test('same cwd is locked, unrelated tasks proceed, and retention shares the task
     const releaseOther=lockTaskDirectory(root,'claude',2);releaseOther();
     let lookedUp=false;
     assert.deepEqual(await pruneTaskDirectories(root,async()=>{lookedUp=true;return null;},{now:Date.now()+8*86400000}),[]);
-    assert.equal(lookedUp,false);assert.ok(existsSync(dir));
+    assert.equal(lookedUp,true);assert.ok(existsSync(dir));
   } finally {unlock();}
   const lookup=Promise.withResolvers();
   const pruning=pruneTaskDirectories(root,()=>lookup.promise,{now:Date.now()+8*86400000});
-  assert.throws(()=>lockTaskDirectory(root,'claude',1),/đang khóa/);
+  lockTaskDirectory(root,'claude',1)(); // lookup must not hold the lock
   lookup.resolve(null);await pruning;
   lockTaskDirectory(root,'claude',1)();
 });
@@ -87,7 +88,7 @@ test('task cwd rejects junction/symlink parent',t=>{
   assert.throws(()=>prepareTaskDirectory(root,'claude',1));assert.ok(existsSync(outside));
 });
 
-for (const blocker of ['recent', 'active', 'missing']) test(`E5 retention scans past first ${blocker} marker and removes at most limit`, async t => {
+for (const blocker of ['recent', 'active', 'missing']) test(`P3.1 retention examines at most one old candidate after ${blocker} marker`, async t => {
   const root = fixture(t), now = Date.now() + 8 * 86400000;
   for (const id of [1, 2, 3]) {
     prepareTaskDirectory(root, 'claude', id);
@@ -95,9 +96,106 @@ for (const blocker of ['recent', 'active', 'missing']) test(`E5 retention scans 
   }
   if (blocker === 'recent') writeFileSync(join(root, 'task-state', 'claude-task-1.json'), JSON.stringify({ agent: 'claude', id: 1, last_used: now }));
   const terminal = { status: 'done', finished_at: new Date(now - 8 * 86400000).toISOString() };
-  const lookup = async id => id !== 1 ? terminal : blocker === 'missing' ? null : { status: 'active' };
-  assert.deepEqual(await pruneTaskDirectories(root, lookup, { now, limit: 1 }), [2]);
+  const lookedUp = [];
+  const lookup = async id => { lookedUp.push(id); return id !== 1 ? terminal : blocker === 'missing' ? null : { status: 'active' }; };
+  assert.deepEqual(await pruneTaskDirectories(root, lookup, { now, limit: 1 }), blocker === 'recent' ? [2] : []);
+  assert.deepEqual(lookedUp, [blocker === 'recent' ? 2 : 1]);
   assert.ok(existsSync(join(root, 'claude', 'task-1')));
   assert.ok(existsSync(join(root, 'claude', 'task-3')));
-  assert.deepEqual(await pruneTaskDirectories(root, lookup, { now, limit: 1 }), [3]);
+  if (blocker === 'recent') assert.deepEqual(await pruneTaskDirectories(root, lookup, { now, limit: 1 }), [3]);
+});
+
+test('P3.1 busy pool skips lookup, and becoming busy during lookup stops pruning', async t => {
+  const root=fixture(t),now=Date.now()+8*86400000;
+  for(const id of [1,2]) {prepareTaskDirectory(root,'claude',id);recordTaskUse(root,{agent:'claude',task_id:id});}
+  let idle=false,calls=0;
+  const lookup=async()=>{calls++;idle=false;return {status:'done',finished_at:new Date(now-8*86400000).toISOString()};};
+  assert.deepEqual(await pruneTaskDirectories(root,lookup,{now,isIdle:()=>idle}),[]);
+  assert.equal(calls,0);
+  idle=true;
+  assert.deepEqual(await pruneTaskDirectories(root,lookup,{now,isIdle:()=>idle}),[]);
+  assert.equal(calls,1);
+  for(const id of [1,2]) assert.ok(existsSync(join(root,'claude',`task-${id}`)));
+});
+
+test('P3.1 reopened task refreshes marker during unlocked lookup and survives retention', async t => {
+  const root=fixture(t),dir=prepareTaskDirectory(root,'claude',1),now=Date.now();
+  const marker=join(root,'task-state','claude-task-1.json');
+  recordTaskUse(root,{agent:'claude',task_id:1});
+  writeFileSync(marker,JSON.stringify({agent:'claude',id:1,last_used:now-8*86400000}));
+  const lookup=async()=>{
+    const unlock=lockTaskDirectory(root,'claude',1);
+    try {recordTaskUse(root,{agent:'claude',task_id:1});} finally {unlock();}
+    return {status:'done',finished_at:new Date(now-8*86400000).toISOString()};
+  };
+  assert.deepEqual(await pruneTaskDirectories(root,lookup,{now}),[]);
+  assert.ok(existsSync(dir));assert.ok(existsSync(marker));
+});
+
+test('P3.1 run waits for a short retention lock, submits success; persistent lock has bounded retries', async t => {
+  const root=fixture(t),job={id:1,task_id:1,agent:'claude'},posted=[];
+  const release=lockTaskDirectory(root,'claude',1);
+  let turns=0;
+  const handle=createJobHandler({
+    acquire:()=>waitForTaskDirectoryLock(root,'claude',1,{attempts:3,wait:async()=>{await new Promise(setImmediate);turns++;release();}}),
+    execute:async()=>({ok:true,output:'done'}),postResult:async(_job,body)=>{posted.push(body);return {};},
+  });
+  await handle(job);assert.equal(turns,1);assert.equal(posted[0].ok,true);
+  const held=lockTaskDirectory(root,'claude',1);
+  try {
+    let waits=0;
+    await assert.rejects(waitForTaskDirectoryLock(root,'claude',1,{attempts:3,wait:async()=>{waits++;}}),/đang khóa/);
+    assert.equal(waits,2);
+  } finally {held();}
+});
+
+test('P3.2 unknown cwd after failed project preparation never cleans another task inbox', async t => {
+  const root=fixture(t),dir=prepareTaskDirectory(root,'claude',1);
+  const saved=saveInboxAttachment(dir,1,1,{filename:'keep.txt',content_b64:'YQ=='});
+  let cleaned=false;
+  const result={ok:false,output:'prepareWorktree failed'};
+  const files=finalizeFiles({result,dir:undefined,job:{id:1,project:'demo'},executed:false},
+    {cleanup:()=>{cleaned=true;}});
+  assert.equal(cleaned,false);assert.deepEqual(files.attachments,[]);
+  assert.equal(readFileSync(saved,'utf8'),'a');
+  const unexpected=()=>assert.fail('preparation failed: must not launch CLI or touch exchange');
+  const execute=createJobExecutor({workdir:root,projects:{},domain:'example.com',
+    getState:async()=>({status:'running'}),saveAttachments:unexpected,commandFor:unexpected,run:unexpected,saveOutput:unexpected});
+  const body=await execute({id:1,task_id:1,agent:'claude',project:'missing'});
+  assert.equal(body.ok,false);assert.match(body.output,/Project chưa được cấu hình/);
+  assert.equal(body.session_id,null);assert.deepEqual(body.attachments,[]);
+  assert.equal(readFileSync(saved,'utf8'),'a');
+});
+
+for(const failing of [false,true]) test(`P3.3 unlock error only logs and result is submitted (execute fails=${failing})`, async()=>{
+  const events=[],body={ok:true,output:'done',session_id:'s'};
+  const handle=createJobHandler({
+    acquire:()=>()=>{events.push('unlock');throw new Error('EPERM');},
+    execute:async()=>{if(failing)throw new Error('finalize failed');return body;},
+    postResult:async(job,result)=>{events.push(['post',job.id,result]);return {};},log:s=>events.push(s),
+  });
+  await handle({id:7});
+  assert.equal(events[0],'unlock');assert.match(events[1],/unlock run #7: EPERM/);
+  assert.equal(events[2][0],'post');assert.equal(events[2][1],7);
+  assert.equal(events[2][2].ok,!failing);
+  if(!failing)assert.equal(events[2][2],body);
+});
+
+for(const cancelled of [false,true]) test(`executor integration preserves output and finalizes only a live successful run (cancelled=${cancelled})`,async t=>{
+  const root=fixture(t),job={id:10,task_id:1,agent:'claude',subject:'work',events:[]};
+  let inbox,outputSaved=false;
+  const execute=createJobExecutor({workdir:root,projects:{},domain:'example.com',
+    saveAttachments:async(job,dir)=>{inbox=saveInboxAttachment(dir,job.id,1,{filename:'in.txt',content_b64:'YQ=='});return [inbox];},
+    commandFor:async(_job,dir,prompt)=>{
+      assert.ok(prompt.includes(dir));
+      return {parse:()=>({ok:true,output:'finished',session_id:'safe-session'})};
+    },
+    run:async(_spec,dir)=>{writeFileSync(join(dir,'outbox','run-10','result.txt'),'result');return {code:0,out:'raw',err:'',cancelled:false,timedOut:false};},
+    saveOutput:()=>{outputSaved=true;},getState:async()=>({status:cancelled?'cancelled':'running'}),
+  });
+  const body=await execute(job);
+  assert.equal(outputSaved,true);assert.equal(body.ok,!cancelled);assert.equal(body.output,'finished');
+  assert.equal(body.session_id,cancelled?null:'safe-session');assert.equal(body.cancelled,cancelled);
+  assert.equal(body.attachments.length,cancelled?0:1);
+  assert.equal(existsSync(inbox),false);assert.equal(existsSync(join(root,'claude','task-1','outbox','run-10')),false);
 });

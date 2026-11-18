@@ -8,14 +8,12 @@ export function inspectCli(cmd, args, cwd) {
   }, (error, stdout) => error ? reject(new Error('Không kiểm tra được MCP CLI; không chạy job')) : resolve(stdout)));
 }
 
-export function codexInventoryCache(inspect = inspectCli, now = Date.now) {
-  const cache = new Map(), flights = new Map();
+export function codexInventoryCache(inspect = inspectCli) {
+  const flights = new Map();
   return (entry, cwd) => {
-    // cwd matters: project-local MCP settings must not reuse another task's
-    // verification. Each successful entry expires; rejected checks never cache.
+    // Only overlapping checks share work. A writable cwd can gain project-local
+    // servers during a run, so every subsequent run must inspect it again.
     const key = JSON.stringify([entry, cwd]);
-    for (const [k, value] of cache) if (now() - value.at >= 600000) cache.delete(k);
-    if (cache.has(key)) return Promise.resolve(cache.get(key).servers);
     if (flights.has(key)) return flights.get(key);
     const flight = Promise.resolve().then(async () => {
       let servers;
@@ -27,7 +25,6 @@ export function codexInventoryCache(inspect = inspectCli, now = Date.now) {
       catch { throw new Error('Không xác minh được Codex MCP isolation; không chạy job'); }
       verifyCodexDisabled(disabled);
       const safe = Object.freeze(servers.map(({ name, enabled }) => Object.freeze({ name, enabled })));
-      cache.set(key, { at: now(), servers: safe });
       return safe;
     }).finally(() => flights.delete(key));
     flights.set(key, flight);
