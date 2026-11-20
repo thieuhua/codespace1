@@ -1,13 +1,14 @@
+// Modified by phonectl: socket streams and complete-packet video queue (Apache-2.0).
 package com.genymobile.scrcpy.device;
 
 import com.genymobile.scrcpy.audio.AudioCodec;
 import com.genymobile.scrcpy.model.Codec;
-import com.genymobile.scrcpy.util.IO;
+import com.genymobile.scrcpy.video.VideoSender;
 
 import android.media.MediaCodec;
 
-import java.io.FileDescriptor;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -18,15 +19,16 @@ public final class Streamer {
     private static final long PACKET_FLAG_CONFIG = 1L << 62;
     private static final long PACKET_FLAG_KEY_FRAME = 1L << 61;
 
-    private final FileDescriptor fd;
+    private final OutputStream output;
+    private VideoSender videoSender;
     private final Codec codec;
     private final boolean sendStreamMeta;
     private final boolean sendFrameMeta;
 
     private final ByteBuffer headerBuffer = ByteBuffer.allocate(12);
 
-    public Streamer(FileDescriptor fd, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
-        this.fd = fd;
+    public Streamer(OutputStream output, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
+        this.output = output;
         this.codec = codec;
         this.sendStreamMeta = sendCodecMeta;
         this.sendFrameMeta = sendFrameMeta;
@@ -36,12 +38,39 @@ public final class Streamer {
         return codec;
     }
 
+    public void setVideoSender(VideoSender sender) {
+        videoSender = sender;
+    }
+
+    public OutputStream getOutput() {
+        return output;
+    }
+
+    private void writeBuffer(ByteBuffer buffer) throws IOException {
+        if (videoSender != null) {
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            videoSender.offer(bytes, true, false);
+        } else if (buffer.hasArray()) {
+            int count = buffer.remaining();
+            output.write(buffer.array(), buffer.arrayOffset() + buffer.position(), count);
+            buffer.position(buffer.limit());
+        } else {
+            byte[] bytes = new byte[Math.min(65536, buffer.remaining())];
+            while (buffer.hasRemaining()) {
+                int count = Math.min(bytes.length, buffer.remaining());
+                buffer.get(bytes, 0, count);
+                output.write(bytes, 0, count);
+            }
+        }
+    }
+
     public void writeAudioHeader() throws IOException {
         if (sendStreamMeta) {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             buffer.putInt(codec.getId());
             buffer.flip();
-            IO.writeFully(fd, buffer);
+            writeBuffer(buffer);
         }
     }
 
@@ -50,7 +79,7 @@ public final class Streamer {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             buffer.putInt(codec.getId());
             buffer.flip();
-            IO.writeFully(fd, buffer);
+            writeBuffer(buffer);
         }
     }
 
@@ -62,7 +91,7 @@ public final class Streamer {
         if (error) {
             code[3] = 1;
         }
-        IO.writeFully(fd, code, 0, code.length);
+        writeBuffer(ByteBuffer.wrap(code));
     }
 
     public void writePacket(ByteBuffer buffer, long pts, boolean config, boolean keyFrame) throws IOException {
@@ -74,11 +103,23 @@ public final class Streamer {
             }
         }
 
+        if (videoSender != null) {
+            ByteBuffer packet = ByteBuffer.allocate((sendFrameMeta ? 12 : 0) + buffer.remaining());
+            if (sendFrameMeta) {
+                writeFrameMeta(packet, buffer.remaining(), pts, config, keyFrame);
+            }
+            packet.put(buffer);
+            videoSender.offer(packet.array(), config, keyFrame);
+            return;
+        }
         if (sendFrameMeta) {
-            writeFrameMeta(fd, buffer.remaining(), pts, config, keyFrame);
+            headerBuffer.clear();
+            writeFrameMeta(headerBuffer, buffer.remaining(), pts, config, keyFrame);
+            headerBuffer.flip();
+            writeBuffer(headerBuffer);
         }
 
-        IO.writeFully(fd, buffer);
+        writeBuffer(buffer);
     }
 
     public void writePacket(ByteBuffer codecBuffer, MediaCodec.BufferInfo bufferInfo) throws IOException {
@@ -100,13 +141,11 @@ public final class Streamer {
             headerBuffer.putInt(width);
             headerBuffer.putInt(height);
             headerBuffer.flip();
-            IO.writeFully(fd, headerBuffer);
+            writeBuffer(headerBuffer);
         }
     }
 
-    private void writeFrameMeta(FileDescriptor fd, int packetSize, long pts, boolean config, boolean keyFrame) throws IOException {
-        headerBuffer.clear();
-
+    private static void writeFrameMeta(ByteBuffer header, int packetSize, long pts, boolean config, boolean keyFrame) {
         long ptsAndFlags;
         if (config) {
             ptsAndFlags = PACKET_FLAG_CONFIG; // non-media data packet
@@ -117,10 +156,8 @@ public final class Streamer {
             }
         }
 
-        headerBuffer.putLong(ptsAndFlags);
-        headerBuffer.putInt(packetSize);
-        headerBuffer.flip();
-        IO.writeFully(fd, headerBuffer);
+        header.putLong(ptsAndFlags);
+        header.putInt(packetSize);
     }
 
     private static void fixOpusConfigPacket(ByteBuffer buffer) throws IOException {
