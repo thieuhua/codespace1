@@ -1,0 +1,242 @@
+// Modified by phonectl: socket streams and complete-packet video queue (Apache-2.0).
+package com.genymobile.scrcpy.device;
+
+import com.genymobile.scrcpy.audio.AudioCodec;
+import com.genymobile.scrcpy.model.Codec;
+import com.genymobile.scrcpy.video.VideoSender;
+
+import android.media.MediaCodec;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Arrays;
+
+public final class Streamer {
+
+    private static final long PACKET_FLAG_SESSION = 1L << 63;
+    private static final long PACKET_FLAG_CONFIG = 1L << 62;
+    private static final long PACKET_FLAG_KEY_FRAME = 1L << 61;
+
+    private final OutputStream output;
+    private VideoSender videoSender;
+    private final Codec codec;
+    private final boolean sendStreamMeta;
+    private final boolean sendFrameMeta;
+
+    private final ByteBuffer headerBuffer = ByteBuffer.allocate(12);
+
+    public Streamer(OutputStream output, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
+        this.output = output;
+        this.codec = codec;
+        this.sendStreamMeta = sendCodecMeta;
+        this.sendFrameMeta = sendFrameMeta;
+    }
+
+    public Codec getCodec() {
+        return codec;
+    }
+
+    public void setVideoSender(VideoSender sender) {
+        videoSender = sender;
+    }
+
+    public OutputStream getOutput() {
+        return output;
+    }
+
+    private void writeBuffer(ByteBuffer buffer) throws IOException {
+        if (videoSender != null) {
+            byte[] bytes = new byte[buffer.remaining()];
+            buffer.get(bytes);
+            videoSender.offer(bytes, true, false);
+        } else if (buffer.hasArray()) {
+            int count = buffer.remaining();
+            output.write(buffer.array(), buffer.arrayOffset() + buffer.position(), count);
+            buffer.position(buffer.limit());
+        } else {
+            byte[] bytes = new byte[Math.min(65536, buffer.remaining())];
+            while (buffer.hasRemaining()) {
+                int count = Math.min(bytes.length, buffer.remaining());
+                buffer.get(bytes, 0, count);
+                output.write(bytes, 0, count);
+            }
+        }
+    }
+
+    public void writeAudioHeader() throws IOException {
+        if (sendStreamMeta) {
+            ByteBuffer buffer = ByteBuffer.allocate(4);
+            buffer.putInt(codec.getId());
+            buffer.flip();
+            writeBuffer(buffer);
+        }
+    }
+
+    public void writeVideoHeader() throws IOException {
+        if (sendStreamMeta) {
+            ByteBuffer buffer = ByteBuffer.allocate(4);
+            buffer.putInt(codec.getId());
+            buffer.flip();
+            writeBuffer(buffer);
+        }
+    }
+
+    public void writeDisableStream(boolean error) throws IOException {
+        // Writing a specific code as codec-id means that the device disables the stream
+        //   code 0: it explicitly disables the stream (because it could not capture audio), scrcpy should continue mirroring video only
+        //   code 1: a configuration error occurred, scrcpy must be stopped
+        byte[] code = new byte[4];
+        if (error) {
+            code[3] = 1;
+        }
+        writeBuffer(ByteBuffer.wrap(code));
+    }
+
+    public void writePacket(ByteBuffer buffer, long pts, boolean config, boolean keyFrame) throws IOException {
+        if (config) {
+            if (codec == AudioCodec.OPUS) {
+                fixOpusConfigPacket(buffer);
+            } else if (codec == AudioCodec.FLAC) {
+                fixFlacConfigPacket(buffer);
+            }
+        }
+
+        if (videoSender != null) {
+            ByteBuffer packet = ByteBuffer.allocate((sendFrameMeta ? 12 : 0) + buffer.remaining());
+            if (sendFrameMeta) {
+                writeFrameMeta(packet, buffer.remaining(), pts, config, keyFrame);
+            }
+            packet.put(buffer);
+            videoSender.offer(packet.array(), config, keyFrame);
+            return;
+        }
+        if (sendFrameMeta) {
+            headerBuffer.clear();
+            writeFrameMeta(headerBuffer, buffer.remaining(), pts, config, keyFrame);
+            headerBuffer.flip();
+            writeBuffer(headerBuffer);
+        }
+
+        writeBuffer(buffer);
+    }
+
+    public void writePacket(ByteBuffer codecBuffer, MediaCodec.BufferInfo bufferInfo) throws IOException {
+        long pts = bufferInfo.presentationTimeUs;
+        boolean config = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+        boolean keyFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+        writePacket(codecBuffer, pts, config, keyFrame);
+    }
+
+    public void writeSessionMeta(int width, int height, boolean isClientResize) throws IOException {
+        if (sendStreamMeta) {
+            headerBuffer.clear();
+
+            int flags = (int) (PACKET_FLAG_SESSION >> 32); // set the first bit to 1
+            if (isClientResize) {
+                flags |= 1;
+            }
+            headerBuffer.putInt(flags);
+            headerBuffer.putInt(width);
+            headerBuffer.putInt(height);
+            headerBuffer.flip();
+            writeBuffer(headerBuffer);
+        }
+    }
+
+    private static void writeFrameMeta(ByteBuffer header, int packetSize, long pts, boolean config, boolean keyFrame) {
+        long ptsAndFlags;
+        if (config) {
+            ptsAndFlags = PACKET_FLAG_CONFIG; // non-media data packet
+        } else {
+            ptsAndFlags = pts;
+            if (keyFrame) {
+                ptsAndFlags |= PACKET_FLAG_KEY_FRAME;
+            }
+        }
+
+        header.putLong(ptsAndFlags);
+        header.putInt(packetSize);
+    }
+
+    private static void fixOpusConfigPacket(ByteBuffer buffer) throws IOException {
+        // Here is an example of the config packet received for an OPUS stream:
+        //
+        // 00000000  41 4f 50 55 53 48 44 52  13 00 00 00 00 00 00 00  |AOPUSHDR........|
+        // -------------- BELOW IS THE PART WE MUST PUT AS EXTRADATA  -------------------
+        // 00000010  4f 70 75 73 48 65 61 64  01 01 38 01 80 bb 00 00  |OpusHead..8.....|
+        // 00000020  00 00 00                                          |...             |
+        // ------------------------------------------------------------------------------
+        // 00000020           41 4f 50 55 53  44 4c 59 08 00 00 00 00  |   AOPUSDLY.....|
+        // 00000030  00 00 00 a0 2e 63 00 00  00 00 00 41 4f 50 55 53  |.....c.....AOPUS|
+        // 00000040  50 52 4c 08 00 00 00 00  00 00 00 00 b4 c4 04 00  |PRL.............|
+        // 00000050  00 00 00                                          |...|
+        //
+        // Each "section" is prefixed by a 64-bit ID and a 64-bit length.
+        //
+        // <https://developer.android.com/reference/android/media/MediaCodec#CSD>
+
+        if (buffer.remaining() < 16) {
+            throw new IOException("Not enough data in OPUS config packet");
+        }
+
+        final byte[] opusHeaderId = {'A', 'O', 'P', 'U', 'S', 'H', 'D', 'R'};
+        byte[] idBuffer = new byte[8];
+        buffer.get(idBuffer);
+        if (!Arrays.equals(idBuffer, opusHeaderId)) {
+            throw new IOException("OPUS header not found");
+        }
+
+        // The size is in native byte-order
+        long sizeLong = buffer.getLong();
+        if (sizeLong < 0 || sizeLong >= 0x7FFFFFFF) {
+            throw new IOException("Invalid block size in OPUS header: " + sizeLong);
+        }
+
+        int size = (int) sizeLong;
+        if (buffer.remaining() < size) {
+            throw new IOException("Not enough data in OPUS header (invalid size: " + size + ")");
+        }
+
+        // Set the buffer to point to the OPUS header slice
+        buffer.limit(buffer.position() + size);
+    }
+
+    private static void fixFlacConfigPacket(ByteBuffer buffer) throws IOException {
+        // 00000000  66 4c 61 43 00 00 00 22                           |fLaC..."        |
+        // -------------- BELOW IS THE PART WE MUST PUT AS EXTRADATA  -------------------
+        // 00000000                           10 00 10 00 00 00 00 00  |        ........|
+        // 00000010  00 00 0b b8 02 f0 00 00  00 00 00 00 00 00 00 00  |................|
+        // 00000020  00 00 00 00 00 00 00 00  00 00                    |..........      |
+        // ------------------------------------------------------------------------------
+        // 00000020                                 84 00 00 28 20 00  |          ...( .|
+        // 00000030  00 00 72 65 66 65 72 65  6e 63 65 20 6c 69 62 46  |..reference libF|
+        // 00000040  4c 41 43 20 31 2e 33 2e  32 20 32 30 32 32 31 30  |LAC 1.3.2 202210|
+        // 00000050  32 32 00 00 00 00                                 |22....|
+        //
+        // <https://developer.android.com/reference/android/media/MediaCodec#CSD>
+
+        if (buffer.remaining() < 8) {
+            throw new IOException("Not enough data in FLAC config packet");
+        }
+
+        final byte[] flacHeaderId = {'f', 'L', 'a', 'C'};
+        byte[] idBuffer = new byte[4];
+        buffer.get(idBuffer);
+        if (!Arrays.equals(idBuffer, flacHeaderId)) {
+            throw new IOException("FLAC header not found");
+        }
+
+        // The size is in big-endian
+        buffer.order(ByteOrder.BIG_ENDIAN);
+
+        int size = buffer.getInt();
+        if (buffer.remaining() < size) {
+            throw new IOException("Not enough data in FLAC header (invalid size: " + size + ")");
+        }
+
+        // Set the buffer to point to the FLAC header slice
+        buffer.limit(buffer.position() + size);
+    }
+}

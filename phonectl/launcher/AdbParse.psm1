@@ -68,7 +68,67 @@ function Merge-PhoneCtlConfig {
             if ($argument -isnot [string]) { throw 'scrcpyArgs must contain only strings.' }
         }
     }
+    if (-not $merged.Contains('transport')) {
+        $merged['transport'] = 'lan'
+    } elseif ($merged['transport'] -isnot [string] -or $merged['transport'] -cnotin @('lan', 'adb')) {
+        throw 'Expected transport to be "lan" or "adb".'
+    }
     return [pscustomobject]$merged
+}
+
+function Get-PhoneCtlTransport {
+    [CmdletBinding()]
+    param($Config)
+    $validated = Merge-PhoneCtlConfig -Config $Config
+    return $validated.transport
+}
+
+function ConvertFrom-AdbWlanAddress {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+
+    foreach ($line in ($Text -split '\r?\n')) {
+        if ($line -notmatch '^\s*inet\s+(?<ip>\d{1,3}(?:\.\d{1,3}){3})(?:/\d+)?(?:\s|$)') { continue }
+        $parsed = $null
+        if ([System.Net.IPAddress]::TryParse($Matches.ip, [ref]$parsed) -and
+            $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+            -not [System.Net.IPAddress]::IsLoopback($parsed) -and
+            $parsed.ToString() -ne '0.0.0.0') {
+            return $parsed.ToString()
+        }
+    }
+    return $null
+}
+
+function ConvertFrom-ScrcpyVersion {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+
+    foreach ($line in ($Text -split '\r?\n')) {
+        if ($line -match '^\s*scrcpy\s+v?(?<version>\S+)(?:\s|$)') {
+            return $Matches.version
+        }
+    }
+    return $null
+}
+
+function Test-ScrcpyForkCompatible {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text, [string]$RequiredVersion = '5.0.1')
+
+    return ((ConvertFrom-ScrcpyVersion $Text) -ceq $RequiredVersion)
+}
+
+function ConvertFrom-RelayReadyLine {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Line)
+
+    if ($Line -notmatch '^\s*READY\s+(?<port>\d+)\s*$') { return $null }
+    $port = 0
+    if ([int]::TryParse($Matches.port, [ref]$port) -and $port -ge 1 -and $port -le 65535) {
+        return $port
+    }
+    return $null
 }
 
 function Merge-PhoneCtlScrcpyArgs {
@@ -122,4 +182,4 @@ function ConvertTo-WindowsCommandLineArgument {
     return '"' + $escaped + '"'
 }
 
-Export-ModuleMember -Function ConvertFrom-AdbDevices, ConvertFrom-AdbMdnsServices, Select-AdbMdnsCandidates, Get-UniqueAdbPhones, Test-AdbServerPushRequired, ConvertTo-WindowsCommandLineArgument, Test-AdbEndpoint, Merge-PhoneCtlConfig, Merge-PhoneCtlScrcpyArgs
+Export-ModuleMember -Function ConvertFrom-AdbDevices, ConvertFrom-AdbMdnsServices, Select-AdbMdnsCandidates, Get-UniqueAdbPhones, Test-AdbServerPushRequired, ConvertTo-WindowsCommandLineArgument, Test-AdbEndpoint, Merge-PhoneCtlConfig, Merge-PhoneCtlScrcpyArgs, Get-PhoneCtlTransport, ConvertFrom-AdbWlanAddress, ConvertFrom-ScrcpyVersion, Test-ScrcpyForkCompatible, ConvertFrom-RelayReadyLine

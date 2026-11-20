@@ -31,19 +31,34 @@ Lựa chọn sai định dạng làm launcher thoát. Sửa/xóa config để ch
 được báo lỗi, không tự ghi đè. Config có thể chỉ chứa `scrcpyArgs` khi chưa chọn máy;
 lưu serial giữ các trường khác. Installer xử lý pairing và lưu serial trước.
 
-Config nhận mảng chuỗi `scrcpyArgs` tùy chọn, ví dụ:
+Config nhận `"transport"` (`"lan"` mặc định hoặc `"adb"`) và mảng chuỗi `scrcpyArgs` tùy chọn, ví dụ:
 
 ```json
-{ "serial": "PHONE123", "scrcpyArgs": ["--no-audio", "--max-size", "1280"] }
+{ "serial": "PHONE123", "transport": "lan", "scrcpyArgs": ["--no-audio", "--max-size", "1280"] }
 ```
 
 Tham số được ghép theo thứ tự: mặc định → config → `-ScrcpyArgs`. Không có config
-thì không thêm tùy chọn. `--window-title` mặc định lấy từ `getprop ro.product.model`,
-dùng serial nếu không đọc được; có thể ghi đè bằng tùy chọn scrcpy của bạn.
+thì `"transport"` mặc định là `"lan"` và không thêm tùy chọn scrcpy. `--window-title`
+mặc định lấy từ `getprop ro.product.model`, dùng serial nếu không đọc được; có thể
+ghi đè bằng tùy chọn scrcpy của bạn.
 
-Chạy `scrcpy -s <id> -S -w --window-title <model>` kèm các tùy chọn: tắt màn hình điện thoại và giữ thức.
-Thoát mã 0 thì đóng launcher; mã khác hoặc chưa tìm được máy thì thử lại sau
-2, 4, 8, 16, 30 giây (tối đa 30). Ctrl+C dừng và thu hồi process do launcher giữ.
+Khi `"transport": "lan"` (mặc định), launcher chỉ dùng server fork nếu có
+`server/build/scrcpy-server` và `scrcpy --version` báo đúng `5.0.1`; nếu thiếu file
+hoặc lệch phiên bản thì in cảnh báo và tự lùi về server gốc qua ADB (`"adb"`).
+Trong phiên LAN (theo [../server/DESIGN.md](../server/DESIGN.md)):
+1. Đọc IPv4 Wi-Fi của điện thoại (`adb shell ip -4 addr show wlan0`) và tìm IP nguồn
+   của laptop bằng cách `Connect` một socket UDP tới IP điện thoại.
+2. Khởi động `relay/build/phonectl-relay.exe` (qua stdin và biến môi trường, không truyền
+   argv) với IP điện thoại, cổng ngẫu nhiên `P` (20000–60999) và đường dẫn file phiên tạm;
+   đợi dòng `READY <R>`.
+3. `adb push` file phiên lên `/data/local/tmp/phonectl-session`, `chmod 600`, rồi xóa
+   ngay bản tạm trên laptop.
+4. Đặt `SCRCPY_SERVER_PATH` trỏ tới `server/build/scrcpy-server` và chạy
+   `scrcpy -s <id> -S -w --window-title <model> --force-adb-forward --tunnel-host=127.0.0.1 --tunnel-port=<R>`
+   kèm `scrcpyArgs`.
+5. Nếu `scrcpy` thoát hoặc `phonectl-relay.exe` chết, launcher dừng cả hai; `scrcpy`
+   thoát mã 0 thì đóng launcher, mã khác hoặc lỗi phiên thì thử lại sau
+   2, 4, 8, 16, 30 giây (tối đa 30). Ctrl+C dừng và thu hồi process do launcher giữ.
 Lệnh ADB có timeout, riêng getprop 3 giây mỗi địa chỉ nên vòng dò có thể vượt 10 giây.
 
 Named mutex giữ một launcher cho mỗi user trong phiên Windows. Lần mở thứ hai in

@@ -601,6 +601,8 @@ $installMocks = {
         param($LiteralPath, $PathType)
         if ($LiteralPath.EndsWith('adb.exe')) { return $state.Vendor }
         if ($LiteralPath.EndsWith('.apk')) { return $state.Apk }
+        if ($LiteralPath.EndsWith('phonectl-relay.exe')) { return $state.Relay }
+        if ($LiteralPath.EndsWith('scrcpy-server')) { return $state.Server }
         throw "Unexpected path: $LiteralPath"
     }
     function Resolve-LauncherExecutable { param($Candidates, $Name); if ($state.Scrcpy) { 'fake-scrcpy' } }
@@ -615,6 +617,8 @@ $installMocks = {
     function Invoke-InstallScript {
         param($ScriptPath, $Arguments)
         if ($ScriptPath.EndsWith('fetch-platform-tools.ps1')) { $state.Fetches++; $state.Vendor = $true; return }
+        if ($ScriptPath.EndsWith('relay\build.ps1')) { $state.RelayBuilds++; $state.Relay = $true; return }
+        if ($ScriptPath.EndsWith('server\build.ps1')) { $state.ServerBuilds++; $state.Server = $true; return }
         Assert-True ($ScriptPath.EndsWith('setup-phone.ps1'))
         $state.Setups++
         $state.SetupId = $Arguments.Serial
@@ -630,7 +634,8 @@ $installMocks = {
 }
 function New-InstallTestState {
     @{
-        Vendor = $true; Apk = $true; Scrcpy = $true; Builds = 0; Fetches = 0
+        Vendor = $true; Apk = $true; Relay = $true; Server = $true; Scrcpy = $true
+        Builds = 0; RelayBuilds = 0; ServerBuilds = 0; Fetches = 0
         Pairs = 0; Setups = 0; Saves = 0; Shortcuts = 0; FailSetup = $false; SetupId = ''
         Phones = @([pscustomobject]@{ Id = 'auto:12345'; Serial = 'PHONE123' })
     }
@@ -643,6 +648,8 @@ Test-Case 'installer: rerun reuses ADB/APK/connection and refreshes setup and sh
     Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 0
     Assert-Equal $state.Fetches 0
     Assert-Equal $state.Builds 0
+    Assert-Equal $state.RelayBuilds 0
+    Assert-Equal $state.ServerBuilds 0
     Assert-Equal $state.Pairs 0
     Assert-Equal $state.Setups 2
     Assert-Equal $state.Saves 2
@@ -652,12 +659,14 @@ Test-Case 'installer: rerun reuses ADB/APK/connection and refreshes setup and sh
 
 Test-Case 'installer: missing vendor and APK fetch/build once; -Rebuild forces build' {
     $state = New-InstallTestState
-    $state.Vendor = $false; $state.Apk = $false
+    $state.Vendor = $false; $state.Apk = $false; $state.Relay = $false; $state.Server = $false
     . $installMocks
     Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 0
     Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot -Rebuild) 0
     Assert-Equal $state.Fetches 1
     Assert-Equal $state.Builds 2
+    Assert-Equal $state.RelayBuilds 2
+    Assert-Equal $state.ServerBuilds 2
 }
 
 Test-Case 'installer: no device triggers pairing then setup with connected transport id' {
@@ -723,18 +732,21 @@ Test-Case 'log: timestamps, append, native stderr and retention within one MiB' 
 }
 
 Test-Case 'mutex: second process prints already running and exits zero without ADB' {
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $mutex = New-Object Threading.Mutex($false, "Local\phonectl-$sid")
+    $previousMutex = $env:PHONECTL_MUTEX
+    $mutexName = 'Local\phonectl-test-' + [guid]::NewGuid().ToString('N')
+    $mutex = New-Object Threading.Mutex($false, $mutexName)
     $owned = $false
     try {
+        $env:PHONECTL_MUTEX = $mutexName
         try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
-        Assert-True $owned 'Another real phonectl launcher is running; close it before testing'
+        Assert-True $owned 'Failed to acquire isolated test mutex'
         $exe = Join-Path $PSHOME 'powershell.exe'
         $launcherPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'phonectl.ps1'
         $result = Invoke-LauncherProcess $exe @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $launcherPath) -CaptureOutput
         Assert-Equal $result.ExitCode 0
         Assert-True ($result.Output -match 'already running')
     } finally {
+        $env:PHONECTL_MUTEX = $previousMutex
         if ($owned) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
     }
@@ -743,6 +755,7 @@ Test-Case 'mutex: second process prints already running and exits zero without A
 Test-Case 'mutex: release on session exception allows a fresh launch; log appends' {
     $directory = Join-Path $PSScriptRoot ('.test-launch-' + [guid]::NewGuid().ToString('N'))
     $previousLocal = $env:LOCALAPPDATA
+    $previousMutex = $env:PHONECTL_MUTEX
     $state = @{ Calls = 0 }
     function Invoke-PhoneCtl {
         param($ProjectRoot, $Mode, $ScrcpyArgs)
@@ -752,6 +765,7 @@ Test-Case 'mutex: release on session exception allows a fresh launch; log append
     }
     try {
         $env:LOCALAPPDATA = $directory
+        $env:PHONECTL_MUTEX = 'Local\phonectl-test-' + [guid]::NewGuid().ToString('N')
         $message = ''
         try { $null = Invoke-PhoneCtlLauncher 'unused' 'scrcpy' @() } catch { $message = $_.Exception.Message }
         Assert-Equal $message 'mock session exception'
@@ -761,6 +775,7 @@ Test-Case 'mutex: release on session exception allows a fresh launch; log append
         Assert-Equal ([regex]::Matches($log, 'Launcher started\.').Count) 2
         Assert-True ($log -match 'ERROR: mock session exception')
     } finally {
+        $env:PHONECTL_MUTEX = $previousMutex
         $env:LOCALAPPDATA = $previousLocal
         if (Test-Path -LiteralPath $directory) {
             $logDirectory = Join-Path $directory 'phonectl'
@@ -821,6 +836,200 @@ Test-Case 'shortcuts: real WScript links use minimized cmd, icon and update in p
             if (Test-Path -LiteralPath $folder) { Remove-Item -LiteralPath $folder }
         }
         if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory }
+    }
+}
+
+Test-Case 'transport config: default lan, explicit lan/adb and invalid values rejected' {
+    Assert-Equal (Merge-PhoneCtlConfig $null).transport 'lan'
+    Assert-Equal (Get-PhoneCtlTransport $null) 'lan'
+    Assert-Equal (Get-PhoneCtlTransport ([pscustomobject]@{})) 'lan'
+    Assert-Equal (Get-PhoneCtlTransport ([pscustomobject]@{ transport = 'lan' })) 'lan'
+    Assert-Equal (Get-PhoneCtlTransport ([pscustomobject]@{ transport = 'adb' })) 'adb'
+    foreach ($bad in @('{"transport":"usb"}', '{"transport":"LAN"}', '{"transport":""}', '{"transport":1}', '{"transport":null}', '{"transport":[]}')) {
+        $state = @{ Content = $bad }
+        function Test-Path { param($LiteralPath); $true }
+        function Get-Content { param($LiteralPath, [switch]$Raw, $Encoding); $state.Content }
+        $message = ''
+        try { $null = Read-PhoneCtlConfig 'unused' } catch { $message = $_.Exception.Message }
+        Assert-True ($message -like 'Invalid config unused:*') "Bad transport was accepted: $bad"
+    }
+}
+
+Test-Case 'wlan0, scrcpy version, relay READY parsers and random port helper' {
+    $wlanText = Get-Content (Join-Path $fixtures 'wlan0.txt') -Raw
+    Assert-Equal (ConvertFrom-AdbWlanAddress $wlanText) '192.168.1.42'
+    Assert-Equal (ConvertFrom-AdbWlanAddress "    inet 10.20.30.40/16 scope global wlan0`r`n") '10.20.30.40'
+    Assert-Equal (ConvertFrom-AdbWlanAddress '    inet 127.0.0.1/8 scope host lo') $null
+    Assert-Equal (ConvertFrom-AdbWlanAddress '    inet 0.0.0.0/0 wlan0') $null
+    Assert-Equal (ConvertFrom-AdbWlanAddress '    inet 999.1.1.1/24 wlan0') $null
+    Assert-Equal (ConvertFrom-AdbWlanAddress '') $null
+
+    $versionText = Get-Content (Join-Path $fixtures 'scrcpy-version.txt') -Raw
+    Assert-Equal (ConvertFrom-ScrcpyVersion $versionText) '5.0.1'
+    Assert-True (Test-ScrcpyForkCompatible $versionText)
+    Assert-Equal (Test-ScrcpyForkCompatible 'scrcpy 3.1 <https://github.com/Genymobile/scrcpy>') $false
+    Assert-Equal (Test-ScrcpyForkCompatible 'scrcpy 5.0.10') $false
+    Assert-Equal (Test-ScrcpyForkCompatible 'scrcpy 5.0.1-dev') $false
+    Assert-Equal (Test-ScrcpyForkCompatible '') $false
+
+    Assert-Equal (ConvertFrom-RelayReadyLine 'READY 54321') 54321
+    Assert-Equal (ConvertFrom-RelayReadyLine "  READY 20000 `r`n") 20000
+    Assert-Equal (ConvertFrom-RelayReadyLine 'READY 0') $null
+    Assert-Equal (ConvertFrom-RelayReadyLine 'READY 65536') $null
+    Assert-Equal (ConvertFrom-RelayReadyLine 'FAILED 12345') $null
+    Assert-Equal (ConvertFrom-RelayReadyLine '') $null
+
+    for ($i = 0; $i -lt 20; $i++) {
+        $port = Get-RandomLanPort
+        Assert-True ($port -ge 20000 -and $port -le 60999) "Port out of range: $port"
+    }
+    Assert-Equal (Get-LaptopLanAddress '127.0.0.1') '127.0.0.1'
+    $threw = $false
+    try { $null = Get-LaptopLanAddress 'not-an-ip' } catch { $threw = $true }
+    Assert-True $threw
+}
+
+Test-Case 'LAN session flow: wlan0 IP, UDP peer, relay start/stop, session push+chmod+delete and SCRCPY_SERVER_PATH' {
+    $tempDir = Join-Path $PSScriptRoot ('.test-lan-' + [guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($tempDir)
+    $sessionFile = Join-Path $tempDir 'session-temp'
+    $previousServer = $env:SCRCPY_SERVER_PATH
+    $state = @{
+        AdbCalls = New-Object System.Collections.Generic.List[string]
+        ScrcpyCalls = New-Object System.Collections.Generic.List[string]
+        ServerEnvDuringScrcpy = ''
+        SessionExistedDuringPush = $false
+        SessionExistedDuringScrcpy = $true
+        RelayStarted = 0
+        Published = 0
+        RemoteCleaned = 0
+        RelayStopped = 0
+    }
+    try {
+        function Resolve-LauncherExecutable { param($Candidates, $Name); "resolved:$Name" }
+        function Read-PhoneCtlConfig { param($ConfigPath); [pscustomobject]@{ serial = 'PHONE123'; transport = 'lan'; scrcpyArgs = @('--max-fps', '60') } }
+        function Test-Path {
+            param($LiteralPath, $PathType)
+            if ($LiteralPath -eq 'C:\proj\server\build\scrcpy-server') { return $true }
+            if ($LiteralPath -eq $sessionFile) { return [IO.File]::Exists($sessionFile) }
+            return [IO.File]::Exists($LiteralPath) -or [IO.Directory]::Exists($LiteralPath)
+        }
+        function Invoke-Adb {
+            param($AdbPath, $Arguments, $TimeoutSeconds)
+            $joined = $Arguments -join '|'
+            $state.AdbCalls.Add($joined)
+            if ($Arguments[0] -eq 'start-server') { return New-AdbResult }
+            if ($joined -eq '-s|192.168.1.42:37123|shell|getprop|ro.product.model') { return New-AdbResult "Pixel 8`r`n" }
+            if ($joined -eq '-s|192.168.1.42:37123|shell|ip|-4|addr|show|wlan0') { return New-AdbResult (Get-Content (Join-Path $fixtures 'wlan0.txt') -Raw) }
+            if ($Arguments[2] -eq 'push') {
+                Assert-Equal $Arguments[3] $sessionFile
+                Assert-Equal $Arguments[4] '/data/local/tmp/phonectl-session.tmp'
+                $state.SessionExistedDuringPush = [IO.File]::Exists($sessionFile)
+                return New-AdbResult
+            }
+            if ($joined -eq '-s|192.168.1.42:37123|shell|chmod 600 /data/local/tmp/phonectl-session.tmp && mv -f /data/local/tmp/phonectl-session.tmp /data/local/tmp/phonectl-session') { $state.Published++; return New-AdbResult }
+            if ($joined -eq '-s|192.168.1.42:37123|shell|rm -f /data/local/tmp/phonectl-session /data/local/tmp/phonectl-session.tmp') { $state.RemoteCleaned++; return New-AdbResult }
+            throw "Unexpected ADB command: $joined"
+        }
+        function Wait-AdbPhones { param($AdbPath, $Serial); [pscustomobject]@{ Id = '192.168.1.42:37123'; Serial = 'PHONE123' } }
+        function Get-LaptopLanAddress { param($PhoneAddress); Assert-Equal $PhoneAddress '192.168.1.42'; '192.168.1.10' }
+        function Get-RandomLanPort { 34567 }
+        function New-LanSessionFilePath { $sessionFile }
+        function Start-LanRelay {
+            param($RelayPath, $PhoneAddress, $PhonePort, $LaptopAddress, $SessionPath)
+            Assert-Equal $RelayPath 'C:\proj\relay\build\phonectl-relay.exe'
+            Assert-Equal $PhoneAddress '192.168.1.42'
+            Assert-Equal $PhonePort 34567
+            Assert-Equal $LaptopAddress '192.168.1.10'
+            Assert-Equal $SessionPath $sessionFile
+            [IO.File]::WriteAllText($SessionPath, 'version=1')
+            $state.RelayStarted++
+            [pscustomobject]@{ Process = 'mock-relay'; Port = 51234 }
+        }
+        function Stop-LanRelay {
+            param($Relay)
+            if ($null -ne $Relay) { $state.RelayStopped++ }
+        }
+        function Invoke-LauncherProcess {
+            param($FilePath, $Arguments, $TimeoutSeconds, [switch]$CaptureOutput, [switch]$LogOutput)
+            $joined = $Arguments -join '|'
+            $state.ScrcpyCalls.Add($joined)
+            if ($joined -eq '--version') {
+                return New-AdbResult (Get-Content (Join-Path $fixtures 'scrcpy-version.txt') -Raw)
+            }
+            $state.ServerEnvDuringScrcpy = $env:SCRCPY_SERVER_PATH
+            $state.SessionExistedDuringScrcpy = [IO.File]::Exists($sessionFile)
+            Assert-Equal $joined '-s|192.168.1.42:37123|-S|-w|--window-title|Pixel 8|--force-adb-forward|--tunnel-host=127.0.0.1|--tunnel-port=51234|--max-fps|60|--no-audio'
+            return New-AdbResult '' 0
+        }
+        Assert-Equal (Invoke-PhoneCtl 'C:\proj' 'scrcpy' @('--no-audio')) 0
+        Assert-True $state.SessionExistedDuringPush 'Session file must exist during adb push'
+        Assert-Equal $state.Published 1
+        Assert-Equal $state.RemoteCleaned 1
+        Assert-Equal $state.SessionExistedDuringScrcpy $false
+        Assert-Equal ([IO.File]::Exists($sessionFile)) $false
+        Assert-Equal $state.ServerEnvDuringScrcpy 'C:\proj\server\build\scrcpy-server'
+        Assert-Equal $env:SCRCPY_SERVER_PATH $previousServer
+        Assert-Equal $state.RelayStarted 1
+        Assert-Equal $state.RelayStopped 1
+    } finally {
+        $env:SCRCPY_SERVER_PATH = $previousServer
+        if (Test-Path -LiteralPath $sessionFile) { Remove-Item -LiteralPath $sessionFile -Force }
+        if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Force }
+    }
+}
+
+Test-Case 'LAN fallback: version mismatch or missing server warns and uses stock server; transport=adb skips fork' {
+    $state = @{ Warnings = New-Object System.Collections.Generic.List[string]; ServerExists = $true; Version = 'scrcpy 3.1'; ConfigTransport = 'lan'; ScrcpyArgsSeen = '' }
+    function Resolve-LauncherExecutable { param($Candidates, $Name); "resolved:$Name" }
+    function Read-PhoneCtlConfig { param($ConfigPath); [pscustomobject]@{ serial = 'PHONE123'; transport = $state.ConfigTransport } }
+    function Test-Path {
+        param($LiteralPath, $PathType)
+        if ($LiteralPath -eq 'C:\proj\server\build\scrcpy-server') { return $state.ServerExists }
+        return $false
+    }
+    function Write-LauncherMessage {
+        param($Message)
+        if ($Message -like 'WARNING:*') { $state.Warnings.Add($Message) }
+    }
+    function Invoke-Adb {
+        param($AdbPath, $Arguments)
+        if ($Arguments[0] -eq 'start-server') { return New-AdbResult }
+        New-AdbResult 'Pixel'
+    }
+    function Wait-AdbPhones { param($AdbPath, $Serial); [pscustomobject]@{ Id = '192.168.1.42:37123'; Serial = 'PHONE123' } }
+    function Start-LanRelay { throw 'Must not start relay on stock server fallback' }
+    function Invoke-LauncherProcess {
+        param($FilePath, $Arguments, $TimeoutSeconds, [switch]$CaptureOutput, [switch]$LogOutput)
+        if (($Arguments -join '|') -eq '--version') { return New-AdbResult $state.Version }
+        $state.ScrcpyArgsSeen = ($Arguments -join '|')
+        New-AdbResult '' 0
+    }
+    Assert-Equal (Invoke-PhoneCtl 'C:\proj' 'scrcpy' @()) 0
+    Assert-Equal $state.Warnings.Count 1
+    Assert-True ($state.Warnings[0] -like '*expected 5.0.1*')
+    Assert-Equal $state.ScrcpyArgsSeen '-s|192.168.1.42:37123|-S|-w|--window-title|Pixel'
+
+    $state.Warnings.Clear(); $state.ServerExists = $false; $state.Version = 'scrcpy 5.0.1'
+    Assert-Equal (Invoke-PhoneCtl 'C:\proj' 'scrcpy' @()) 0
+    Assert-Equal $state.Warnings.Count 1
+    Assert-True ($state.Warnings[0] -like '*scrcpy-server not found*')
+
+    $state.Warnings.Clear(); $state.ServerExists = $true; $state.ConfigTransport = 'adb'
+    Assert-Equal (Invoke-PhoneCtl 'C:\proj' 'scrcpy' @()) 0
+    Assert-Equal $state.Warnings.Count 0
+}
+
+Test-Case 'companion relay death stops scrcpy and returns nonzero for reconnect' {
+    $exe = Join-Path $PSHOME 'powershell.exe'
+    $companion = New-LauncherProcess $exe @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Milliseconds 300; exit 1') -CaptureOutput
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $result = Invoke-LauncherProcess $exe @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 20') -TimeoutSeconds 0 -CaptureOutput -CompanionProcess $companion
+        Assert-Equal $result.ExitCode 1
+        Assert-True ($timer.Elapsed.TotalSeconds -lt 10) 'Companion process death did not terminate scrcpy'
+    } finally {
+        Stop-LauncherProcess $companion
     }
 }
 
