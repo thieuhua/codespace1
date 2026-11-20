@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AdbParse.psm1') -Force
+$RemoteSessionPath = '/data/local/tmp/phonectl-session'
 $script:LauncherLogPath = ''
 
 function Write-LauncherLog {
@@ -104,8 +105,13 @@ function Invoke-LauncherProcess {
             $stderr = $process.StandardError.ReadToEndAsync()
         }
         $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $drain = $null
         do {
             $exited = $process.WaitForExit(100)
+            # After exit, read remaining log lines for at most 2 s: a child (adb.exe) that inherited the pipes may
+            # keep them open long after scrcpy is gone, and waiting for EOF would block the reconnect loop.
+            if ($exited -and $null -eq $drain) { $drain = [System.Diagnostics.Stopwatch]::StartNew() }
+            if ($null -ne $drain -and $drain.Elapsed.TotalSeconds -ge 2) { break }
             if ($LogOutput) {
                 foreach ($stream in @('stdout', 'stderr')) {
                     if ($null -ne $pending[$stream] -and $pending[$stream].IsCompleted) {
@@ -406,10 +412,13 @@ function Invoke-LanScrcpySession {
     try {
         try {
             $relay = Start-LanRelay -RelayPath $relayPath -PhoneAddress $phoneIp -PhonePort $phonePort -LaptopAddress $laptopIp -SessionPath $sessionPath
-            $push = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'push', $sessionPath, '/data/local/tmp/phonectl-session') -TimeoutSeconds 15
+            # Push under a temporary name and publish it only once it is private (0600), so the server never
+            # consumes a readable or half-written session file.
+            $push = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'push', $sessionPath, "$RemoteSessionPath.tmp") -TimeoutSeconds 15
             if ($push.ExitCode -ne 0) { throw "Push phonectl-session failed: $($push.Error) $($push.Output)" }
-            $chmod = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'shell', 'chmod', '600', '/data/local/tmp/phonectl-session') -TimeoutSeconds 5
-            if ($chmod.ExitCode -ne 0) { throw "chmod phonectl-session failed: $($chmod.Error) $($chmod.Output)" }
+            $publish = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'shell',
+                "chmod 600 $RemoteSessionPath.tmp && mv -f $RemoteSessionPath.tmp $RemoteSessionPath") -TimeoutSeconds 5
+            if ($publish.ExitCode -ne 0) { throw "Publishing phonectl-session failed: $($publish.Error) $($publish.Output)" }
         } finally {
             if ($sessionPath -and (Test-Path -LiteralPath $sessionPath -PathType Leaf)) {
                 Remove-Item -LiteralPath $sessionPath -Force -ErrorAction SilentlyContinue
@@ -429,6 +438,12 @@ function Invoke-LanScrcpySession {
     } finally {
         [Environment]::SetEnvironmentVariable('SCRCPY_SERVER_PATH', $previousServerPath, 'Process')
         Stop-LanRelay $relay
+        # The server deletes the session file when it starts. If scrcpy failed before that, remove it now:
+        # a leftover file would hold the keys and make the next adb-mode run wait for a LAN client.
+        try {
+            [void](Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'shell',
+                "rm -f $RemoteSessionPath $RemoteSessionPath.tmp") -TimeoutSeconds 5)
+        } catch { Write-LauncherMessage "Could not remove remote session file: $($_.Exception.Message)" }
     }
 }
 

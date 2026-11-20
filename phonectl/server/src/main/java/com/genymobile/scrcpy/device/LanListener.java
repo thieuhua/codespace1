@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.net.ssl.SSLSocket;
 
@@ -131,9 +132,14 @@ final class LanListener {
         byte[] token = new byte[32];
         // SO_TIMEOUT bounds each read; the watchdog also bounds slow trickles across multiple reads.
         long allowance = Math.max(1, Math.min(TimeUnit.SECONDS.toNanos(3), deadline - System.nanoTime()));
+        // Exactly one of {watchdog, successful handoff} may claim the socket: a FutureTask stays "not done" while its
+        // body runs, so timeout.isDone()/cancel() alone cannot stop the watchdog from closing a socket just handed off.
+        AtomicBoolean claimed = new AtomicBoolean();
         ScheduledFuture<?> timeout = timer.schedule(() -> {
-            Ln.w("LAN handshake/authentication timed out");
-            close(raw);
+            if (claimed.compareAndSet(false, true)) {
+                Ln.w("LAN handshake/authentication timed out");
+                close(raw);
+            }
         }, allowance, TimeUnit.NANOSECONDS);
         try {
             raw.setSoTimeout(3000);
@@ -176,7 +182,7 @@ final class LanListener {
             }
             tls.setSoTimeout(0);
             synchronized (this) {
-                if (!accepting || raw.isClosed() || System.nanoTime() >= deadline || timeout.isDone()) {
+                if (!accepting || raw.isClosed() || System.nanoTime() >= deadline || !claimed.compareAndSet(false, true)) {
                     Ln.w("LAN role discarded after deadline/timeout");
                     return;
                 }

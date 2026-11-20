@@ -108,21 +108,39 @@ public final class CongestionPolicyTest {
             policy.poll(110);
 
             // 2nd congestion: 1_400_000 * 0.7 = 980_000 -> clamped to vminbr 1_000_000
-            policy.onWriteCompleted(120, 200);
-            check(policy.actions(200).bitrate == 1_000_000, "expected floor at vminbr 1000000");
-            check(policy.offer(new byte[] {1}, false, true, 210), "recover with IDR");
-            policy.poll(210);
+            // Single writer: the 2nd slow write starts after the 1st episode (t=180..300).
+            policy.onWriteCompleted(120, 300);
+            check(policy.actions(300).bitrate == 1_000_000, "expected floor at vminbr 1000000");
+            check(policy.offer(new byte[] {1}, false, true, 310), "recover with IDR");
+            policy.poll(310);
 
-            // Before 2s uncongested since last adjustment (t=200): no increase at t=2199
-            check(policy.actions(2199).bitrate == 0, "no increase before 2000ms");
+            // Before 2s uncongested since last adjustment (t=300): no increase at t=2299
+            check(policy.actions(2299).bitrate == 0, "no increase before 2000ms");
 
-            // At t=2200 (+2000ms): +10% of 2_000_000 (+200_000) -> 1_200_000
-            check(policy.actions(2200).bitrate == 1_200_000, "expected additive increase to 1200000");
-            check(policy.actions(4200).bitrate == 1_400_000, "expected additive increase to 1400000");
-            check(policy.actions(6200).bitrate == 1_600_000, "expected additive increase to 1600000");
-            check(policy.actions(8200).bitrate == 1_800_000, "expected additive increase to 1800000");
-            check(policy.actions(10200).bitrate == 2_000_000, "expected additive increase capped at 2000000");
-            check(policy.actions(12200).bitrate == 0, "must not exceed requested bitrate");
+            // At t=2300 (+2000ms): +10% of 2_000_000 (+200_000) -> 1_200_000
+            check(policy.actions(2300).bitrate == 1_200_000, "expected additive increase to 1200000");
+            check(policy.actions(4300).bitrate == 1_400_000, "expected additive increase to 1400000");
+            check(policy.actions(6300).bitrate == 1_600_000, "expected additive increase to 1600000");
+            check(policy.actions(8300).bitrate == 1_800_000, "expected additive increase to 1800000");
+            check(policy.actions(10300).bitrate == 2_000_000, "expected additive increase capped at 2000000");
+            check(policy.actions(12300).bitrate == 0, "must not exceed requested bitrate");
+        });
+
+        run("a slow write already handled by the encoder thread does not cut bitrate twice or drop the recovery IDR", () -> {
+            List<String> logs = new ArrayList<>();
+            CongestionPolicy policy = new CongestionPolicy(32, 65536, 100, 2_000_000, 1_000_000, 0, logs::add);
+            check(policy.offer(new byte[] {1}, false, true, 0), "first frame queued");
+            policy.poll(0); // the sender starts writing it at t=0
+            check(policy.offer(new byte[] {2}, false, false, 10), "second frame queued");
+            // While that write is stuck, the queued frame ages past the budget: the encoder thread reacts once.
+            check(!policy.offer(new byte[] {3}, false, false, 120), "P-frame dropped while waiting for IDR");
+            check(policy.actions(120).bitrate == 1_400_000, "one decrease");
+            check(policy.offer(new byte[] {4}, false, true, 130), "recovery IDR accepted");
+            // The stuck write (t=0..150) completes: same episode, no second reaction.
+            policy.onWriteCompleted(150, 150);
+            check(policy.actions(150).bitrate == 0, "no second decrease");
+            CongestionPolicy.Packet next = policy.poll(150);
+            check(next != null && next.data[0] == 4, "recovery IDR still queued");
         });
 
         run("queue capacity overflow drops media frames but never drops protected config packets", () -> {

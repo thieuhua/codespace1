@@ -901,6 +901,8 @@ Test-Case 'LAN session flow: wlan0 IP, UDP peer, relay start/stop, session push+
         SessionExistedDuringPush = $false
         SessionExistedDuringScrcpy = $true
         RelayStarted = 0
+        Published = 0
+        RemoteCleaned = 0
         RelayStopped = 0
     }
     try {
@@ -921,11 +923,12 @@ Test-Case 'LAN session flow: wlan0 IP, UDP peer, relay start/stop, session push+
             if ($joined -eq '-s|192.168.1.42:37123|shell|ip|-4|addr|show|wlan0') { return New-AdbResult (Get-Content (Join-Path $fixtures 'wlan0.txt') -Raw) }
             if ($Arguments[2] -eq 'push') {
                 Assert-Equal $Arguments[3] $sessionFile
-                Assert-Equal $Arguments[4] '/data/local/tmp/phonectl-session'
+                Assert-Equal $Arguments[4] '/data/local/tmp/phonectl-session.tmp'
                 $state.SessionExistedDuringPush = [IO.File]::Exists($sessionFile)
                 return New-AdbResult
             }
-            if ($joined -eq '-s|192.168.1.42:37123|shell|chmod|600|/data/local/tmp/phonectl-session') { return New-AdbResult }
+            if ($joined -eq '-s|192.168.1.42:37123|shell|chmod 600 /data/local/tmp/phonectl-session.tmp && mv -f /data/local/tmp/phonectl-session.tmp /data/local/tmp/phonectl-session') { $state.Published++; return New-AdbResult }
+            if ($joined -eq '-s|192.168.1.42:37123|shell|rm -f /data/local/tmp/phonectl-session /data/local/tmp/phonectl-session.tmp') { $state.RemoteCleaned++; return New-AdbResult }
             throw "Unexpected ADB command: $joined"
         }
         function Wait-AdbPhones { param($AdbPath, $Serial); [pscustomobject]@{ Id = '192.168.1.42:37123'; Serial = 'PHONE123' } }
@@ -961,6 +964,8 @@ Test-Case 'LAN session flow: wlan0 IP, UDP peer, relay start/stop, session push+
         }
         Assert-Equal (Invoke-PhoneCtl 'C:\proj' 'scrcpy' @('--no-audio')) 0
         Assert-True $state.SessionExistedDuringPush 'Session file must exist during adb push'
+        Assert-Equal $state.Published 1
+        Assert-Equal $state.RemoteCleaned 1
         Assert-Equal $state.SessionExistedDuringScrcpy $false
         Assert-Equal ([IO.File]::Exists($sessionFile)) $false
         Assert-Equal $state.ServerEnvDuringScrcpy 'C:\proj\server\build\scrcpy-server'

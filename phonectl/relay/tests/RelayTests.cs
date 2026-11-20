@@ -73,6 +73,7 @@ namespace PhoneCtl {
         }
         static int FreePort() { TcpListener l = new TcpListener(IPAddress.Loopback, 0); l.Start(); int p = ((IPEndPoint)l.LocalEndpoint).Port; l.Stop(); return p; }
         public static int Main(string[] args) {
+            Crash.Quiet();
             using (SessionIdentity identity = CertificateFactory.Create()) {
                 Test("PFX roundtrip: private key, P256 or RSA2048, legacy 3DES/SHA1", () => {
                     Assert(identity.Certificate.HasPrivateKey, "PFX lost private key");

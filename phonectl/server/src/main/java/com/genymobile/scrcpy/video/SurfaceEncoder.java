@@ -220,7 +220,15 @@ public class SurfaceEncoder implements AsyncProcessor {
             videoSender = null;
             sender.stop();
             try {
-                sender.join();
+                if (!sender.join(500)) {
+                    // The sender is stuck in a blocking write (stalled Wi-Fi, full TCP buffer): stop() cannot reach it.
+                    // Closing the video transport makes the write fail, so shutdown never waits for a TCP timeout.
+                    Ln.w("Video sender still blocked in write after stop; aborting video transport");
+                    abortTransport.run();
+                    if (!sender.join(2000)) {
+                        Ln.w("Video sender did not terminate after transport abort");
+                    }
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }

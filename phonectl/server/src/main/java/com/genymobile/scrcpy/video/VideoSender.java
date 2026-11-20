@@ -97,6 +97,12 @@ public final class VideoSender {
         thread.join();
     }
 
+    /** Returns true if the sender thread has terminated within the timeout. */
+    public boolean join(long timeoutMs) throws InterruptedException {
+        thread.join(timeoutMs);
+        return !thread.isAlive();
+    }
+
     public static long now() {
         return System.nanoTime() / 1_000_000;
     }

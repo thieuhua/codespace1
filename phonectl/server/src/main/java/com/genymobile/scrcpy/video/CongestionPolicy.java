@@ -48,6 +48,7 @@ public final class CongestionPolicy {
     private boolean syncEverRequested;
     private long lastSync;
     private long lastAdjustment;
+    private long lastCongestion = Long.MIN_VALUE / 2;
 
     public CongestionPolicy(int maxPackets, int maxBytes, long budgetMs, int requestedBitrate, int minimumBitrate, long now, Logger logger) {
         if (maxPackets <= 0 || maxBytes <= 0 || budgetMs <= 0 || requestedBitrate <= 0 || minimumBitrate <= 0) {
@@ -114,7 +115,9 @@ public final class CongestionPolicy {
     }
 
     public synchronized void onWriteCompleted(long durationMs, long now) {
-        if (durationMs > budgetMs) {
+        // A slow write ages the queue too: if the encoder thread already reacted during this write, do not react twice
+        // (that would drop the fresh recovery IDR and cut the bitrate a second time).
+        if (durationMs > budgetMs && lastCongestion < now - durationMs) {
             congested(now, "write duration=" + durationMs + "ms");
         }
     }
@@ -129,6 +132,7 @@ public final class CongestionPolicy {
                 ++dropped;
             }
         }
+        lastCongestion = now;
         waitingForKeyFrame = true;
         syncPending = true;
         logger.log("video congestion: " + reason + "; dropped=" + dropped + "; wait for IDR");
