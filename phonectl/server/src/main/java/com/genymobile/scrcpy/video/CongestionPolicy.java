@@ -49,6 +49,7 @@ public final class CongestionPolicy {
     private long lastSync;
     private long lastAdjustment;
     private long lastCongestion = Long.MIN_VALUE / 2;
+    private int droppedWhileWaiting;
 
     public CongestionPolicy(int maxPackets, int maxBytes, long budgetMs, int requestedBitrate, int minimumBitrate, long now, Logger logger) {
         if (maxPackets <= 0 || maxBytes <= 0 || budgetMs <= 0 || requestedBitrate <= 0 || minimumBitrate <= 0) {
@@ -72,7 +73,8 @@ public final class CongestionPolicy {
             congested(now, "queue capacity");
         }
         if (!protectedPacket && waitingForKeyFrame && !keyFrame) {
-            logger.log("video drop incoming frame: waiting for IDR");
+            // Counted, not logged per frame: server logs travel over the same congested link.
+            ++droppedWhileWaiting;
             return false;
         }
         if (queue.size() >= maxPackets || data.length > maxBytes - queuedBytes) {
@@ -86,7 +88,8 @@ public final class CongestionPolicy {
         if (!protectedPacket && waitingForKeyFrame) {
             waitingForKeyFrame = false;
             syncPending = false;
-            logger.log("video IDR accepted: resume frames");
+            logger.log("video IDR accepted: resume frames (dropped " + droppedWhileWaiting + " while waiting)");
+            droppedWhileWaiting = 0;
         }
         queue.addLast(new Packet(data, protectedPacket, keyFrame, now));
         queuedBytes += data.length;
@@ -158,6 +161,12 @@ public final class CongestionPolicy {
         int changed = bitrate != reportedBitrate ? bitrate : 0;
         reportedBitrate = bitrate;
         return new Actions(changed, sync);
+    }
+
+    /** Unsent bytes the kernel may hold before the sender waits: half the latency budget at the current bitrate. */
+    public synchronized int kernelBudgetBytes() {
+        long bytes = (long) bitrate * budgetMs / 8000 / 2;
+        return (int) Math.max(16 * 1024, Math.min(bytes, 1024 * 1024));
     }
 
     private void setBitrate(int next, String reason) {

@@ -10,6 +10,7 @@ public final class VideoSender {
     private final OutputStream output;
     private final CongestionPolicy policy;
     private final Runnable diagnostics;
+    private final BacklogProbe backlog;
     private final Runnable onFailure;
     private final Thread thread;
     private volatile IOException failure;
@@ -17,9 +18,14 @@ public final class VideoSender {
     private boolean finishing;
 
     public VideoSender(OutputStream output, CongestionPolicy policy, Runnable diagnostics, Runnable onFailure) {
+        this(output, policy, diagnostics, BacklogProbe.NONE, onFailure);
+    }
+
+    public VideoSender(OutputStream output, CongestionPolicy policy, Runnable diagnostics, BacklogProbe backlog, Runnable onFailure) {
         this.output = output;
         this.policy = policy;
         this.diagnostics = diagnostics;
+        this.backlog = backlog;
         this.onFailure = onFailure;
         thread = new Thread(this::send, "video-sender");
     }
@@ -44,6 +50,9 @@ public final class VideoSender {
     private void send() {
         try {
             while (!closed) {
+                // Do not hand more data to the kernel while it still holds old video: packets then age in the policy queue,
+                // where stale frames can still be dropped, instead of in the TCP send buffer, where they cannot.
+                waitForKernel();
                 CongestionPolicy.Packet packet;
                 synchronized (this) {
                     packet = policy.poll(now());
@@ -69,6 +78,16 @@ public final class VideoSender {
             Thread.currentThread().interrupt();
         } finally {
             Ln.d("Video sender stopped");
+        }
+    }
+
+    private void waitForKernel() throws InterruptedException {
+        while (!closed) {
+            int unsent = backlog.unsentBytes();
+            if (unsent < 0 || unsent <= policy.kernelBudgetBytes()) {
+                return;
+            }
+            Thread.sleep(4);
         }
     }
 

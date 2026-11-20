@@ -154,7 +154,8 @@ public final class Server {
                     surfaceCapture = new CameraCapture(options);
                 }
                 SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options, connection.getVideoLatencyMs(),
-                        connection.getVideoMinBitrate(), connection::logVideoSocketStats, connection::abortVideo);
+                        connection.getVideoMinBitrate(), connection::logVideoSocketStats, connection::abortVideo,
+                        connection.getVideoBacklogProbe());
                 asyncProcessors.add(surfaceEncoder);
 
                 if (controller != null) {

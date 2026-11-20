@@ -55,6 +55,7 @@ public class SurfaceEncoder implements AsyncProcessor {
     private final int minVideoBitRate;
     private final Runnable socketDiagnostics;
     private final Runnable abortTransport;
+    private final BacklogProbe backlogProbe;
 
     private boolean firstFrameSent;
     private int consecutiveErrors;
@@ -70,11 +71,11 @@ public class SurfaceEncoder implements AsyncProcessor {
     public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options) {
         this(capture, streamer, options, 100, 1_000_000, () -> {
         }, () -> {
-        });
+        }, BacklogProbe.NONE);
     }
 
     public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options, int latencyBudgetMs, int minVideoBitRate,
-            Runnable socketDiagnostics, Runnable abortTransport) {
+            Runnable socketDiagnostics, Runnable abortTransport, BacklogProbe backlogProbe) {
         this.capture = capture;
         this.streamer = streamer;
         this.videoBitRate = options.getVideoBitRate();
@@ -89,6 +90,7 @@ public class SurfaceEncoder implements AsyncProcessor {
         this.minVideoBitRate = minVideoBitRate;
         this.socketDiagnostics = socketDiagnostics;
         this.abortTransport = abortTransport;
+        this.backlogProbe = backlogProbe;
     }
 
     private void streamCapture() throws IOException, ConfigurationException {
@@ -119,7 +121,7 @@ public class SurfaceEncoder implements AsyncProcessor {
 
         CongestionPolicy policy = new CongestionPolicy(VIDEO_QUEUE_MAX_PACKETS, VIDEO_QUEUE_MAX_BYTES, latencyBudgetMs, videoBitRate,
                 minVideoBitRate, VideoSender.now(), Ln::i);
-        VideoSender sender = new VideoSender(streamer.getOutput(), policy, socketDiagnostics, () -> {
+        VideoSender sender = new VideoSender(streamer.getOutput(), policy, socketDiagnostics, backlogProbe, () -> {
             stopped.set(true);
             captureControl.reset(CaptureControl.RESET_REASON_TERMINATED);
             abortTransport.run();

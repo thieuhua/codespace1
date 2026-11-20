@@ -37,6 +37,10 @@ final class StreamSocket implements Closeable {
         return local != null ? local.getOutputStream() : tls.getOutputStream();
     }
 
+    boolean isTcp() {
+        return raw != null;
+    }
+
     FileDescriptor descriptor() throws ReflectiveOperationException {
         if (local != null) {
             return local.getFileDescriptor();

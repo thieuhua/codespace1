@@ -212,6 +212,10 @@ public final class DesktopConnection implements Closeable {
         return videoMinBitrate;
     }
 
+    public com.genymobile.scrcpy.video.BacklogProbe getVideoBacklogProbe() {
+        return KernelBacklog.create(videoSocket);
+    }
+
     public void logVideoSocketStats() {
         diagnostics.sample(System.nanoTime() / 1_000_000);
     }

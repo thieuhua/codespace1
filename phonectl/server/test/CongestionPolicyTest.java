@@ -143,6 +143,15 @@ public final class CongestionPolicyTest {
             check(next != null && next.data[0] == 4, "recovery IDR still queued");
         });
 
+        run("kernel backlog budget is half the latency budget at the current bitrate, with a 16 KiB floor", () -> {
+            CongestionPolicy policy = new CongestionPolicy(32, 65536, 100, 8_000_000, 1_000_000, 0, s -> { });
+            check(policy.kernelBudgetBytes() == 50_000, "8 Mbps x 50 ms = 50000 bytes");
+            policy.onWriteCompleted(150, 150); // congestion: 8 -> 5.6 Mbps
+            check(policy.kernelBudgetBytes() == 35_000, "budget follows the lowered bitrate");
+            CongestionPolicy slow = new CongestionPolicy(32, 65536, 100, 1_000_000, 1_000_000, 0, s -> { });
+            check(slow.kernelBudgetBytes() == 16 * 1024, "16 KiB floor at low bitrate");
+        });
+
         run("queue capacity overflow drops media frames but never drops protected config packets", () -> {
             List<String> logs = new ArrayList<>();
             CongestionPolicy policy = new CongestionPolicy(2, 16, 100, 4_000_000, 1_000_000, 0, logs::add);
