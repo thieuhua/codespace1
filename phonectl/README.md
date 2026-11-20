@@ -33,6 +33,7 @@ Serial vật lý (`ro.serialno`) được lưu trong `%LOCALAPPDATA%\phonectl\co
 
 ## Xử lý sự cố
 
+- Âm thanh đôi lúc đứt trên mạng chập chờn: tăng bộ đệm âm thanh phía client, ví dụ thêm `"--audio-buffer=200"` vào `scrcpyArgs` (mặc định của scrcpy là 50 ms; đánh đổi: tiếng trễ hơn hình khoảng 0,15 s).
 - Hình/tiếng trễ dần như tua chậm (thao tác vẫn nhanh): video vượt băng thông nên dồn hàng trong TCP. Tránh Mobile Hotspot của laptop ở 2.4 GHz: card Wi-Fi phải chia thời gian giữa hai kênh, đo được chỉ ~6 Mbps qua adb so với ~34 Mbps khi cả hai máy cùng vào một Wi-Fi 5 GHz. Sau đó chỉnh `scrcpyArgs` cho vừa, ví dụ mạng tốt `["--video-codec=h265","--video-bit-rate=8M","--max-size=1920","--max-fps=60"]`, mạng yếu `2M`, `--max-size=1280`, `--max-fps=30`.
 - `vendor\platform-tools\adb.exe mdns services` rỗng: kiểm tra laptop dùng mạng **Private**, firewall cho phép ADB trên mạng Private, router tắt **AP/client isolation**, thử ngắt VPN. Khi pairing, giữ hộp thoại mã trên điện thoại mở; cổng pairing khác cổng kết nối.
 - Đã pair nhưng không tự kết nối: giữ Wireless debugging bật, kiểm tra `_adb-tls-connect._tcp` và các mục mạng trên rồi chạy lại `install.cmd`. Không dùng cổng pairing cho `adb connect`.
