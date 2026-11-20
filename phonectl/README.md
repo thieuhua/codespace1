@@ -42,6 +42,7 @@ Serial vật lý (`ro.serialno`) được lưu trong `%LOCALAPPDATA%\phonectl\co
 
 ## Kiểm thử
 
+- Server fork: `powershell -NoProfile -ExecutionPolicy Bypass -File server\build.ps1` build `server\build\scrcpy-server`; `powershell -NoProfile -ExecutionPolicy Bypass -File server\test\run-tests.ps1` kiểm tra chính sách nghẽn video (bỏ khung chờ IDR, giới hạn xin sync frame, AIMD bitrate) bằng Java trên máy tính.
 - Relay TLS (C#): `powershell -NoProfile -ExecutionPolicy Bypass -File relay\tests\run-tests.ps1` build `phonectl-relay.exe`, chạy fake TLS server trong tiến trình để kiểm tra PFX 3DES/SHA1, pin chứng chỉ, token + thứ tự role 0/1/2, retry role 0 và đóng toàn phiên.
 - Launcher/installer: `powershell -NoProfile -ExecutionPolicy Bypass -File launcher\tests\run-tests.ps1` kiểm tra parser, ghép config, phiên LAN/relay, pairing và luồng cài giả lập, mutex/log/process; không cần điện thoại.
 - adbkeeper: `cd adbkeeper; .\gradlew.bat assembleDebug`.
