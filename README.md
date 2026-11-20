@@ -14,6 +14,7 @@ Workspace này dùng chung cho nhiều dự án. Mỗi dự án phải nằm tro
 | [Anamorphic Screen](anamorphic-screen/) | Ứng dụng LAN bù góc nhìn bằng ảnh điện thoại, marker ArUco và CSS homography | [README](anamorphic-screen/README.md) |
 | [INT1433 nhóm 0060](int1433-06-20261-grp-int1433-06-0060/) | Bài tập lớn Lập trình mạng (INT1433, PTIT) — submodule từ `ptit-hungdn-2026` | [README](int1433-06-20261-grp-int1433-06-0060/README.md) |
 | [IoT Chuồng Trại Thông Minh](IoT-chuong-trai-thong-minh/) | Nền tảng thiết bị ESP32 và Mosquitto | [README](IoT-chuong-trai-thong-minh/README.md) |
+| [phonectl](phonectl/) | Điều khiển Android từ laptop Windows qua LAN bằng ADB thuần (launcher tự kết nối + app `adbkeeper`) | [README](phonectl/README.md) |
 
 Khi thêm dự án, cập nhật bảng này và đặt liên kết đến `README.md` của dự án.
 
