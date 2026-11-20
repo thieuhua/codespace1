@@ -1,3 +1,4 @@
+// Modified by phonectl: route audio/video streamers through socket streams and congestion controller (Apache-2.0).
 package com.genymobile.scrcpy;
 
 import com.genymobile.scrcpy.audio.AudioCapture;
@@ -126,7 +127,8 @@ public final class Server {
                     audioCapture = new AudioPlaybackCapture(options.getAudioDup());
                 }
 
-                Streamer audioStreamer = new Streamer(connection.getAudioFd(), audioCodec, options.getSendStreamMeta(), options.getSendFrameMeta());
+                Streamer audioStreamer = new Streamer(connection.getAudioOutput(), audioCodec, options.getSendStreamMeta(),
+                        options.getSendFrameMeta());
                 AsyncProcessor audioRecorder;
                 if (audioCodec == AudioCodec.RAW) {
                     audioRecorder = new AudioRawRecorder(audioCapture, audioStreamer);
@@ -137,7 +139,7 @@ public final class Server {
             }
 
             if (video) {
-                Streamer videoStreamer = new Streamer(connection.getVideoFd(), options.getVideoCodec(), options.getSendStreamMeta(),
+                Streamer videoStreamer = new Streamer(connection.getVideoOutput(), options.getVideoCodec(), options.getSendStreamMeta(),
                         options.getSendFrameMeta());
                 SurfaceCapture surfaceCapture;
                 if (options.getVideoSource() == VideoSource.DISPLAY) {
@@ -151,7 +153,8 @@ public final class Server {
                 } else {
                     surfaceCapture = new CameraCapture(options);
                 }
-                SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
+                SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options, connection.getVideoLatencyMs(),
+                        connection.getVideoMinBitrate(), connection::logVideoSocketStats, connection::abortVideo);
                 asyncProcessors.add(surfaceEncoder);
 
                 if (controller != null) {

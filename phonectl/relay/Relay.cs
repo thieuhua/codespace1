@@ -142,9 +142,13 @@ namespace PhoneCtl {
                 int port;
                 if (!Int32.TryParse(Console.ReadLine(), out port) || port < 20000 || port > 60999) throw new ArgumentException("Expected phone port 20000..60999");
                 path = Console.ReadLine(); if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path)) throw new ArgumentException("Expected absolute session path");
-                IPAddress peer = GetPeer(phone);
+                IPAddress peer;
                 string requestedPeer = Environment.GetEnvironmentVariable("PHONECTL_PEER");
-                if (!String.IsNullOrEmpty(requestedPeer) && requestedPeer != peer.ToString()) throw new IOException("Laptop route changed during session setup");
+                if (!String.IsNullOrEmpty(requestedPeer)) {
+                    if (!IPAddress.TryParse(requestedPeer, out peer) || peer.AddressFamily != AddressFamily.InterNetwork) throw new ArgumentException("Expected peer IPv4");
+                } else {
+                    peer = GetPeer(phone);
+                }
                 byte[] token = CertificateFactory.RandomBytes(32);
                 using (SessionIdentity identity = CertificateFactory.Create())
                 using (RelaySession relay = new RelaySession(phone, port, token, identity.Certificate, s => Console.Error.WriteLine(s))) {

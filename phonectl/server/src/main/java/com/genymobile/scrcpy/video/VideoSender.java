@@ -78,6 +78,10 @@ public final class VideoSender {
         }
     }
 
+    public boolean hasFailed() {
+        return failure != null;
+    }
+
     /** Normal EOS drains protected records; shutdown closes the transport before joining this thread. */
     public synchronized void finish() {
         finishing = true;

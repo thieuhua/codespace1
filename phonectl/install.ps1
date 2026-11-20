@@ -110,6 +110,16 @@ function Invoke-PhoneCtlInstall {
         Build-PhoneCtlApk -ProjectRoot $ProjectRoot
     }
     if (-not (Test-Path -LiteralPath $apkPath -PathType Leaf)) { throw "APK not found after build: $apkPath" }
+    $relayPath = Join-Path $ProjectRoot 'relay\build\phonectl-relay.exe'
+    if ($Rebuild -or -not (Test-Path -LiteralPath $relayPath -PathType Leaf)) {
+        Invoke-InstallScript -ScriptPath (Join-Path $ProjectRoot 'relay\build.ps1')
+    }
+    if (-not (Test-Path -LiteralPath $relayPath -PathType Leaf)) { throw "Relay not found after build: $relayPath" }
+    $serverPath = Join-Path $ProjectRoot 'server\build\scrcpy-server'
+    if ($Rebuild -or -not (Test-Path -LiteralPath $serverPath -PathType Leaf)) {
+        Invoke-InstallScript -ScriptPath (Join-Path $ProjectRoot 'server\build.ps1')
+    }
+    if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) { throw "Server not found after build: $serverPath" }
     $started = Invoke-Adb -AdbPath $adbPath -Arguments @('start-server')
     if ($started.ExitCode -ne 0) { throw "adb start-server failed: $($started.Output) $($started.Error)" }
     $phones = @(Wait-AdbPhones -AdbPath $adbPath -Serial $serial -Seconds 10)

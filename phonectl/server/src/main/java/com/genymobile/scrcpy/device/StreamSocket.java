@@ -1,6 +1,8 @@
 package com.genymobile.scrcpy.device;
 
 import android.net.LocalSocket;
+import android.system.Os;
+import android.system.OsConstants;
 
 import java.io.Closeable;
 import java.io.FileDescriptor;
@@ -53,8 +55,14 @@ final class StreamSocket implements Closeable {
                 local.shutdownOutput();
             }
         } else {
-            // Closing the plain transport first interrupts a blocked TLS write, without
-            // waiting for SSLSocket's write lock or an unsupported TLS half-close.
+            try {
+                FileDescriptor fd = descriptor();
+                if (fd != null && fd.valid()) {
+                    Os.shutdown(fd, OsConstants.SHUT_RDWR);
+                }
+            } catch (Exception e) {
+                // Best-effort kernel shutdown on underlying plain socket fd before close().
+            }
             close();
         }
     }

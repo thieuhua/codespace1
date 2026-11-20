@@ -6,7 +6,7 @@ param(
 )
 
 Set-StrictMode -Version 2.0
-Import-Module (Join-Path $PSScriptRoot 'AdbParse.psm1')
+Import-Module (Join-Path $PSScriptRoot 'AdbParse.psm1') -Force
 $script:LauncherLogPath = ''
 
 function Write-LauncherLog {
@@ -53,12 +53,13 @@ function Resolve-LauncherExecutable {
 }
 
 function New-LauncherProcess {
-    param([string]$FilePath, [string[]]$Arguments, [switch]$CaptureOutput)
+    param([string]$FilePath, [string[]]$Arguments, [switch]$CaptureOutput, [switch]$RedirectInput)
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $FilePath
     $info.Arguments = (($Arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument $_ }) -join ' ')
     $info.UseShellExecute = $false
     $info.CreateNoWindow = [bool]$CaptureOutput
+    $info.RedirectStandardInput = [bool]$RedirectInput
     $info.RedirectStandardOutput = [bool]$CaptureOutput
     $info.RedirectStandardError = [bool]$CaptureOutput
     $process = New-Object System.Diagnostics.Process
@@ -84,7 +85,14 @@ function Stop-LauncherProcess {
 }
 
 function Invoke-LauncherProcess {
-    param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds = 8, [switch]$CaptureOutput, [switch]$LogOutput)
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 8,
+        [switch]$CaptureOutput,
+        [switch]$LogOutput,
+        [System.Diagnostics.Process]$CompanionProcess = $null
+    )
     $process = $null
     try {
         $process = New-LauncherProcess -FilePath $FilePath -Arguments $Arguments -CaptureOutput:($CaptureOutput -or $LogOutput)
@@ -110,6 +118,12 @@ function Invoke-LauncherProcess {
                     }
                 }
             }
+            if (-not $exited -and $null -ne $CompanionProcess -and $CompanionProcess.HasExited) {
+                $exited = $process.WaitForExit(300)
+                if (-not $exited -or $CompanionProcess.ExitCode -ne 0) {
+                    return [pscustomobject]@{ ExitCode = 1; Output = ''; Error = 'Companion process exited' }
+                }
+            }
             if (-not $exited -and $TimeoutSeconds -gt 0 -and $timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                 return [pscustomobject]@{ ExitCode = 124; Output = ''; Error = 'Process timed out' }
             }
@@ -118,7 +132,11 @@ function Invoke-LauncherProcess {
         } while (-not $exited -or ($LogOutput -and ($null -ne $pending.stdout -or $null -ne $pending.stderr)))
         $output = ''; $errorText = ''
         if ($CaptureOutput -and -not $LogOutput) { $output = $stdout.Result; $errorText = $stderr.Result }
-        return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output; Error = $errorText }
+        $exitCode = $process.ExitCode
+        if ($null -ne $CompanionProcess -and $CompanionProcess.HasExited -and $CompanionProcess.ExitCode -ne 0 -and $exitCode -eq 0) {
+            $exitCode = 1
+        }
+        return [pscustomobject]@{ ExitCode = $exitCode; Output = $output; Error = $errorText }
     } finally { Stop-LauncherProcess $process }
 }
 
@@ -255,6 +273,165 @@ function Invoke-NativeSession {
     }
 }
 
+function Get-PhoneWlanAddress {
+    param([string]$AdbPath, [string]$DeviceId)
+    $result = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'shell', 'ip', '-4', 'addr', 'show', 'wlan0') -TimeoutSeconds 5
+    if ($result.ExitCode -ne 0) { throw "Cannot read phone wlan0 IPv4: $($result.Error) $($result.Output)" }
+    $ip = ConvertFrom-AdbWlanAddress $result.Output
+    if (-not $ip) { throw "No IPv4 address found on phone wlan0: $($result.Output.Trim())" }
+    return $ip
+}
+
+function Get-LaptopLanAddress {
+    param([string]$PhoneAddress)
+    $target = $null
+    if (-not [System.Net.IPAddress]::TryParse($PhoneAddress, [ref]$target) -or
+        $target.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        throw "Invalid phone IPv4 address: $PhoneAddress"
+    }
+    $socket = New-Object System.Net.Sockets.Socket(
+        [System.Net.Sockets.AddressFamily]::InterNetwork,
+        [System.Net.Sockets.SocketType]::Dgram,
+        [System.Net.Sockets.ProtocolType]::Udp
+    )
+    try {
+        $socket.Connect((New-Object System.Net.IPEndPoint($target, 9)))
+        $localIp = ([System.Net.IPEndPoint]$socket.LocalEndPoint).Address.ToString()
+        if ([string]::IsNullOrWhiteSpace($localIp) -or $localIp -eq '0.0.0.0') {
+            throw "Cannot determine laptop LAN IPv4 for $PhoneAddress"
+        }
+        return $localIp
+    } finally {
+        $socket.Dispose()
+    }
+}
+
+function Get-RandomLanPort {
+    $bytes = New-Object byte[] 4
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $value = [System.BitConverter]::ToUInt32($bytes, 0)
+    return [int](20000 + ($value % 41000))
+}
+
+function New-LanSessionFilePath {
+    $directory = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'phonectl' } else { [System.IO.Path]::GetTempPath() }
+    [void][System.IO.Directory]::CreateDirectory($directory)
+    return (Join-Path $directory ('session-' + [guid]::NewGuid().ToString('N')))
+}
+
+function Start-LanRelay {
+    param([string]$RelayPath, [string]$PhoneAddress, [int]$PhonePort, [string]$LaptopAddress, [string]$SessionPath)
+    $previousPeer = [Environment]::GetEnvironmentVariable('PHONECTL_PEER', 'Process')
+    $process = $null
+    try {
+        [Environment]::SetEnvironmentVariable('PHONECTL_PEER', $LaptopAddress, 'Process')
+        $process = New-LauncherProcess -FilePath $RelayPath -Arguments @() -CaptureOutput -RedirectInput
+        $process.StandardInput.WriteLine($PhoneAddress)
+        $process.StandardInput.WriteLine("$PhonePort")
+        $process.StandardInput.WriteLine($SessionPath)
+        $process.StandardInput.Flush()
+        $readyTask = $process.StandardOutput.ReadLineAsync()
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $readyTask.IsCompleted) {
+            if ($process.WaitForExit(50) -and -not $readyTask.IsCompleted) { break }
+            if ($timer.Elapsed.TotalSeconds -ge 10) { throw 'Timed out waiting for relay READY.' }
+        }
+        $line = if ($readyTask.IsCompleted) { $readyTask.Result } else { $null }
+        $relayPort = ConvertFrom-RelayReadyLine $line
+        if ($null -eq $relayPort) {
+            $err = ''
+            try { $err = $process.StandardError.ReadToEnd() } catch { }
+            throw ("Relay failed to start: $line $err").Trim()
+        }
+        return [pscustomobject]@{ Process = $process; Port = $relayPort }
+    } catch {
+        Stop-LauncherProcess $process
+        throw
+    } finally {
+        [Environment]::SetEnvironmentVariable('PHONECTL_PEER', $previousPeer, 'Process')
+    }
+}
+
+function Stop-LanRelay {
+    param($Relay)
+    if ($null -eq $Relay) { return }
+    $process = if ($Relay -is [System.Diagnostics.Process]) { $Relay } else { $Relay.Process }
+    if ($null -eq $process) { return }
+    try {
+        if (-not $process.HasExited) {
+            try { $process.StandardInput.Close() } catch { }
+            [void]$process.WaitForExit(1000)
+        }
+    } finally {
+        Stop-LauncherProcess $process
+    }
+}
+
+function Resolve-PhoneCtlScrcpyTransport {
+    param([string]$ProjectRoot, [string]$ScrcpyPath, [string]$Transport = 'lan')
+    if ($Transport -eq 'adb') { return 'adb' }
+    $serverPath = Join-Path $ProjectRoot 'server\build\scrcpy-server'
+    if (-not (Test-Path -LiteralPath $serverPath -PathType Leaf)) {
+        Write-LauncherMessage "WARNING: $serverPath not found; using stock scrcpy server over ADB."
+        return 'adb'
+    }
+    $versionResult = Invoke-LauncherProcess -FilePath $ScrcpyPath -Arguments @('--version') -TimeoutSeconds 5 -CaptureOutput
+    if ($versionResult.ExitCode -ne 0 -or -not (Test-ScrcpyForkCompatible $versionResult.Output)) {
+        $version = ConvertFrom-ScrcpyVersion $versionResult.Output
+        $reported = if ($version) { $version } else { 'unknown' }
+        Write-LauncherMessage "WARNING: scrcpy version is $reported (expected 5.0.1); using stock scrcpy server over ADB."
+        return 'adb'
+    }
+    return 'lan'
+}
+
+function Invoke-LanScrcpySession {
+    param(
+        [string]$ProjectRoot,
+        [string]$AdbPath,
+        [string]$ScrcpyPath,
+        [string]$DeviceId,
+        [string]$WindowTitle,
+        [string[]]$ScrcpyArgs = @()
+    )
+    $serverPath = Join-Path $ProjectRoot 'server\build\scrcpy-server'
+    $relayPath = Join-Path $ProjectRoot 'relay\build\phonectl-relay.exe'
+    $phoneIp = Get-PhoneWlanAddress -AdbPath $AdbPath -DeviceId $DeviceId
+    $laptopIp = Get-LaptopLanAddress -PhoneAddress $phoneIp
+    $phonePort = Get-RandomLanPort
+    $sessionPath = New-LanSessionFilePath
+    $relay = $null
+    $previousServerPath = [Environment]::GetEnvironmentVariable('SCRCPY_SERVER_PATH', 'Process')
+    try {
+        try {
+            $relay = Start-LanRelay -RelayPath $relayPath -PhoneAddress $phoneIp -PhonePort $phonePort -LaptopAddress $laptopIp -SessionPath $sessionPath
+            $push = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'push', $sessionPath, '/data/local/tmp/phonectl-session') -TimeoutSeconds 15
+            if ($push.ExitCode -ne 0) { throw "Push phonectl-session failed: $($push.Error) $($push.Output)" }
+            $chmod = Invoke-Adb -AdbPath $AdbPath -Arguments @('-s', $DeviceId, 'shell', 'chmod', '600', '/data/local/tmp/phonectl-session') -TimeoutSeconds 5
+            if ($chmod.ExitCode -ne 0) { throw "chmod phonectl-session failed: $($chmod.Error) $($chmod.Output)" }
+        } finally {
+            if ($sessionPath -and (Test-Path -LiteralPath $sessionPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $sessionPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        [Environment]::SetEnvironmentVariable('SCRCPY_SERVER_PATH', $serverPath, 'Process')
+        $arguments = @(
+            '-s', $DeviceId, '-S', '-w', '--window-title', $WindowTitle,
+            '--force-adb-forward', '--tunnel-host=127.0.0.1', "--tunnel-port=$($relay.Port)"
+        ) + $ScrcpyArgs
+        if ($relay.Process -is [System.Diagnostics.Process]) {
+            $session = Invoke-LauncherProcess -FilePath $ScrcpyPath -Arguments $arguments -TimeoutSeconds 0 -LogOutput -CompanionProcess $relay.Process
+        } else {
+            $session = Invoke-LauncherProcess -FilePath $ScrcpyPath -Arguments $arguments -TimeoutSeconds 0 -LogOutput
+        }
+        return $session.ExitCode
+    } finally {
+        [Environment]::SetEnvironmentVariable('SCRCPY_SERVER_PATH', $previousServerPath, 'Process')
+        Stop-LanRelay $relay
+    }
+}
+
 function Invoke-PhoneCtl {
     param([string]$ProjectRoot, [string]$Mode, [string[]]$ScrcpyArgs)
     $jarPath = Join-Path $ProjectRoot 'server\build\server.jar'
@@ -276,7 +453,11 @@ function Invoke-PhoneCtl {
     $config = Read-PhoneCtlConfig $configPath
     $serial = ''
     if (@($config.PSObject.Properties | Where-Object Name -eq 'serial').Count -gt 0) { $serial = $config.serial }
+    $transport = Get-PhoneCtlTransport -Config $config
     $ScrcpyArgs = @(Merge-PhoneCtlScrcpyArgs -Config $config -ScrcpyArgs $ScrcpyArgs)
+    if ($Mode -eq 'scrcpy') {
+        $transport = Resolve-PhoneCtlScrcpyTransport -ProjectRoot $ProjectRoot -ScrcpyPath $scrcpyPath -Transport $transport
+    }
     $previousAdb = [Environment]::GetEnvironmentVariable('ADB', 'Process')
     try {
         $env:ADB = $adbPath
@@ -302,8 +483,19 @@ function Invoke-PhoneCtl {
                     $title = $model.Output.Trim()
                     if ($model.ExitCode -ne 0 -or -not $title) { $title = $serial }
                     Write-LauncherMessage "Starting scrcpy ($title)."
-                    $session = Invoke-LauncherProcess -FilePath $scrcpyPath -Arguments (@('-s', $phone.Id, '-S', '-w', '--window-title', $title) + $ScrcpyArgs) -TimeoutSeconds 0 -LogOutput
-                    $code = $session.ExitCode
+                    if ($transport -eq 'lan') {
+                        try {
+                            $code = Invoke-LanScrcpySession -ProjectRoot $ProjectRoot -AdbPath $adbPath -ScrcpyPath $scrcpyPath -DeviceId $phone.Id -WindowTitle $title -ScrcpyArgs $ScrcpyArgs
+                        } catch [System.Management.Automation.PipelineStoppedException] {
+                            throw
+                        } catch {
+                            Write-LauncherMessage "LAN session failed: $($_.Exception.Message)"
+                            $code = 1
+                        }
+                    } else {
+                        $session = Invoke-LauncherProcess -FilePath $scrcpyPath -Arguments (@('-s', $phone.Id, '-S', '-w', '--window-title', $title) + $ScrcpyArgs) -TimeoutSeconds 0 -LogOutput
+                        $code = $session.ExitCode
+                    }
                     if ($code -eq 0) { Write-LauncherMessage 'scrcpy closed normally.'; return 0 }
                 }
                 Write-LauncherMessage "Session ended (code $code)."
@@ -323,7 +515,8 @@ function Invoke-PhoneCtlLauncher {
     $owned = $false
     try {
         $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        $mutex = New-Object System.Threading.Mutex($false, "Local\phonectl-$sid")
+        $mutexName = if ($env:PHONECTL_MUTEX) { $env:PHONECTL_MUTEX } else { "Local\phonectl-$sid" }
+        $mutex = New-Object System.Threading.Mutex($false, $mutexName)
         try { $owned = $mutex.WaitOne(0) }
         catch [System.Threading.AbandonedMutexException] { $owned = $true }
         if (-not $owned) { Write-Host 'phonectl already running'; return 0 }

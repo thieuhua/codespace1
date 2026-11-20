@@ -15,7 +15,7 @@ namespace PhoneCtl {
         public SessionIdentity(byte[] pfx, string password) {
             Pfx = pfx; Password = password;
             Certificate = new X509Certificate2(pfx, password,
-                X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet);
+                X509KeyStorageFlags.Exportable | X509KeyStorageFlags.UserKeySet);
         }
         public void Dispose() { Certificate.Dispose(); Array.Clear(Pfx, 0, Pfx.Length); }
     }
