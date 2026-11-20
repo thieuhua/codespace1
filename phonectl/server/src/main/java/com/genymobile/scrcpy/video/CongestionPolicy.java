@@ -50,6 +50,7 @@ public final class CongestionPolicy {
     private long lastAdjustment;
     private long lastCongestion = Long.MIN_VALUE / 2;
     private int droppedWhileWaiting;
+    private long bytesSinceAdjustment;
 
     public CongestionPolicy(int maxPackets, int maxBytes, long budgetMs, int requestedBitrate, int minimumBitrate, long now, Logger logger) {
         if (maxPackets <= 0 || maxBytes <= 0 || budgetMs <= 0 || requestedBitrate <= 0 || minimumBitrate <= 0) {
@@ -118,6 +119,11 @@ public final class CongestionPolicy {
     }
 
     public synchronized void onWriteCompleted(long durationMs, long now) {
+        onWriteCompleted(durationMs, now, 0);
+    }
+
+    public synchronized void onWriteCompleted(long durationMs, long now, int bytes) {
+        bytesSinceAdjustment += bytes;
         // A slow write ages the queue too: if the encoder thread already reacted during this write, do not react twice
         // (that would drop the fresh recovery IDR and cut the bitrate a second time).
         if (durationMs > budgetMs && lastCongestion < now - durationMs) {
@@ -142,14 +148,23 @@ public final class CongestionPolicy {
         int next = Math.max(minimumBitrate, (int) (bitrate * 0.7));
         setBitrate(next, "decrease");
         lastAdjustment = now;
+        bytesSinceAdjustment = 0;
     }
 
     public synchronized Actions actions(long now) {
         checkAge(now);
         if (!waitingForKeyFrame && now - lastAdjustment >= 2000) {
-            int next = (int) Math.min(maximumBitrate, (long) bitrate + Math.max(1, maximumBitrate / 10));
-            setBitrate(next, "increase after 2s uncongested");
+            // Probe upwards only when the link actually carried at least half the current rate. A still screen sends
+            // almost nothing, proves nothing about capacity, and must not let the bitrate climb back to the maximum
+            // (the next interaction would then burst far above what the link can carry).
+            long carriedBits = bytesSinceAdjustment * 8;
+            long expectedBits = (long) bitrate * (now - lastAdjustment) / 1000;
+            if (carriedBits * 2 >= expectedBits) {
+                int next = (int) Math.min(maximumBitrate, (long) bitrate + Math.max(1, maximumBitrate / 10));
+                setBitrate(next, "increase after 2s uncongested");
+            }
             lastAdjustment = now;
+            bytesSinceAdjustment = 0;
         }
         // Retry while waiting: the codec may ignore a sync request during a reset.
         boolean sync = waitingForKeyFrame && syncPending && (!syncEverRequested || now - lastSync >= 1000);

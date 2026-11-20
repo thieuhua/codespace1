@@ -165,11 +165,8 @@ final class LanListener {
                 reserved[requested] = true;
                 index = requested;
             }
-            if ("video".equals(roles[index])) {
-                // Backstop if SIOCOUTQNSD is unreadable: a fixed send buffer disables auto-tuning, which would otherwise
-                // let the kernel queue megabytes (seconds of video) on a slow link.
-                raw.setSendBufferSize(128 * 1024);
-            } else {
+            // The video socket's kernel queue is bounded by KernelBacklog (TCP_NOTSENT_LOWAT); its send buffer stays auto-tuned.
+            if (!"video".equals(roles[index])) {
                 raw.setTcpNoDelay(true);
                 tls.setTcpNoDelay(true);
                 try {

@@ -41,6 +41,18 @@ final class StreamSocket implements Closeable {
         return raw != null;
     }
 
+    /** Best effort: a fixed send buffer disables auto-tuning, bounding how much the kernel may queue. */
+    void setSendBufferSize(int bytes) {
+        if (raw == null) {
+            return;
+        }
+        try {
+            raw.setSendBufferSize(bytes);
+        } catch (java.net.SocketException e) {
+            // keep auto-tuning
+        }
+    }
+
     FileDescriptor descriptor() throws ReflectiveOperationException {
         if (local != null) {
             return local.getFileDescriptor();

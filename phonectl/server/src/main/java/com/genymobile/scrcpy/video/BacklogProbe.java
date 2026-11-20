@@ -8,7 +8,20 @@ package com.genymobile.scrcpy.video;
  * that buffer, not the sender queue, is where seconds of video pile up, so the sender must look at it before writing more.
  */
 public interface BacklogProbe {
-    BacklogProbe NONE = () -> -1;
+    BacklogProbe NONE = new BacklogProbe() {
+        @Override
+        public int unsentBytes() {
+            return -1;
+        }
+
+        @Override
+        public void setUnsentLimit(int bytes) {
+            // no transport control
+        }
+    };
 
     int unsentBytes();
+
+    /** Make the kernel block write() once more than this many bytes are unsent (TCP_NOTSENT_LOWAT). */
+    void setUnsentLimit(int bytes);
 }

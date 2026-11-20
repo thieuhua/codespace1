@@ -118,11 +118,17 @@ public final class CongestionPolicyTest {
             check(policy.actions(2299).bitrate == 0, "no increase before 2000ms");
 
             // At t=2300 (+2000ms): +10% of 2_000_000 (+200_000) -> 1_200_000
+            policy.onWriteCompleted(1, 2299, 600_000); // link busy at the current rate
             check(policy.actions(2300).bitrate == 1_200_000, "expected additive increase to 1200000");
+            policy.onWriteCompleted(1, 4299, 600_000); // link busy at the current rate
             check(policy.actions(4300).bitrate == 1_400_000, "expected additive increase to 1400000");
+            policy.onWriteCompleted(1, 6299, 600_000); // link busy at the current rate
             check(policy.actions(6300).bitrate == 1_600_000, "expected additive increase to 1600000");
+            policy.onWriteCompleted(1, 8299, 600_000); // link busy at the current rate
             check(policy.actions(8300).bitrate == 1_800_000, "expected additive increase to 1800000");
+            policy.onWriteCompleted(1, 10299, 600_000); // link busy at the current rate
             check(policy.actions(10300).bitrate == 2_000_000, "expected additive increase capped at 2000000");
+            policy.onWriteCompleted(1, 12299, 600_000); // link busy at the current rate
             check(policy.actions(12300).bitrate == 0, "must not exceed requested bitrate");
         });
 
@@ -150,6 +156,18 @@ public final class CongestionPolicyTest {
             check(policy.kernelBudgetBytes() == 35_000, "budget follows the lowered bitrate");
             CongestionPolicy slow = new CongestionPolicy(32, 65536, 100, 1_000_000, 1_000_000, 0, s -> { });
             check(slow.kernelBudgetBytes() == 16 * 1024, "16 KiB floor at low bitrate");
+        });
+
+        run("a still screen (little data sent) holds the bitrate instead of probing upwards", () -> {
+            CongestionPolicy policy = new CongestionPolicy(32, 65536, 100, 8_000_000, 1_000_000, 0, s -> { });
+            policy.onWriteCompleted(150, 150); // congestion: 8 -> 5.6 Mbps
+            check(policy.actions(150).bitrate == 5_600_000, "decrease reported");
+            check(policy.offer(new byte[] {1}, false, true, 160), "recover with IDR");
+            policy.poll(160);
+            policy.onWriteCompleted(1, 1000, 2_000); // a few small frames only
+            check(policy.actions(2200).bitrate == 0, "no increase while the link is idle");
+            policy.onWriteCompleted(1, 4100, 1_000_000); // interaction: the link is busy again
+            check(policy.actions(4200).bitrate == 6_400_000, "increase once the link carries the current rate");
         });
 
         run("queue capacity overflow drops media frames but never drops protected config packets", () -> {

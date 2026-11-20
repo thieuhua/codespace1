@@ -16,6 +16,7 @@ public final class VideoSender {
     private volatile IOException failure;
     private volatile boolean closed;
     private boolean finishing;
+    private int unsentLimit = -1;
 
     public VideoSender(OutputStream output, CongestionPolicy policy, Runnable diagnostics, Runnable onFailure) {
         this(output, policy, diagnostics, BacklogProbe.NONE, onFailure);
@@ -67,7 +68,7 @@ public final class VideoSender {
                 long started = now();
                 output.write(packet.data); // Never interrupt/drop part of an in-flight packet.
                 long completed = now();
-                policy.onWriteCompleted(completed - started, completed);
+                policy.onWriteCompleted(completed - started, completed, packet.data.length);
                 diagnostics.run();
             }
         } catch (IOException e) {
@@ -82,6 +83,12 @@ public final class VideoSender {
     }
 
     private void waitForKernel() throws InterruptedException {
+        // Keep the kernel's unsent-data limit at about half the latency budget for the current bitrate.
+        int limit = policy.kernelBudgetBytes();
+        if (limit != unsentLimit) {
+            unsentLimit = limit;
+            backlog.setUnsentLimit(limit);
+        }
         while (!closed) {
             int unsent = backlog.unsentBytes();
             if (unsent < 0 || unsent <= policy.kernelBudgetBytes()) {
