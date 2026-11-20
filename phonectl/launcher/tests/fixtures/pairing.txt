@@ -1,0 +1,10 @@
+List of discovered mdns services
+adb-PHONE123-pair _adb-tls-pairing._tcp 192.168.1.42:41000
+adb-PHONE123-duplicate. _adb-tls-pairing._tcp.local. 192.168.1.42:41000
+adb-OTHER-pair _adb-tls-pairing._tcp. [fe80::2%12]:42000
+adb-PHONE123-connect _adb-tls-connect._tcp 192.168.1.42:37123
+studio-QR _adb-tls-pairing._tcp 192.168.1.43:43000
+bad-ip _adb-tls-pairing._tcp 999.999.1.2:41000
+bad-port _adb-tls-pairing._tcp 192.168.1.42:0
+bad-overflow _adb-tls-pairing._tcp 192.168.1.42:9999999999999
+not a service
