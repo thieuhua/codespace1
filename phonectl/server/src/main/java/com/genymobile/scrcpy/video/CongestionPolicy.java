@@ -49,6 +49,7 @@ public final class CongestionPolicy {
     private long lastSync;
     private long lastAdjustment;
     private long lastCongestion = Long.MIN_VALUE / 2;
+    private long lastDecrease = Long.MIN_VALUE / 2;
     private int droppedWhileWaiting;
     private long bytesSinceAdjustment;
 
@@ -110,8 +111,11 @@ public final class CongestionPolicy {
         // Config/session records cannot expire, and must not repeatedly retrigger congestion by themselves.
         for (Packet packet : queue) {
             if (!packet.protectedPacket) {
-                if (now - packet.queuedAt > budgetMs) {
-                    congested(now, "oldest queue age=" + (now - packet.queuedAt) + "ms");
+                long age = now - packet.queuedAt;
+                if (age > severeMs()) {
+                    congested(now, "oldest queue age=" + age + "ms");
+                } else if (age > budgetMs) {
+                    slowDown(now, "oldest queue age=" + age + "ms");
                 }
                 break;
             }
@@ -126,9 +130,34 @@ public final class CongestionPolicy {
         bytesSinceAdjustment += bytes;
         // A slow write ages the queue too: if the encoder thread already reacted during this write, do not react twice
         // (that would drop the fresh recovery IDR and cut the bitrate a second time).
-        if (durationMs > budgetMs && lastCongestion < now - durationMs) {
+        if (durationMs > severeMs() && lastCongestion < now - durationMs) {
             congested(now, "write duration=" + durationMs + "ms");
+        } else if (durationMs > budgetMs) {
+            slowDown(now, "write duration=" + durationMs + "ms");
         }
+    }
+
+    /**
+     * Two tiers. Above the budget, only lower the bitrate (at most every 500 ms) and keep every frame: dropping means freezing
+     * until the next IDR, and the IDR itself is large enough to re-trigger congestion on a jittery link (observed on a 2.4 GHz
+     * hotspot: freeze, IDR, freeze... about 1 s per round). Only a backlog of three budgets drops frames and waits for an IDR.
+     */
+    private long severeMs() {
+        return 3L * budgetMs;
+    }
+
+    private void slowDown(long now, String reason) {
+        if (now - lastDecrease < 500) {
+            return;
+        }
+        lastDecrease = now;
+        int next = Math.max(minimumBitrate, (int) (bitrate * 0.7));
+        if (next != bitrate) {
+            logger.log("video congestion (mild): " + reason + "; lower bitrate, keep frames");
+        }
+        setBitrate(next, "decrease");
+        lastAdjustment = now;
+        bytesSinceAdjustment = 0;
     }
 
     private void congested(long now, String reason) {
@@ -142,6 +171,7 @@ public final class CongestionPolicy {
             }
         }
         lastCongestion = now;
+        lastDecrease = now;
         waitingForKeyFrame = true;
         syncPending = true;
         logger.log("video congestion: " + reason + "; dropped=" + dropped + "; wait for IDR");

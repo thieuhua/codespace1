@@ -29,7 +29,7 @@ public final class CongestionPolicyTest {
     }
 
     public static void main(String[] args) {
-        run("queue age budget drops pending media frames, preserves config packets, waits for IDR and logs decisions", () -> {
+        run("severe backlog (3x budget) drops pending media frames, preserves config packets, waits for IDR and logs decisions", () -> {
             List<String> logs = new ArrayList<>();
             CongestionPolicy policy = new CongestionPolicy(32, 65536, 100, 8_000_000, 1_000_000, 0, logs::add);
 
@@ -48,30 +48,30 @@ public final class CongestionPolicyTest {
             check(policy.offer(frame2, false, false, 50), "P-frame within budget must be accepted");
             check(policy.size() == 4, "expected 4 packets queued");
 
-            // At t=125ms, oldest non-protected packet (frame1 queued at t=20ms) has age 105ms > 100ms budget.
-            check(!policy.offer(pFrameAfterCongestion, false, false, 125), "non-IDR on congestion must be dropped");
+            // At t=325ms, oldest non-protected packet (frame1 queued at t=20ms) has age 305ms > 3 x 100ms budget.
+            check(!policy.offer(pFrameAfterCongestion, false, false, 325), "non-IDR on congestion must be dropped");
             check(policy.size() == 2, "only protected packets (header + config) must survive drop");
             check(policy.getBitrate() == 5_600_000, "bitrate must decrease by 0.7x to 5600000");
 
-            CongestionPolicy.Actions actions = policy.actions(125);
+            CongestionPolicy.Actions actions = policy.actions(325);
             check(actions.bitrate == 5_600_000, "actions must report updated bitrate");
             check(actions.requestSync, "actions must request sync frame on congestion");
 
             // Protected config packet arriving while waiting for IDR must still be accepted.
-            check(policy.offer(configDuringRecovery, true, false, 130), "config packet during IDR wait must never be dropped");
-            check(!policy.offer(new byte[] {1, 1}, false, false, 140), "P-frame during IDR wait must be dropped");
+            check(policy.offer(configDuringRecovery, true, false, 330), "config packet during IDR wait must never be dropped");
+            check(!policy.offer(new byte[] {1, 1}, false, false, 340), "P-frame during IDR wait must be dropped");
 
-            // IDR arrives at t=150ms: exits drop-until-IDR mode.
-            check(policy.offer(idrFrame, false, true, 150), "IDR keyframe must be accepted");
-            check(policy.offer(frameAfterIdr, false, false, 160), "P-frame after IDR must be accepted");
+            // IDR arrives at t=350ms: exits drop-until-IDR mode.
+            check(policy.offer(idrFrame, false, true, 350), "IDR keyframe must be accepted");
+            check(policy.offer(frameAfterIdr, false, false, 360), "P-frame after IDR must be accepted");
 
             // Verify order of surviving packets: header, config, configDuringRecovery, idrFrame, frameAfterIdr.
-            check(Arrays.equals(header, policy.poll(160).data), "first polled packet must be header");
-            check(Arrays.equals(config, policy.poll(160).data), "second polled packet must be config");
-            check(Arrays.equals(configDuringRecovery, policy.poll(160).data), "third polled packet must be configDuringRecovery");
-            check(Arrays.equals(idrFrame, policy.poll(160).data), "fourth polled packet must be IDR");
-            check(Arrays.equals(frameAfterIdr, policy.poll(160).data), "fifth polled packet must be post-IDR frame");
-            check(policy.poll(160) == null, "queue must be empty");
+            check(Arrays.equals(header, policy.poll(360).data), "first polled packet must be header");
+            check(Arrays.equals(config, policy.poll(360).data), "second polled packet must be config");
+            check(Arrays.equals(configDuringRecovery, policy.poll(360).data), "third polled packet must be configDuringRecovery");
+            check(Arrays.equals(idrFrame, policy.poll(360).data), "fourth polled packet must be IDR");
+            check(Arrays.equals(frameAfterIdr, policy.poll(360).data), "fifth polled packet must be post-IDR frame");
+            check(policy.poll(360) == null, "queue must be empty");
             check(!logs.isEmpty(), "decisions must be logged");
         });
 
@@ -79,22 +79,22 @@ public final class CongestionPolicyTest {
             List<String> logs = new ArrayList<>();
             CongestionPolicy policy = new CongestionPolicy(32, 65536, 100, 4_000_000, 1_000_000, 0, logs::add);
 
-            policy.onWriteCompleted(150, 200); // Write took 150ms > 100ms budget at t=200ms
-            CongestionPolicy.Actions first = policy.actions(200);
-            check(first.requestSync, "first sync request must fire immediately at t=200ms");
+            policy.onWriteCompleted(350, 400); // Write took 350ms > 3 x 100ms budget at t=400ms
+            CongestionPolicy.Actions first = policy.actions(400);
+            check(first.requestSync, "first sync request must fire immediately at t=400ms");
             check(first.bitrate == 2_800_000, "bitrate must drop to 2800000");
 
-            check(!policy.actions(500).requestSync, "sync must not fire at +300ms");
-            check(!policy.actions(1199).requestSync, "sync must not fire at +999ms");
+            check(!policy.actions(700).requestSync, "sync must not fire at +300ms");
+            check(!policy.actions(1399).requestSync, "sync must not fire at +999ms");
 
-            CongestionPolicy.Actions retry = policy.actions(1200);
+            CongestionPolicy.Actions retry = policy.actions(1400);
             check(retry.requestSync, "sync retry must fire at +1000ms while still waiting for IDR");
             check(retry.bitrate == 0, "unchanged bitrate must report 0");
 
-            // Accept and send IDR at t=1300ms: sync requests must stop.
-            check(policy.offer(new byte[] {42}, false, true, 1300), "IDR must be accepted");
-            check(policy.poll(1305) != null, "IDR polled by sender");
-            check(!policy.actions(2500).requestSync, "no sync request after IDR accepted");
+            // Accept and send IDR at t=1500ms: sync requests must stop.
+            check(policy.offer(new byte[] {42}, false, true, 1500), "IDR must be accepted");
+            check(policy.poll(1505) != null, "IDR polled by sender");
+            check(!policy.actions(2700).requestSync, "no sync request after IDR accepted");
         });
 
         run("AIMD bitrate floors at vminbr and increases by 10% every 2s uncongested up to requested bitrate", () -> {
@@ -108,28 +108,28 @@ public final class CongestionPolicyTest {
             policy.poll(110);
 
             // 2nd congestion: 1_400_000 * 0.7 = 980_000 -> clamped to vminbr 1_000_000
-            // Single writer: the 2nd slow write starts after the 1st episode (t=180..300).
-            policy.onWriteCompleted(120, 300);
-            check(policy.actions(300).bitrate == 1_000_000, "expected floor at vminbr 1000000");
-            check(policy.offer(new byte[] {1}, false, true, 310), "recover with IDR");
-            policy.poll(310);
+            // Single writer: the 2nd slow write starts after the 1st episode (t=580..700).
+            policy.onWriteCompleted(120, 700);
+            check(policy.actions(700).bitrate == 1_000_000, "expected floor at vminbr 1000000");
+            check(policy.offer(new byte[] {1}, false, true, 710), "recover with IDR");
+            policy.poll(710);
 
-            // Before 2s uncongested since last adjustment (t=300): no increase at t=2299
-            check(policy.actions(2299).bitrate == 0, "no increase before 2000ms");
+            // Before 2s uncongested since last adjustment (t=700): no increase at t=2699
+            check(policy.actions(2699).bitrate == 0, "no increase before 2000ms");
 
-            // At t=2300 (+2000ms): +10% of 2_000_000 (+200_000) -> 1_200_000
+            // At t=2700 (+2000ms): +10% of 2_000_000 (+200_000) -> 1_200_000
             policy.onWriteCompleted(1, 2299, 600_000); // link busy at the current rate
-            check(policy.actions(2300).bitrate == 1_200_000, "expected additive increase to 1200000");
+            check(policy.actions(2700).bitrate == 1_200_000, "expected additive increase to 1200000");
             policy.onWriteCompleted(1, 4299, 600_000); // link busy at the current rate
-            check(policy.actions(4300).bitrate == 1_400_000, "expected additive increase to 1400000");
+            check(policy.actions(4700).bitrate == 1_400_000, "expected additive increase to 1400000");
             policy.onWriteCompleted(1, 6299, 600_000); // link busy at the current rate
-            check(policy.actions(6300).bitrate == 1_600_000, "expected additive increase to 1600000");
+            check(policy.actions(6700).bitrate == 1_600_000, "expected additive increase to 1600000");
             policy.onWriteCompleted(1, 8299, 600_000); // link busy at the current rate
-            check(policy.actions(8300).bitrate == 1_800_000, "expected additive increase to 1800000");
+            check(policy.actions(8700).bitrate == 1_800_000, "expected additive increase to 1800000");
             policy.onWriteCompleted(1, 10299, 600_000); // link busy at the current rate
-            check(policy.actions(10300).bitrate == 2_000_000, "expected additive increase capped at 2000000");
+            check(policy.actions(10700).bitrate == 2_000_000, "expected additive increase capped at 2000000");
             policy.onWriteCompleted(1, 12299, 600_000); // link busy at the current rate
-            check(policy.actions(12300).bitrate == 0, "must not exceed requested bitrate");
+            check(policy.actions(12700).bitrate == 0, "must not exceed requested bitrate");
         });
 
         run("a slow write already handled by the encoder thread does not cut bitrate twice or drop the recovery IDR", () -> {
@@ -139,13 +139,13 @@ public final class CongestionPolicyTest {
             policy.poll(0); // the sender starts writing it at t=0
             check(policy.offer(new byte[] {2}, false, false, 10), "second frame queued");
             // While that write is stuck, the queued frame ages past the budget: the encoder thread reacts once.
-            check(!policy.offer(new byte[] {3}, false, false, 120), "P-frame dropped while waiting for IDR");
-            check(policy.actions(120).bitrate == 1_400_000, "one decrease");
-            check(policy.offer(new byte[] {4}, false, true, 130), "recovery IDR accepted");
-            // The stuck write (t=0..150) completes: same episode, no second reaction.
-            policy.onWriteCompleted(150, 150);
-            check(policy.actions(150).bitrate == 0, "no second decrease");
-            CongestionPolicy.Packet next = policy.poll(150);
+            check(!policy.offer(new byte[] {3}, false, false, 320), "P-frame dropped while waiting for IDR");
+            check(policy.actions(320).bitrate == 1_400_000, "one decrease");
+            check(policy.offer(new byte[] {4}, false, true, 330), "recovery IDR accepted");
+            // The stuck write (t=0..350) completes: same episode, no second reaction.
+            policy.onWriteCompleted(350, 350);
+            check(policy.actions(350).bitrate == 0, "no second decrease");
+            CongestionPolicy.Packet next = policy.poll(350);
             check(next != null && next.data[0] == 4, "recovery IDR still queued");
         });
 
@@ -168,6 +168,19 @@ public final class CongestionPolicyTest {
             check(policy.actions(2200).bitrate == 0, "no increase while the link is idle");
             policy.onWriteCompleted(1, 4100, 1_000_000); // interaction: the link is busy again
             check(policy.actions(4200).bitrate == 6_400_000, "increase once the link carries the current rate");
+        });
+
+        run("mild backlog lowers the bitrate at most every 500 ms and keeps every frame", () -> {
+            CongestionPolicy policy = new CongestionPolicy(32, 65536, 100, 8_000_000, 1_000_000, 0, x -> { });
+            check(policy.offer(new byte[] {1}, false, true, 0), "IDR queued");
+            check(policy.offer(new byte[] {2}, false, false, 150), "mild (age 150 ms): frame kept");
+            check(policy.getBitrate() == 5_600_000, "one decrease");
+            check(policy.offer(new byte[] {3}, false, false, 200), "still mild: frame kept");
+            check(policy.getBitrate() == 5_600_000, "no second decrease within 500 ms");
+            check(!policy.actions(200).requestSync, "no IDR request for mild congestion");
+            check(policy.size() == 3, "nothing dropped");
+            policy.onWriteCompleted(150, 700); // slow write later on: another mild step
+            check(policy.getBitrate() == 3_919_999, "second decrease after 500 ms");
         });
 
         run("queue capacity overflow drops media frames but never drops protected config packets", () -> {
