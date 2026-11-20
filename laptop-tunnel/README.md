@@ -20,6 +20,8 @@ Client ──► laptop.xuanthieu.site:20000-20099 (Cloudflare DNS-only → 103.
 ## Dùng hằng ngày
 
 Chạy dịch vụ trên laptop ở một cổng trong 20000–20099, nghe trên `0.0.0.0` (hoặc `10.89.0.2`).
+**Cổng ngoài dải này không đi qua tunnel** (VPS không DNAT, ufw và tường lửa Windows chặn), client sẽ timeout.
+Ví dụ: MQTT TLS của dự án IoT dùng `20083`.
 Từ bất kỳ đâu: `laptop.xuanthieu.site:<cổng>`. Không cần sudo hay sửa VPS.
 
 - Docker: `docker run -p 20080:80 ...` là đủ.
