@@ -1,0 +1,6 @@
+vendor/
+build/
+.gradle/
+local.properties
+*.apk
+.kotlin/
