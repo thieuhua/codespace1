@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'phonectl.ps1')
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'install.ps1')
 $fixtures = Join-Path $PSScriptRoot 'fixtures'
 $script:passed = 0
 $script:failed = 0
@@ -265,7 +266,11 @@ Test-Case 'config: missing, valid and malformed input without filesystem writes'
     Assert-Equal (Read-PhoneSerial 'unused') ''
     $state.Exists = $true
     Assert-Equal (Read-PhoneSerial 'unused') 'PHONE123'
-    foreach ($bad in @('{bad', '{}', '{"serial":1}', '{"serial":" "}', 'null')) {
+    $state.Content = '{"scrcpyArgs":["--no-audio"]}'
+    Assert-Equal (Read-PhoneSerial 'unused') ''
+    $state.Content = '{}'
+    Assert-Equal (Read-PhoneSerial 'unused') ''
+    foreach ($bad in @('{bad', '{"serial":1}', '{"serial":" "}', 'null', '[]', '[{}]', '1', 'true', '"text"', '{"scrcpyArgs":"--no-audio"}', '{"scrcpyArgs":[1]}')) {
         $state.Content = $bad
         $message = ''
         try { $null = Read-PhoneSerial 'unused' } catch { $message = $_.Exception.Message }
@@ -326,10 +331,14 @@ Test-Case 'flow: same ADB environment, scrcpy args, nonzero retries and capped b
     $state = @{ Sessions = 0; Starts = 0; Delays = New-Object System.Collections.Generic.List[int] }
     $previousAdb = $env:ADB
     function Resolve-LauncherExecutable { param($Candidates, $Name); "resolved:$Name" }
-    function Read-PhoneSerial { param($ConfigPath); 'PHONE123' }
+    function Read-PhoneCtlConfig { param($ConfigPath); [pscustomobject]@{ serial = 'PHONE123'; scrcpyArgs = @('--max-fps', '30') } }
     function Invoke-Adb {
         param($AdbPath, $Arguments)
         Assert-Equal $AdbPath 'resolved:adb.exe'
+        if ($Arguments[0] -eq '-s') {
+            Assert-Equal ($Arguments -join '|') '-s|192.168.1.42:37123|shell|getprop|ro.product.model'
+            return New-AdbResult "Fixture Phone`r`n"
+        }
         Assert-Equal $Arguments[0] 'start-server'
         $state.Starts++
         New-AdbResult
@@ -339,10 +348,11 @@ Test-Case 'flow: same ADB environment, scrcpy args, nonzero retries and capped b
         [pscustomobject]@{ Id = '192.168.1.42:37123'; Serial = 'PHONE123' }
     }
     function Invoke-LauncherProcess {
-        param($FilePath, $Arguments, $TimeoutSeconds)
+        param($FilePath, $Arguments, $TimeoutSeconds, [switch]$LogOutput)
         Assert-Equal $env:ADB 'resolved:adb.exe'
         Assert-Equal $FilePath 'resolved:scrcpy.exe'
-        Assert-Equal ($Arguments -join '|') '-s|192.168.1.42:37123|-S|-w|--window-title|My phone|--no-audio'
+        Assert-Equal ($Arguments -join '|') '-s|192.168.1.42:37123|-S|-w|--window-title|Fixture Phone|--max-fps|30|--window-title|My phone|--no-audio'
+        Assert-True $LogOutput
         Assert-Equal $TimeoutSeconds 0
         $state.Sessions++
         if ($state.Sessions -le 6) { return New-AdbResult '' 1 }
@@ -358,7 +368,7 @@ Test-Case 'flow: same ADB environment, scrcpy args, nonzero retries and capped b
 Test-Case 'flow: unavailable device uses mDNS fallback and preserves selection on retry' {
     $state = @{ ConfigReads = 0; Saved = ''; Prompts = 0; Waits = 0; MdnsCalls = 0; Sessions = 0 }
     function Resolve-LauncherExecutable { param($Candidates, $Name); "resolved:$Name" }
-    function Read-PhoneSerial { param($ConfigPath); $state.ConfigReads++; '' }
+    function Read-PhoneCtlConfig { param($ConfigPath); $state.ConfigReads++; [pscustomobject]@{} }
     function Save-PhoneSerial { param($ConfigPath, $Serial); $state.Saved = $Serial }
     function Read-Host { param($Prompt); $state.Prompts++; '2' }
     function Invoke-Adb { param($AdbPath, $Arguments); New-AdbResult }
@@ -377,7 +387,7 @@ Test-Case 'flow: unavailable device uses mDNS fallback and preserves selection o
         [pscustomobject]@{ Id = 'second'; Serial = 'SECOND' }
     }
     function Invoke-LauncherProcess {
-        param($FilePath, $Arguments, $TimeoutSeconds)
+        param($FilePath, $Arguments, $TimeoutSeconds, [switch]$LogOutput)
         $state.Sessions++
         New-AdbResult '' ([int]($state.Sessions -eq 1))
     }
@@ -444,6 +454,373 @@ Test-Case 'cancellation: stopping the pipeline cleans up the owned child process
             $child = Get-Process -Id $shared.ChildPid -ErrorAction SilentlyContinue
             if ($child) { $child.Kill(); $child.Dispose() }
         }
+    }
+}
+
+Test-Case 'pairing parser: service isolation, duplicate endpoints, IPv6 and invalid input' {
+    $text = Get-Content (Join-Path $fixtures 'pairing.txt') -Raw
+    $services = @(ConvertFrom-AdbMdnsServices $text -Service pairing)
+    Assert-Equal $services.Count 3
+    Assert-Equal $services[0].Serial 'PHONE123'
+    Assert-Equal $services[0].Address '192.168.1.42:41000'
+    Assert-Equal $services[1].Address '[fe80::2%12]:42000'
+    Assert-Equal $services[2].Serial $null
+    Assert-Equal @(ConvertFrom-AdbMdnsServices $text).Count 1
+    Assert-Equal @(ConvertFrom-AdbMdnsServices '' -Service pairing).Count 0
+    foreach ($endpoint in @('10.0.0.1:1', '[::1]:65535')) { Assert-True (Test-AdbEndpoint $endpoint) }
+    foreach ($endpoint in @('10.0.0.1:0', '10.0.0.1:65536', '999.1.1.1:1234', 'host:1234', '10.0.0.1:12 extra', '')) {
+        Assert-Equal (Test-AdbEndpoint $endpoint) $false
+    }
+}
+
+Test-Case 'config merge: preserves fields, does not mutate source, config args precede CLI args' {
+    $config = Get-Content (Join-Path $fixtures 'config.json') -Raw | ConvertFrom-Json
+    $merged = Merge-PhoneCtlConfig $config -Serial 'SECOND'
+    Assert-Equal $merged.serial 'SECOND'
+    Assert-Equal $config.serial ' PHONE123 '
+    Assert-Equal $merged.futureSetting.enabled $true
+    Assert-Equal (@(Merge-PhoneCtlScrcpyArgs $merged @('--max-size', '1920')) -join '|') '--no-audio|--max-size|1280|--max-size|1920'
+    Assert-Equal @(Merge-PhoneCtlScrcpyArgs $null).Count 0
+    Assert-Equal @(Merge-PhoneCtlScrcpyArgs ([pscustomobject]@{ scrcpyArgs = @() })).Count 0
+    Assert-Equal (@(Merge-PhoneCtlScrcpyArgs ([pscustomobject]@{ scrcpyArgs = @('--no-audio') })) -join '|') '--no-audio'
+}
+
+Test-Case 'saving serial preserves scrcpyArgs and unknown config fields' {
+    $state = @{ Written = '' }
+    $content = Get-Content (Join-Path $fixtures 'config.json') -Raw
+    function Test-Path { param($LiteralPath, $PathType); $true }
+    function Get-Content { param($LiteralPath, [switch]$Raw, $Encoding); $content }
+    function Set-Content { param($LiteralPath, $Encoding, [Parameter(ValueFromPipeline)]$Value); process { $state.Written = $Value } }
+    Save-PhoneSerial 'C:\unused\config.json' 'SECOND'
+    $saved = $state.Written | ConvertFrom-Json
+    Assert-Equal $saved.serial 'SECOND'
+    Assert-Equal ($saved.scrcpyArgs -join '|') '--no-audio|--max-size|1280'
+    Assert-Equal $saved.futureSetting.enabled $true
+}
+
+Test-Case 'executable resolution: falls back to saved registry PATH without changing process PATH' {
+    $dirs = @(@('User', 'Machine') | ForEach-Object { [Environment]::GetEnvironmentVariable('Path', $_) }) -join ';'
+    $directory = @($dirs -split ';' | Where-Object { $_ })[0]
+    $expected = Join-Path ([Environment]::ExpandEnvironmentVariables($directory)) 'scrcpy.exe'
+    $oldPath = $env:PATH
+    function Get-Command { param($Name, $CommandType, $ErrorAction); $null }
+    function Test-Path { param($LiteralPath, $PathType); $LiteralPath -eq $expected }
+    Assert-Equal (Resolve-LauncherExecutable @('missing') 'scrcpy.exe') $expected
+    Assert-Equal $env:PATH $oldPath
+}
+
+Test-Case 'pairing: discovered endpoint asks only code and waits for matching auto-connection' {
+    $state = @{ Prompts = 0; Pairs = 0 }
+    function Read-Host { param($Prompt); $state.Prompts++; Assert-Equal $Prompt '6-digit pairing code'; '012345' }
+    function Invoke-Adb {
+        param($AdbPath, $Arguments, $TimeoutSeconds)
+        if ($Arguments[0] -eq 'mdns') { return New-AdbResult (Get-Content (Join-Path $fixtures 'pairing.txt') -Raw) }
+        Assert-Equal ($Arguments -join '|') 'pair|192.168.1.42:41000|012345'
+        Assert-Equal $TimeoutSeconds 30
+        $state.Pairs++
+        New-AdbResult 'Successfully paired to 192.168.1.42:41000' 0 'native stderr notice'
+    }
+    function Wait-AdbPhones {
+        param($AdbPath, $Serial, $Seconds)
+        Assert-Equal $Serial 'PHONE123'
+        Assert-Equal $Seconds 30
+        [pscustomobject]@{ Id = 'adb-PHONE123-connect._adb-tls-connect._tcp'; Serial = $Serial }
+    }
+    $phones = @(Pair-InstallPhone 'fake-adb' 'PHONE123')
+    Assert-Equal $phones.Count 1
+    Assert-Equal $phones[0].Serial 'PHONE123'
+    Assert-Equal $state.Prompts 1
+    Assert-Equal $state.Pairs 1
+}
+
+Test-Case 'pairing: empty mDNS prompts IP:port then code; does not connect to pairing port' {
+    $state = @{ Prompts = 0 }
+    function Read-Host { param($Prompt); $state.Prompts++; if ($state.Prompts -eq 1) { '10.0.0.8:43210' } else { '123456' } }
+    function Invoke-Adb {
+        param($AdbPath, $Arguments, $TimeoutSeconds)
+        if ($Arguments[0] -eq 'mdns') { return New-AdbResult 'List of discovered mdns services' }
+        Assert-Equal ($Arguments -join '|') 'pair|10.0.0.8:43210|123456'
+        New-AdbResult 'Successfully paired to 10.0.0.8:43210'
+    }
+    function Wait-AdbPhones { param($AdbPath, $Serial, $Seconds); [pscustomobject]@{ Id = '10.0.0.8:54321'; Serial = 'PHONE' } }
+    Assert-Equal (@(Pair-InstallPhone 'fake-adb' '')[0].Id) '10.0.0.8:54321'
+    Assert-Equal $state.Prompts 2
+}
+
+Test-Case 'pairing: multiple unselected services stop before asking code' {
+    function Invoke-Adb { param($AdbPath, $Arguments); New-AdbResult (Get-Content (Join-Path $fixtures 'pairing.txt') -Raw) }
+    function Read-Host { throw 'Must not prompt for an ambiguous pairing target' }
+    $message = ''
+    try { $null = Pair-InstallPhone 'fake-adb' '' } catch { $message = $_.Exception.Message }
+    Assert-True ($message -like 'Several pairing services found*')
+}
+
+Test-Case 'pairing: invalid code stops without sending adb pair' {
+    function Invoke-Adb {
+        param($AdbPath, $Arguments)
+        Assert-Equal $Arguments[0] 'mdns'
+        New-AdbResult 'adb-PHONE123-pair _adb-tls-pairing._tcp 10.0.0.1:40000'
+    }
+    function Read-Host { '12345' }
+    $message = ''
+    try { $null = Pair-InstallPhone 'fake-adb' '' } catch { $message = $_.Exception.Message }
+    Assert-Equal $message 'Pairing code must contain exactly 6 digits.'
+}
+
+Test-Case 'pairing: failed adb pair does not wait or save' {
+    function Invoke-Adb {
+        param($AdbPath, $Arguments, $TimeoutSeconds)
+        if ($Arguments[0] -eq 'mdns') { return New-AdbResult 'adb-PHONE123-pair _adb-tls-pairing._tcp 10.0.0.1:40000' }
+        New-AdbResult '' 1 'wrong pairing code'
+    }
+    function Read-Host { '123456' }
+    function Wait-AdbPhones { throw 'Must not wait after pairing failure' }
+    $message = ''
+    try { $null = Pair-InstallPhone 'fake-adb' '' } catch { $message = $_.Exception.Message }
+    Assert-True ($message -like 'ADB pairing failed:*wrong pairing code*')
+}
+
+Test-Case 'pairing: successful pair without auto-connection gives actionable timeout' {
+    function Invoke-Adb {
+        param($AdbPath, $Arguments, $TimeoutSeconds)
+        if ($Arguments[0] -eq 'mdns') { return New-AdbResult 'adb-PHONE123-pair _adb-tls-pairing._tcp 10.0.0.1:40000' }
+        New-AdbResult 'Successfully paired'
+    }
+    function Read-Host { '123456' }
+    function Wait-AdbPhones { param($AdbPath, $Serial, $Seconds) }
+    $message = ''
+    try { $null = Pair-InstallPhone 'fake-adb' '' } catch { $message = $_.Exception.Message }
+    Assert-True ($message -like 'Paired, but no phone auto-connected after 30 s.*')
+}
+
+# All installer side effects are replaced at the boundary; never touch a real phone,
+# LOCALAPPDATA config, shortcuts or Gradle cache from these orchestration tests.
+$installMocks = {
+    function Read-PhoneSerial { param($ConfigPath); 'PHONE123' }
+    function Test-Path {
+        param($LiteralPath, $PathType)
+        if ($LiteralPath.EndsWith('adb.exe')) { return $state.Vendor }
+        if ($LiteralPath.EndsWith('.apk')) { return $state.Apk }
+        throw "Unexpected path: $LiteralPath"
+    }
+    function Resolve-LauncherExecutable { param($Candidates, $Name); if ($state.Scrcpy) { 'fake-scrcpy' } }
+    function Build-PhoneCtlApk { param($ProjectRoot); $state.Builds++; $state.Apk = $true }
+    function Invoke-Adb {
+        param($AdbPath, $Arguments)
+        Assert-Equal $Arguments[0] 'start-server'
+        New-AdbResult '' 0 '* daemon started successfully *'
+    }
+    function Wait-AdbPhones { param($AdbPath, $Serial, $Seconds); Assert-Equal $Seconds 10; Assert-Equal $Serial 'PHONE123'; $state.Phones }
+    function Pair-InstallPhone { param($AdbPath, $Serial); $state.Pairs++; [pscustomobject]@{ Id = 'paired:43210'; Serial = 'PHONE123' } }
+    function Invoke-InstallScript {
+        param($ScriptPath, $Arguments)
+        if ($ScriptPath.EndsWith('fetch-platform-tools.ps1')) { $state.Fetches++; $state.Vendor = $true; return }
+        Assert-True ($ScriptPath.EndsWith('setup-phone.ps1'))
+        $state.Setups++
+        $state.SetupId = $Arguments.Serial
+        if ($state.FailSetup) { throw 'mock setup failure' }
+    }
+    function Save-PhoneSerial {
+        param($ConfigPath, $Serial)
+        Assert-True ($state.Setups -gt 0)
+        $state.Saves++
+        Assert-Equal $Serial 'PHONE123'
+    }
+    function New-PhoneCtlShortcuts { param($ProjectRoot, $ScrcpyPath); Assert-True ($state.Saves -gt 0); $state.Shortcuts++ }
+}
+function New-InstallTestState {
+    @{
+        Vendor = $true; Apk = $true; Scrcpy = $true; Builds = 0; Fetches = 0
+        Pairs = 0; Setups = 0; Saves = 0; Shortcuts = 0; FailSetup = $false; SetupId = ''
+        Phones = @([pscustomobject]@{ Id = 'auto:12345'; Serial = 'PHONE123' })
+    }
+}
+
+Test-Case 'installer: rerun reuses ADB/APK/connection and refreshes setup and shortcuts' {
+    $state = New-InstallTestState
+    . $installMocks
+    Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 0
+    Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 0
+    Assert-Equal $state.Fetches 0
+    Assert-Equal $state.Builds 0
+    Assert-Equal $state.Pairs 0
+    Assert-Equal $state.Setups 2
+    Assert-Equal $state.Saves 2
+    Assert-Equal $state.Shortcuts 2
+    Assert-Equal $state.SetupId 'auto:12345'
+}
+
+Test-Case 'installer: missing vendor and APK fetch/build once; -Rebuild forces build' {
+    $state = New-InstallTestState
+    $state.Vendor = $false; $state.Apk = $false
+    . $installMocks
+    Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 0
+    Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot -Rebuild) 0
+    Assert-Equal $state.Fetches 1
+    Assert-Equal $state.Builds 2
+}
+
+Test-Case 'installer: no device triggers pairing then setup with connected transport id' {
+    $state = New-InstallTestState
+    $state.Phones = @()
+    . $installMocks
+    Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 0
+    Assert-Equal $state.Pairs 1
+    Assert-Equal $state.SetupId 'paired:43210'
+}
+
+Test-Case 'installer: missing scrcpy stops before build, ADB, config or shortcuts' {
+    $state = New-InstallTestState
+    $state.Scrcpy = $false; $state.Apk = $false
+    . $installMocks
+    function Invoke-Adb { throw 'Must not start ADB without scrcpy' }
+    Assert-Equal (Invoke-PhoneCtlInstall $PSScriptRoot) 1
+    Assert-Equal $state.Builds 0
+    Assert-Equal $state.Setups 0
+    Assert-Equal $state.Saves 0
+    Assert-Equal $state.Shortcuts 0
+}
+
+Test-Case 'installer: setup failure does not save serial or create shortcuts' {
+    $state = New-InstallTestState
+    $state.FailSetup = $true
+    . $installMocks
+    $message = ''
+    try { $null = Invoke-PhoneCtlInstall $PSScriptRoot } catch { $message = $_.Exception.Message }
+    Assert-Equal $message 'mock setup failure'
+    Assert-Equal $state.Saves 0
+    Assert-Equal $state.Shortcuts 0
+}
+
+Test-Case 'log: timestamps, append, native stderr and retention within one MiB' {
+    $directory = Join-Path $PSScriptRoot ('.test-log-' + [guid]::NewGuid().ToString('N'))
+    $oldLogPath = $script:LauncherLogPath
+    try {
+        [void][IO.Directory]::CreateDirectory($directory)
+        $script:LauncherLogPath = Join-Path $directory 'launcher.log'
+        Write-LauncherLog 'first launch'
+        Write-LauncherLog 'second launch'
+        $text = [IO.File]::ReadAllText($script:LauncherLogPath)
+        Assert-True ($text -match '\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] first launch')
+        Assert-True ($text -match 'second launch')
+        $exe = Join-Path $PSHOME 'powershell.exe'
+        $result = Invoke-LauncherProcess $exe @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.WriteLine("native output"); [Console]::Error.WriteLine("native error"); exit 7') -LogOutput
+        Assert-Equal $result.ExitCode 7
+        $text = [IO.File]::ReadAllText($script:LauncherLogPath)
+        Assert-True ($text -match 'scrcpy stdout: native output')
+        Assert-True ($text -match 'scrcpy stderr: native error')
+        [IO.File]::WriteAllText($script:LauncherLogPath, ((('old line' + [Environment]::NewLine) * 120000)))
+        Write-LauncherLog 'newest retained line'
+        Assert-True ((Get-Item -LiteralPath $script:LauncherLogPath).Length -le 1MB)
+        Assert-True ([IO.File]::ReadAllText($script:LauncherLogPath).EndsWith('newest retained line' + [Environment]::NewLine))
+    } finally {
+        $script:LauncherLogPath = $oldLogPath
+        if (Test-Path -LiteralPath $directory) {
+            Remove-Item -LiteralPath (Join-Path $directory 'launcher.log') -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $directory
+        }
+    }
+}
+
+Test-Case 'mutex: second process prints already running and exits zero without ADB' {
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $mutex = New-Object Threading.Mutex($false, "Local\phonectl-$sid")
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        Assert-True $owned 'Another real phonectl launcher is running; close it before testing'
+        $exe = Join-Path $PSHOME 'powershell.exe'
+        $launcherPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'phonectl.ps1'
+        $result = Invoke-LauncherProcess $exe @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $launcherPath) -CaptureOutput
+        Assert-Equal $result.ExitCode 0
+        Assert-True ($result.Output -match 'already running')
+    } finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+Test-Case 'mutex: release on session exception allows a fresh launch; log appends' {
+    $directory = Join-Path $PSScriptRoot ('.test-launch-' + [guid]::NewGuid().ToString('N'))
+    $previousLocal = $env:LOCALAPPDATA
+    $state = @{ Calls = 0 }
+    function Invoke-PhoneCtl {
+        param($ProjectRoot, $Mode, $ScrcpyArgs)
+        $state.Calls++
+        if ($state.Calls -eq 1) { throw 'mock session exception' }
+        return 0
+    }
+    try {
+        $env:LOCALAPPDATA = $directory
+        $message = ''
+        try { $null = Invoke-PhoneCtlLauncher 'unused' 'scrcpy' @() } catch { $message = $_.Exception.Message }
+        Assert-Equal $message 'mock session exception'
+        Assert-Equal (Invoke-PhoneCtlLauncher 'unused' 'scrcpy' @()) 0
+        Assert-Equal $state.Calls 2
+        $log = [IO.File]::ReadAllText((Join-Path $directory 'phonectl\launcher.log'))
+        Assert-Equal ([regex]::Matches($log, 'Launcher started\.').Count) 2
+        Assert-True ($log -match 'ERROR: mock session exception')
+    } finally {
+        $env:LOCALAPPDATA = $previousLocal
+        if (Test-Path -LiteralPath $directory) {
+            $logDirectory = Join-Path $directory 'phonectl'
+            Remove-Item -LiteralPath (Join-Path $logDirectory 'launcher.log') -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $logDirectory
+            Remove-Item -LiteralPath $directory
+        }
+    }
+}
+
+Test-Case 'build: native stderr is harmless on success; nonzero fails and restores working directory' {
+    $directory = Join-Path $PSScriptRoot ('.test build ' + [guid]::NewGuid().ToString('N'))
+    $buildDirectory = Join-Path $directory 'adbkeeper'
+    $wrapper = Join-Path $buildDirectory 'gradlew.bat'
+    $previousDirectory = (Get-Location).Path
+    try {
+        [void][IO.Directory]::CreateDirectory($buildDirectory)
+        [IO.File]::WriteAllText($wrapper, "@echo off`r`necho harmless native stderr 1>&2`r`nexit /b 0`r`n")
+        Build-PhoneCtlApk $directory
+        Assert-Equal (Get-Location).Path $previousDirectory
+        [IO.File]::WriteAllText($wrapper, "@echo off`r`necho simulated build failure 1>&2`r`nexit /b 7`r`n")
+        $message = ''
+        try { Build-PhoneCtlApk $directory } catch { $message = $_.Exception.Message }
+        Assert-True ($message -like 'Gradle assembleDebug failed (exit 7).*')
+        Assert-Equal (Get-Location).Path $previousDirectory
+    } finally {
+        if (Test-Path -LiteralPath $wrapper) { Remove-Item -LiteralPath $wrapper }
+        if (Test-Path -LiteralPath $buildDirectory) { Remove-Item -LiteralPath $buildDirectory }
+        if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory }
+    }
+}
+
+Test-Case 'shortcuts: real WScript links use minimized cmd, icon and update in place in isolated folders' {
+    $directory = Join-Path $PSScriptRoot ('.test-shortcuts-' + [guid]::NewGuid().ToString('N'))
+    $folders = @((Join-Path $directory 'Desktop'), (Join-Path $directory 'Programs'))
+    $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $iconPath = Join-Path $PSHOME 'powershell.exe'
+    $shell = $null
+    try {
+        New-PhoneCtlShortcuts -ProjectRoot $projectRoot -ScrcpyPath $iconPath -ShortcutDirectories $folders
+        New-PhoneCtlShortcuts -ProjectRoot $projectRoot -ScrcpyPath $iconPath -ShortcutDirectories $folders
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($folder in $folders) {
+            Assert-Equal @(Get-ChildItem -LiteralPath $folder -Filter '*.lnk').Count 1
+            $shortcut = $shell.CreateShortcut((Join-Path $folder 'phonectl.lnk'))
+            try {
+                Assert-Equal $shortcut.TargetPath (Join-Path $projectRoot 'launcher\phonectl.cmd')
+                Assert-Equal $shortcut.WorkingDirectory $projectRoot
+                Assert-Equal $shortcut.WindowStyle 7
+                Assert-Equal $shortcut.IconLocation "$iconPath,0"
+            } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
+        }
+    } finally {
+        if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+        foreach ($folder in $folders) {
+            $link = Join-Path $folder 'phonectl.lnk'
+            if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link }
+            if (Test-Path -LiteralPath $folder) { Remove-Item -LiteralPath $folder }
+        }
+        if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory }
     }
 }
 

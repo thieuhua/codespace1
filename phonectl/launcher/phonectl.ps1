@@ -7,6 +7,31 @@ param(
 
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'AdbParse.psm1')
+$script:LauncherLogPath = ''
+
+function Write-LauncherLog {
+    param([string]$Message, [string]$LogPath = $script:LauncherLogPath)
+    if (-not $LogPath) { return }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $lines = @($Message -split '\r?\n' | Where-Object { $_ -ne '' } | ForEach-Object {
+        '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $_
+    })
+    [System.IO.File]::AppendAllText($LogPath, (($lines -join [Environment]::NewLine) + [Environment]::NewLine), $encoding)
+    # Keep a single bounded file, including during a long-running scrcpy session.
+    if ((Get-Item -LiteralPath $LogPath).Length -gt 1MB) {
+        $bytes = [System.IO.File]::ReadAllBytes($LogPath)
+        $start = $bytes.Length - 1MB
+        while ($start -lt $bytes.Length -and $bytes[$start] -ne 10) { $start++ }
+        $tail = $encoding.GetString($bytes, [Math]::Min($start + 1, $bytes.Length), [Math]::Max(0, $bytes.Length - $start - 1))
+        [System.IO.File]::WriteAllText($LogPath, $tail, $encoding)
+    }
+}
+
+function Write-LauncherMessage {
+    param([string]$Message)
+    Write-Host $Message
+    Write-LauncherLog $Message
+}
 
 function Resolve-LauncherExecutable {
     param([string[]]$Candidates, [string]$Name)
@@ -17,6 +42,13 @@ function Resolve-LauncherExecutable {
     }
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command) { return $command.Source }
+    # A console opened before `winget install` keeps a stale PATH: re-read the saved one.
+    $savedPath = @('User', 'Machine') | ForEach-Object { [Environment]::GetEnvironmentVariable('Path', $_) }
+    foreach ($dir in (($savedPath -join ';') -split ';')) {
+        if (-not $dir) { continue }
+        $candidate = Join-Path ([Environment]::ExpandEnvironmentVariables($dir)) $Name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
     return $null
 }
 
@@ -52,24 +84,40 @@ function Stop-LauncherProcess {
 }
 
 function Invoke-LauncherProcess {
-    param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds = 8, [switch]$CaptureOutput)
+    param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds = 8, [switch]$CaptureOutput, [switch]$LogOutput)
     $process = $null
     try {
-        $process = New-LauncherProcess -FilePath $FilePath -Arguments $Arguments -CaptureOutput:$CaptureOutput
-        if ($CaptureOutput) {
+        $process = New-LauncherProcess -FilePath $FilePath -Arguments $Arguments -CaptureOutput:($CaptureOutput -or $LogOutput)
+        if ($LogOutput) {
+            $readers = @{ stdout = $process.StandardOutput; stderr = $process.StandardError }
+            $pending = @{ stdout = $readers.stdout.ReadLineAsync(); stderr = $readers.stderr.ReadLineAsync() }
+        } elseif ($CaptureOutput) {
             $stdout = $process.StandardOutput.ReadToEndAsync()
             $stderr = $process.StandardError.ReadToEndAsync()
         }
         $timer = [System.Diagnostics.Stopwatch]::StartNew()
-        while (-not $process.WaitForExit(100)) {
-            if ($TimeoutSeconds -gt 0 -and $timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+        do {
+            $exited = $process.WaitForExit(100)
+            if ($LogOutput) {
+                foreach ($stream in @('stdout', 'stderr')) {
+                    if ($null -ne $pending[$stream] -and $pending[$stream].IsCompleted) {
+                        $line = $pending[$stream].Result
+                        if ($null -eq $line) { $pending[$stream] = $null }
+                        else {
+                            Write-LauncherMessage "scrcpy ${stream}: $line"
+                            $pending[$stream] = $readers[$stream].ReadLineAsync()
+                        }
+                    }
+                }
+            }
+            if (-not $exited -and $TimeoutSeconds -gt 0 -and $timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                 return [pscustomobject]@{ ExitCode = 124; Output = ''; Error = 'Process timed out' }
             }
             # Return control to PowerShell so Ctrl+C can unwind the finally blocks.
             Start-Sleep -Milliseconds 20
-        }
+        } while (-not $exited -or ($LogOutput -and ($null -ne $pending.stdout -or $null -ne $pending.stderr)))
         $output = ''; $errorText = ''
-        if ($CaptureOutput) { $output = $stdout.Result; $errorText = $stderr.Result }
+        if ($CaptureOutput -and -not $LogOutput) { $output = $stdout.Result; $errorText = $stderr.Result }
         return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output; Error = $errorText }
     } finally { Stop-LauncherProcess $process }
 }
@@ -79,17 +127,21 @@ function Invoke-Adb {
     Invoke-LauncherProcess -FilePath $AdbPath -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -CaptureOutput
 }
 
-function Read-PhoneSerial {
+function Read-PhoneCtlConfig {
     param([string]$ConfigPath)
-    if (-not (Test-Path -LiteralPath $ConfigPath)) { return '' }
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { return (Merge-PhoneCtlConfig) }
     try {
         $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (-not ($config.PSObject.Properties.Name -contains 'serial') -or
-            -not ($config.serial -is [string]) -or [string]::IsNullOrWhiteSpace($config.serial)) {
-            throw 'Expected a non-empty string property: serial'
-        }
-        return $config.serial.Trim()
+        if ($null -eq $config) { throw 'Expected a JSON object.' }
+        return (Merge-PhoneCtlConfig -Config $config)
     } catch { throw "Invalid config ${ConfigPath}: $($_.Exception.Message)" }
+}
+
+function Read-PhoneSerial {
+    param([string]$ConfigPath)
+    $config = Read-PhoneCtlConfig $ConfigPath
+    if (@($config.PSObject.Properties | Where-Object Name -eq 'serial').Count -gt 0) { return $config.serial }
+    return ''
 }
 
 function Save-PhoneSerial {
@@ -98,7 +150,8 @@ function Save-PhoneSerial {
     if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
         [void](New-Item -ItemType Directory -Path $directory)
     }
-    @{ serial = $Serial } | ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    $config = Merge-PhoneCtlConfig -Config (Read-PhoneCtlConfig $ConfigPath) -Serial $Serial
+    $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
 }
 
 function Get-ReachableAdbPhones {
@@ -136,9 +189,9 @@ function Connect-AdbMdnsPhone {
     if ($result.ExitCode -ne 0) { return }
     $services = @(ConvertFrom-AdbMdnsServices $result.Output)
     foreach ($service in @(Select-AdbMdnsCandidates -Services $services -Serial $Serial)) {
-        Write-Host "Connecting to $($service.Address)..."
+        Write-LauncherMessage "Connecting to $($service.Address)..."
         $connection = Invoke-Adb -AdbPath $AdbPath -Arguments @('connect', $service.Address)
-        if ($connection.ExitCode -ne 0) { Write-Host $connection.Error }
+        if ($connection.ExitCode -ne 0) { Write-LauncherMessage $connection.Error }
         $phones = @(Wait-AdbPhones -AdbPath $AdbPath -Serial $Serial -Seconds 2)
         if ($phones.Count -gt 0) { return $phones }
     }
@@ -190,7 +243,7 @@ function Invoke-NativeSession {
         Sync-NativeServer -AdbPath $AdbPath -DeviceId $DeviceId -JarPath $JarPath
         $forwarded = $true
         $serverProcess = Start-NativeServer -AdbPath $AdbPath -DeviceId $DeviceId
-        Write-Host 'Native server running on tcp:27183; client is not implemented. Ctrl+C to stop.'
+        Write-LauncherMessage 'Native server running on tcp:27183; client is not implemented. Ctrl+C to stop.'
         while (-not $serverProcess.WaitForExit(100)) { Start-Sleep -Milliseconds 100 }
         # A server exit always means a lost session, even when app_process returns 0.
         return 1
@@ -206,7 +259,7 @@ function Invoke-PhoneCtl {
     param([string]$ProjectRoot, [string]$Mode, [string[]]$ScrcpyArgs)
     $jarPath = Join-Path $ProjectRoot 'server\build\server.jar'
     if ($Mode -eq 'native' -and -not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
-        Write-Host 'server not built yet'
+        Write-LauncherMessage 'server not built yet'
         return 1
     }
     $adbCandidates = @((Join-Path $ProjectRoot 'vendor\platform-tools\adb.exe'), 'E:\Android\Sdk\platform-tools\adb.exe')
@@ -216,11 +269,14 @@ function Invoke-PhoneCtl {
     $scrcpyPath = $null
     if ($Mode -eq 'scrcpy') {
         $scrcpyPath = Resolve-LauncherExecutable -Candidates @((Join-Path $ProjectRoot 'vendor\scrcpy\scrcpy.exe')) -Name 'scrcpy.exe'
-        if (-not $scrcpyPath) { Write-Host 'winget install Genymobile.scrcpy'; return 1 }
+        if (-not $scrcpyPath) { Write-LauncherMessage 'winget install Genymobile.scrcpy'; return 1 }
     }
     if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set.' }
     $configPath = Join-Path $env:LOCALAPPDATA 'phonectl\config.json'
-    $serial = Read-PhoneSerial $configPath
+    $config = Read-PhoneCtlConfig $configPath
+    $serial = ''
+    if (@($config.PSObject.Properties | Where-Object Name -eq 'serial').Count -gt 0) { $serial = $config.serial }
+    $ScrcpyArgs = @(Merge-PhoneCtlScrcpyArgs -Config $config -ScrcpyArgs $ScrcpyArgs)
     $previousAdb = [Environment]::GetEnvironmentVariable('ADB', 'Process')
     try {
         $env:ADB = $adbPath
@@ -231,37 +287,69 @@ function Invoke-PhoneCtl {
             if ($started.ExitCode -eq 0) {
                 $phones = @(Wait-AdbPhones -AdbPath $adbPath -Serial $serial)
                 if ($phones.Count -eq 0) { $phones = @(Connect-AdbMdnsPhone -AdbPath $adbPath -Serial $serial) }
-            } else { Write-Host "adb start-server failed: $($started.Error)" }
+            } else { Write-LauncherMessage "adb start-server failed: $($started.Error) $($started.Output)" }
             if ($phones.Count -gt 0) {
                 $phone = Select-LauncherPhone -Phones $phones -ConfigPath $configPath -Serial $serial
                 $serial = $phone.Serial
-                Write-Host "Using $serial via $($phone.Id)"
+                Write-LauncherMessage "Using $serial via $($phone.Id)"
                 $sessionTimer = [System.Diagnostics.Stopwatch]::StartNew()
                 if ($Mode -eq 'native') {
                     try { $code = Invoke-NativeSession -AdbPath $adbPath -DeviceId $phone.Id -JarPath $jarPath }
                     catch [System.Management.Automation.PipelineStoppedException] { throw }
-                    catch { Write-Host "Native session failed: $($_.Exception.Message)"; $code = 1 }
+                    catch { Write-LauncherMessage "Native session failed: $($_.Exception.Message)"; $code = 1 }
                 } else {
-                    $session = Invoke-LauncherProcess -FilePath $scrcpyPath -Arguments (@('-s', $phone.Id, '-S', '-w') + $ScrcpyArgs) -TimeoutSeconds 0
+                    $model = Invoke-Adb -AdbPath $adbPath -Arguments @('-s', $phone.Id, 'shell', 'getprop', 'ro.product.model') -TimeoutSeconds 3
+                    $title = $model.Output.Trim()
+                    if ($model.ExitCode -ne 0 -or -not $title) { $title = $serial }
+                    Write-LauncherMessage "Starting scrcpy ($title)."
+                    $session = Invoke-LauncherProcess -FilePath $scrcpyPath -Arguments (@('-s', $phone.Id, '-S', '-w', '--window-title', $title) + $ScrcpyArgs) -TimeoutSeconds 0 -LogOutput
                     $code = $session.ExitCode
-                    if ($code -eq 0) { return 0 }
+                    if ($code -eq 0) { Write-LauncherMessage 'scrcpy closed normally.'; return 0 }
                 }
-                Write-Host "Session ended (code $code)."
+                Write-LauncherMessage "Session ended (code $code)."
                 # A session that ran for a while was healthy: reconnect fast instead of using an old backoff.
                 if ($sessionTimer.Elapsed.TotalSeconds -ge 60) { $backoff = 2 }
-            } else { Write-Host 'Phone unavailable. Check Wireless debugging, pairing and Wi-Fi.' }
-            Write-Host "Retrying in $backoff seconds (Ctrl+C to stop)..."
+            } else { Write-LauncherMessage 'Phone unavailable. Check Wireless debugging, pairing and Wi-Fi.' }
+            Write-LauncherMessage "Retrying in $backoff seconds (Ctrl+C to stop)..."
             Start-Sleep -Seconds $backoff
             $backoff = [Math]::Min(30, $backoff * 2)
         }
     } finally { [Environment]::SetEnvironmentVariable('ADB', $previousAdb, 'Process') }
 }
 
+function Invoke-PhoneCtlLauncher {
+    param([string]$ProjectRoot, [string]$Mode, [string[]]$ScrcpyArgs)
+    $mutex = $null
+    $owned = $false
+    try {
+        $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $mutex = New-Object System.Threading.Mutex($false, "Local\phonectl-$sid")
+        try { $owned = $mutex.WaitOne(0) }
+        catch [System.Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { Write-Host 'phonectl already running'; return 0 }
+        if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set.' }
+        $directory = Join-Path $env:LOCALAPPDATA 'phonectl'
+        [void][System.IO.Directory]::CreateDirectory($directory)
+        $script:LauncherLogPath = Join-Path $directory 'launcher.log'
+        Write-LauncherMessage 'Launcher started.'
+        return (Invoke-PhoneCtl -ProjectRoot $ProjectRoot -Mode $Mode -ScrcpyArgs $ScrcpyArgs)
+    } catch [System.Management.Automation.PipelineStoppedException] {
+        throw
+    } catch {
+        Write-LauncherLog "ERROR: $($_.Exception.Message)"
+        throw
+    } finally {
+        $script:LauncherLogPath = ''
+        if ($owned) { $mutex.ReleaseMutex() }
+        if ($null -ne $mutex) { $mutex.Dispose() }
+    }
+}
+
 # Dot-sourcing exposes helpers for fixture-based tests without starting ADB.
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     try {
-        exit (Invoke-PhoneCtl -ProjectRoot (Split-Path -Parent $PSScriptRoot) -Mode $Mode -ScrcpyArgs $ScrcpyArgs)
+        exit (Invoke-PhoneCtlLauncher -ProjectRoot (Split-Path -Parent $PSScriptRoot) -Mode $Mode -ScrcpyArgs $ScrcpyArgs)
     } catch [System.Management.Automation.PipelineStoppedException] {
         exit 0
     } catch {

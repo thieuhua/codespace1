@@ -1,0 +1,5 @@
+{
+  "serial": " PHONE123 ",
+  "scrcpyArgs": ["--no-audio", "--max-size", "1280"],
+  "futureSetting": { "enabled": true }
+}

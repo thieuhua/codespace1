@@ -1,6 +1,8 @@
 # Launcher Windows (PowerShell 5.1)
 
-Double-click `phonectl.cmd`, hoặc chạy từ thư mục `phonectl`:
+Chạy `..\install.cmd` một lần theo [README dự án](../README.md), rồi hằng ngày click
+shortcut **phonectl** ở Desktop/Start Menu. Có thể double-click `phonectl.cmd`, hoặc
+chạy từ thư mục `phonectl`:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File launcher\phonectl.ps1
@@ -12,7 +14,8 @@ ADB được tìm theo thứ tự: `vendor/platform-tools/adb.exe`,
 `E:\Android\Sdk\platform-tools\adb.exe`, `$env:ANDROID_HOME\platform-tools\adb.exe`,
 rồi PATH. Chạy `powershell -File tools\fetch-platform-tools.ps1` để chép ADB và
 DLL từ SDK có sẵn; có thể chỉ định `-SdkPath 'D:\Android\Sdk'`. Không tải mạng.
-scrcpy được tìm ở `vendor/scrcpy/scrcpy.exe`, rồi PATH; nếu thiếu, cài bằng
+scrcpy được tìm ở `vendor/scrcpy/scrcpy.exe`, rồi PATH hiện tại và PATH User/Machine
+lưu trong registry (kể cả console mở trước khi cài scrcpy); nếu thiếu, cài bằng
 `winget install Genymobile.scrcpy`. Launcher đặt biến `ADB` cho scrcpy dùng chung ADB.
 
 Mỗi vòng khởi động ADB, chờ khoảng 10 giây để ADB tự tìm máy. Chỉ dùng trạng thái
@@ -25,13 +28,28 @@ ADB tự kết nối; có thể chạy `adb connect ip:port` thủ công trướ
 Lần đầu chỉ có một điện thoại thì tự lưu `{ "serial": "..." }` vào
 `%LOCALAPPDATA%\phonectl\config.json`; nhiều điện thoại thì liệt kê và hỏi một lần.
 Lựa chọn sai định dạng làm launcher thoát. Sửa/xóa config để chọn lại; config hỏng
-được báo lỗi, không tự ghi đè. Cần pairing Wireless debugging từ trước theo
-[README dự án](../README.md).
+được báo lỗi, không tự ghi đè. Config có thể chỉ chứa `scrcpyArgs` khi chưa chọn máy;
+lưu serial giữ các trường khác. Installer xử lý pairing và lưu serial trước.
 
-Chạy `scrcpy -s <id> -S -w` kèm `-ScrcpyArgs`: tắt màn hình điện thoại và giữ thức.
+Config nhận mảng chuỗi `scrcpyArgs` tùy chọn, ví dụ:
+
+```json
+{ "serial": "PHONE123", "scrcpyArgs": ["--no-audio", "--max-size", "1280"] }
+```
+
+Tham số được ghép theo thứ tự: mặc định → config → `-ScrcpyArgs`. Không có config
+thì không thêm tùy chọn. `--window-title` mặc định lấy từ `getprop ro.product.model`,
+dùng serial nếu không đọc được; có thể ghi đè bằng tùy chọn scrcpy của bạn.
+
+Chạy `scrcpy -s <id> -S -w --window-title <model>` kèm các tùy chọn: tắt màn hình điện thoại và giữ thức.
 Thoát mã 0 thì đóng launcher; mã khác hoặc chưa tìm được máy thì thử lại sau
 2, 4, 8, 16, 30 giây (tối đa 30). Ctrl+C dừng và thu hồi process do launcher giữ.
 Lệnh ADB có timeout, riêng getprop 3 giây mỗi địa chỉ nên vòng dò có thể vượt 10 giây.
+
+Named mutex giữ một launcher cho mỗi user trong phiên Windows. Lần mở thứ hai in
+`already running` và thoát mã 0. Log nối tiếp có timestamp và output/lỗi scrcpy ở
+`%LOCALAPPDATA%\phonectl\launcher.log`, giữ khoảng 1 MB cuối cả khi chạy lâu.
+Nếu mDNS rỗng, kiểm tra firewall trên mạng Private, AP/client isolation và VPN.
 
 `-Mode native` là khung giai đoạn 3: thiếu `server/build/server.jar` thì báo
 `server not built yet` và thoát mã 1. Khi có JAR, so SHA-256 rồi chỉ push nếu khác
@@ -46,6 +64,7 @@ Kiểm thử không cần điện thoại, không chạy ADB thật hay ghi conf
 powershell -NoProfile -ExecutionPolicy Bypass -File launcher\tests\run-tests.ps1
 ```
 
-`AdbParse.psm1` chứa hàm thuần; `tests/fixtures/` chứa output mẫu. Test dùng assert
-và mô phỏng luồng chạy, thêm kiểm tra timeout/exit code bằng process PowerShell con;
+`AdbParse.psm1` chứa hàm thuần (parser connect/pairing, kiểm tra endpoint, ghép config);
+`tests/fixtures/` chứa output mẫu. Test dùng assert và mô phỏng luồng launcher/installer,
+thêm kiểm tra mutex, log, timeout/exit code bằng process PowerShell con;
 thoát khác 0 nếu có lỗi. `phonectl.ps1` giữ phần gọi process, config và nối lại.

@@ -37,8 +37,13 @@ if (-not [string]::IsNullOrWhiteSpace($Serial)) { $deviceArgs = @('-s', $Serial)
 function Invoke-Adb {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-    $output = & $adbPath @deviceArgs @Arguments 2>&1
+    # Windows PowerShell 5.1 turns native stderr lines into ErrorRecords under 2>&1, and
+    # with ErrorActionPreference=Stop the first one (e.g. "daemon not running") aborts
+    # the script. Collect stderr as plain text and judge success by the exit code instead.
+    $ErrorActionPreference = 'Continue'
+    $output = @(& $adbPath @deviceArgs @Arguments 2>&1 | ForEach-Object { "$_" })
     $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
     $message = $output -join [Environment]::NewLine
     if ($exitCode -ne 0 -or $message -match '(?m)^(Error:|Error type \d|Exception occurred)') {
         throw "adb $($Arguments -join ' ') failed (exit $exitCode):`n$message"
@@ -47,7 +52,27 @@ function Invoke-Adb {
 }
 
 $package = 'com.phonectl.adbkeeper'
-Invoke-Adb -Arguments @('get-state') | Out-Host
+# Start the daemon up front so its startup notice is not mixed into later command output.
+$deviceArgsForCommands = $deviceArgs
+$deviceArgs = @()
+Invoke-Adb -Arguments @('start-server') | Out-Null
+$deviceArgs = $deviceArgsForCommands
+# A freshly started daemon needs a few seconds to auto-connect paired phones via mDNS.
+$ready = $false
+for ($i = 0; $i -lt 15 -and -not $ready; $i++) {
+    try { Invoke-Adb -Arguments @('get-state') | Out-Null; $ready = $true }
+    catch {
+        if ($_.Exception.Message -match 'more than one device') {
+            throw 'Several devices are connected. Rerun with -Serial <id> (see: adb devices).'
+        }
+        Start-Sleep -Seconds 1
+    }
+}
+if (-not $ready) {
+    throw ('No phone found after 15 s. Check that Wireless debugging is on and the phone is paired ' +
+        '(adb pair ip:port), or connect it once: adb mdns services, then adb connect ip:port.')
+}
+Write-Host 'Phone connected.'
 Invoke-Adb -Arguments @('install', '-r', $apkPath) | Out-Host
 Invoke-Adb -Arguments @('shell', 'pm', 'grant', $package, 'android.permission.WRITE_SECURE_SETTINGS') | Out-Host
 $sdkLevel = [int]((Invoke-Adb -Arguments @('shell', 'getprop', 'ro.build.version.sdk')) -join '').Trim()
